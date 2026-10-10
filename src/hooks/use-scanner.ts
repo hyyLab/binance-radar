@@ -7,6 +7,7 @@ import type {
   PaperAccountResponse,
   PaperCloseAllResponse,
   PaperCloseResponse,
+  PaperDepositResponse,
   PaperOpenResponse,
   PaperTradesResponse,
   SignalsResponse,
@@ -140,6 +141,24 @@ export function useCloseAllPositions() {
     },
     onError: (err: Error) => {
       toast({ title: '一键平仓失败', description: err.message, variant: 'destructive' });
+    },
+  });
+}
+
+/** 充值（模拟资金，增加总权益，ROI 本金基数同步增加） */
+export function useDeposit() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (amount: number) => postJson<PaperDepositResponse>('/api/paper/deposit', { amount }),
+    onSuccess: (data, amount) => {
+      toast({
+        title: '充值成功',
+        description: `+${amount.toFixed(2)} USDT 已到账 · 当前可用 ${data.balance.toFixed(2)} · 累计充值 ${data.totalDeposited.toFixed(2)}`,
+      });
+      void qc.invalidateQueries({ queryKey: ['paper-account'] });
+    },
+    onError: (err: Error) => {
+      toast({ title: '充值失败', description: err.message, variant: 'destructive' });
     },
   });
 }

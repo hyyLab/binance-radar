@@ -40,7 +40,7 @@ export function TradeModal({
 
   const [symbol, setSymbol] = useState(intent?.symbol ?? 'BTCUSDT');
   const [side, setSide] = useState<'LONG' | 'SHORT'>(intent?.side ?? 'LONG');
-  const [leverage, setLeverage] = useState(10);
+  const [leverage, setLeverage] = useState(20); // 默认 20x
   const [pctIdx, setPctIdx] = useState(1); // 默认 25%
   const [customMargin, setCustomMargin] = useState('');
   const [search, setSearch] = useState('');

@@ -16,6 +16,8 @@ export const INITIAL_CAPITAL = 1000;
 export const MAX_LEVERAGE = 20;
 export const MIN_MARGIN = 5;
 export const MAX_OPEN_POSITIONS = 20;
+export const MIN_DEPOSIT = 10;
+export const MAX_DEPOSIT = 1_000_000;
 const ACCOUNT_NAME = 'default';
 
 const CLOSE_ACTIONS = ['CLOSE_LONG', 'CLOSE_SHORT'];
@@ -137,6 +139,8 @@ export class PaperEngine {
     const feePaid = feeAgg._sum.fee ?? 0;
     const equity = acc.balance + marginUsed + unrealized;
     const decided = closedCount + liqCount;
+    // ROI 本金基数 = 初始资金 + 累计充值（充值不算盈利）
+    const principal = INITIAL_CAPITAL + acc.totalDeposited;
 
     const account: PaperAccountDTO = {
       balance: acc.balance,
@@ -144,12 +148,13 @@ export class PaperEngine {
       unrealizedPnl: unrealized,
       equity,
       initialCapital: INITIAL_CAPITAL,
+      totalDeposited: acc.totalDeposited,
       realizedPnl,
       feePaid,
       winRate: decided > 0 ? (winCount / decided) * 100 : 0,
       closedCount,
       liquidatedCount: liqCount,
-      roiPct: ((equity - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100,
+      roiPct: principal > 0 ? ((equity - principal) / principal) * 100 : 0,
     };
 
     const history: PaperTradeDTO[] = trades.map((t) => ({
@@ -300,6 +305,25 @@ export class PaperEngine {
     return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark };
   }
 
+  /** 充值：增加可用余额与本金基数（不计入盈亏） */
+  async deposit(amount: number): Promise<{ balance: number; totalDeposited: number }> {
+    if (!Number.isFinite(amount) || amount < MIN_DEPOSIT) {
+      throw new PaperError(`单次充值至少 ${MIN_DEPOSIT} USDT`);
+    }
+    if (amount > MAX_DEPOSIT) {
+      throw new PaperError(`单次充值不可超过 ${MAX_DEPOSIT.toLocaleString('en-US')} USDT`);
+    }
+    const acc = await this.getAccount();
+    const updated = await db.paperAccount.update({
+      where: { id: acc.id },
+      data: {
+        balance: { increment: amount },
+        totalDeposited: { increment: amount },
+      },
+    });
+    return { balance: updated.balance, totalDeposited: updated.totalDeposited };
+  }
+
   /** 一键平仓所有持仓：逐仓按标记价市价平掉，跳过行情不可用的仓位 */
   async closeAll(): Promise<{
     closed: number;
@@ -338,7 +362,10 @@ export class PaperEngine {
     await db.$transaction([
       db.paperTrade.deleteMany({ where: { accountId: acc.id } }),
       db.paperPosition.deleteMany({ where: { accountId: acc.id } }),
-      db.paperAccount.update({ where: { id: acc.id }, data: { balance: INITIAL_CAPITAL } }),
+      db.paperAccount.update({
+        where: { id: acc.id },
+        data: { balance: INITIAL_CAPITAL, totalDeposited: 0 },
+      }),
     ]);
   }
 }

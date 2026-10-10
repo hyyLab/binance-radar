@@ -1,6 +1,7 @@
 'use client';
 
-import { useAnomalies } from '@/hooks/use-market';
+import { useMemo } from 'react';
+import { useAnomalies, useTickers } from '@/hooks/use-market';
 import { fmtMult, fmtPrice, fmtTime, fmtVol } from '@/lib/format';
 import type { AnomalyEventDTO } from '@/lib/market/types';
 import { cn } from '@/lib/utils';
@@ -8,18 +9,53 @@ import { TypeBadge } from '@/components/market/shared';
 import { Skeleton } from '@/components/ui/skeleton';
 import { ArrowDownRight, ArrowUpRight, Zap } from 'lucide-react';
 
-/** 按异动类型给出建议交易方向：拉升高位顺势做多 / 跳水破位顺势做空 / 放量按攻防方向 */
-function suggest(ev: AnomalyEventDTO): { side: 'LONG' | 'SHORT'; why: string } {
+/** 24h 趋势阈值：≥ +3% 视为多头趋势，≤ -2% 视为空头趋势 */
+const BULL_TREND_PCT = 3;
+const BEAR_TREND_PCT = -2;
+
+interface Suggestion {
+  side: 'LONG' | 'SHORT';
+  why: string;
+  /** 保守提示（逆势低吸/反抽），徽章用金色标注 */
+  caution?: boolean;
+}
+
+/** 结合 24h 趋势给出建议方向：
+ *  破位（跌破 24h 新低）→ 顺势做空；
+ *  多头趋势中的短时急杀 → 疑似插针洗盘，提示低吸而非追空；
+ *  空头趋势中的短时急拉 → 疑似反抽出货，提示谨慎追多 */
+function suggest(ev: AnomalyEventDTO, chg24: number): Suggestion {
   switch (ev.type) {
     case 'SPIKE_UP':
+      if (chg24 <= BEAR_TREND_PCT) {
+        return {
+          side: 'SHORT',
+          why: `24h 弱势 ${chg24.toFixed(1)}% · 急拉疑似反抽出货，追多需谨慎`,
+        };
+      }
       return { side: 'LONG', why: '短时急拉 · 动量顺势做多' };
     case 'SPIKE_DOWN':
+      if (chg24 >= BULL_TREND_PCT) {
+        return {
+          side: 'LONG',
+          caution: true,
+          why: `24h 强势 +${chg24.toFixed(1)}% · 急杀疑似插针洗盘，可关注低吸，破位前不宜追空`,
+        };
+      }
       return { side: 'SHORT', why: '短时急挫 · 动量顺势做空' };
     case 'BREAKOUT_HIGH':
       return { side: 'LONG', why: '突破 24h 新高 · 破位顺势做多' };
     case 'BREAKOUT_LOW':
+      // 跌破 24h 低点时 24h 必为负（真破位），直接顺势做空
       return { side: 'SHORT', why: '跌破 24h 新低 · 破位顺势做空' };
     case 'VOLUME_SURGE':
+      if (ev.changePct < 0 && chg24 >= BULL_TREND_PCT) {
+        return {
+          side: 'LONG',
+          caution: true,
+          why: `放量下杀但 24h 强势 +${chg24.toFixed(1)}% · 疑似洗盘，关注低吸`,
+        };
+      }
       return ev.changePct >= 0
         ? { side: 'LONG', why: '放量上攻 · 量能顺势做多' }
         : { side: 'SHORT', why: '放量下杀 · 量能顺势做空' };
@@ -34,7 +70,15 @@ export function AnomalyMonitor({
   onSelectSymbol: (symbol: string) => void;
 }) {
   const { data, isLoading } = useAnomalies();
+  const { data: tickersResp } = useTickers();
   const events = (data?.data ?? []).slice(0, 30);
+
+  // 24h 涨跌幅速查表：急杀/急拉的趋势过滤依据
+  const chg24Map = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const t of tickersResp?.data ?? []) m.set(t.symbol, t.change24h);
+    return m;
+  }, [tickersResp]);
 
   return (
     <div className="rounded-lg border border-border/70 bg-card">
@@ -44,7 +88,7 @@ export function AnomalyMonitor({
           异动监控 · 一键交易
         </h3>
         <span className="text-xs text-muted-foreground">
-          按当前异动给出建议方向（拉升高位顺势做多 / 跳水破位顺势做空），可直接模拟开仓
+          急杀急拉结合 24h 趋势过滤：强多头中的急杀提示低吸而非追空，弱空头中的急拉提示反抽而非追多
         </span>
         <span className="ml-auto text-xs text-muted-foreground tabular-nums">
           最近 {events.length} 条 · 5 秒刷新
@@ -72,7 +116,7 @@ export function AnomalyMonitor({
         )}
 
         {events.map((ev) => {
-          const sug = suggest(ev);
+          const sug = suggest(ev, chg24Map.get(ev.symbol) ?? 0);
           const isLong = sug.side === 'LONG';
           return (
             <div
@@ -109,9 +153,11 @@ export function AnomalyMonitor({
                   <span
                     className={cn(
                       'inline-flex items-center gap-1 rounded border px-1.5 py-0.5 font-semibold',
-                      isLong
-                        ? 'border-up/30 bg-up/10 text-up'
-                        : 'border-down/30 bg-down/10 text-down',
+                      sug.caution
+                        ? 'border-gold/40 bg-gold/10 text-gold'
+                        : isLong
+                          ? 'border-up/30 bg-up/10 text-up'
+                          : 'border-down/30 bg-down/10 text-down',
                     )}
                   >
                     {isLong ? (
@@ -119,7 +165,8 @@ export function AnomalyMonitor({
                     ) : (
                       <ArrowDownRight className="h-3 w-3" />
                     )}
-                    建议做{isLong ? '多' : '空'} · {sug.why}
+                    建议做{isLong ? '多' : '空'}
+                    {sug.caution ? '（保守）' : ''} · {sug.why}
                   </span>
                 </div>
               </div>

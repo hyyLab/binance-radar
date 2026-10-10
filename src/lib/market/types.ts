@@ -193,6 +193,7 @@ export interface PaperAccountDTO {
   unrealizedPnl: number;
   equity: number;
   initialCapital: number;
+  totalDeposited: number;
   realizedPnl: number;
   feePaid: number;
   winRate: number;
@@ -228,6 +229,12 @@ export interface PaperCloseAllResponse {
   skipped: number;
   totalPnl: number;
   results: { symbol: string; side: string; pnl: number }[];
+}
+
+export interface PaperDepositResponse {
+  ok: true;
+  balance: number;
+  totalDeposited: number;
 }
 
 export interface PaperTradesResponse {

@@ -30,11 +30,12 @@ model AnomalyEvent {
 
 // 模拟账户（余额 = 可用保证金，不含持仓占用）
 model PaperAccount {
-  id        String   @id @default(cuid())
-  name      String   @unique // 固定 "default"
-  balance   Float
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id             String   @id @default(cuid())
+  name           String   @unique // 固定 "default"
+  balance        Float
+  totalDeposited Float    @default(0) // 累计充值（ROI 本金基数 = 初始资金 + 累计充值）
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
 }
 
 // 模拟持仓（USDT 本位，全仓保证金模式）

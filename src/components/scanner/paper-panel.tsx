@@ -13,6 +13,13 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Table,
@@ -22,11 +29,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useCloseAllPositions, useClosePosition, useResetAccount } from '@/hooks/use-scanner';
+import { useCloseAllPositions, useClosePosition, useDeposit, useResetAccount } from '@/hooks/use-scanner';
 import { fmtPrice, fmtQty, fmtTime } from '@/lib/format';
 import type { PaperAccountResponse, PaperPositionDTO, PaperTradeDTO } from '@/lib/market/types';
 import { cn } from '@/lib/utils';
-import { Bot, History, Layers, RotateCcw, Wallet } from 'lucide-react';
+import { Bot, History, Layers, Plus, RotateCcw, Wallet } from 'lucide-react';
 
 function pnlCls(v: number) {
   if (v > 0) return 'text-up';
@@ -216,6 +223,8 @@ function HistoryList({ history }: { history: PaperTradeDTO[] }) {
   );
 }
 
+const DEPOSIT_PRESETS = [100, 500, 1000, 5000];
+
 export function PaperPanel({
   data,
   loading,
@@ -230,13 +239,28 @@ export function PaperPanel({
   const close = useClosePosition();
   const closeAll = useCloseAllPositions();
   const reset = useResetAccount();
+  const deposit = useDeposit();
   const [resetOpen, setResetOpen] = useState(false);
   const [closeAllOpen, setCloseAllOpen] = useState(false);
+  const [depositOpen, setDepositOpen] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('');
 
   const acc = data?.account;
   const positions = data?.positions ?? [];
   const history = data?.history ?? [];
   const totalUpnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+
+  const depositVal = Number(depositAmount);
+  const depositValid = Number.isFinite(depositVal) && depositVal >= 10 && depositVal <= 1_000_000;
+  const submitDeposit = () => {
+    if (!depositValid || deposit.isPending) return;
+    deposit.mutate(depositVal, {
+      onSuccess: () => {
+        setDepositOpen(false);
+        setDepositAmount('');
+      },
+    });
+  };
 
   return (
     <div className="space-y-4">
@@ -249,9 +273,18 @@ export function PaperPanel({
               模拟建仓系统
             </CardTitle>
             <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold">
-              初始资金 1,000 USDT · 最高 20× · Taker 费率 0.05%
+              本金 {acc ? (acc.initialCapital + acc.totalDeposited).toLocaleString('en-US') : '1,000'} USDT
+              {acc && acc.totalDeposited > 0 ? '（含充值）' : ''} · 最高 20× · Taker 费率 0.05%
             </span>
             <div className="ml-auto flex items-center gap-2">
+              <button
+                onClick={() => setDepositOpen(true)}
+                className="flex items-center gap-1 rounded-md border border-gold/50 bg-gold/10 px-3 py-1.5 text-xs font-bold text-gold transition-colors hover:bg-gold/20"
+                aria-label="充值模拟资金"
+              >
+                <Plus className="h-3.5 w-3.5" />
+                充值
+              </button>
               <button
                 onClick={onManualTrade}
                 className="flex items-center gap-1 rounded-md bg-gold px-3 py-1.5 text-xs font-bold text-background transition-opacity hover:opacity-90"
@@ -305,7 +338,11 @@ export function PaperPanel({
                 sub={`ROI ${acc.roiPct >= 0 ? '+' : ''}${acc.roiPct.toFixed(2)}%`}
                 valueCls={pnlCls(acc.roiPct)}
               />
-              <AccountCard label="可用余额" value={`${acc.balance.toFixed(2)} U`} />
+              <AccountCard
+                label="可用余额"
+                value={`${acc.balance.toFixed(2)} U`}
+                sub={acc.totalDeposited > 0 ? `累计充值 +${acc.totalDeposited.toFixed(0)}` : undefined}
+              />
               <AccountCard
                 label="持仓保证金"
                 value={`${acc.marginUsed.toFixed(2)} U`}
@@ -326,6 +363,49 @@ export function PaperPanel({
           )}
         </CardContent>
       </Card>
+
+      {/* 充值弹窗 */}
+      <Dialog open={depositOpen} onOpenChange={setDepositOpen}>
+        <DialogContent className="w-[min(400px,95vw)]">
+          <DialogTitle className="text-lg font-bold">充值模拟资金</DialogTitle>
+          <DialogDescription className="text-xs">
+            充值直接增加总权益，同步计入 ROI 本金基数（充值不算盈利）
+          </DialogDescription>
+          <div className="grid grid-cols-4 gap-1.5">
+            {DEPOSIT_PRESETS.map((v) => (
+              <button
+                key={v}
+                onClick={() => setDepositAmount(String(v))}
+                className={cn(
+                  'rounded border py-1.5 text-xs font-semibold transition-colors',
+                  depositAmount === String(v)
+                    ? 'border-gold/60 bg-gold/15 text-gold'
+                    : 'border-border text-muted-foreground hover:text-foreground',
+                )}
+              >
+                +{v.toLocaleString('en-US')}
+              </button>
+            ))}
+          </div>
+          <Input
+            value={depositAmount}
+            onChange={(e) => setDepositAmount(e.target.value.replace(/[^\d.]/g, ''))}
+            placeholder="自定义金额（10 ~ 1,000,000 USDT）"
+            inputMode="decimal"
+            aria-label="充值金额"
+          />
+          <button
+            onClick={submitDeposit}
+            disabled={!depositValid || deposit.isPending}
+            className="w-full rounded-md bg-gold py-2.5 text-sm font-bold text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {deposit.isPending ? '到账中…' : depositValid ? `确认充值 +${depositVal.toFixed(2)} U` : '请输入充值金额'}
+          </button>
+          <p className="text-center text-[11px] text-muted-foreground">
+            模拟盘充值 · 无真实资金流动 · 重置账户时充值记录会一并清零
+          </p>
+        </DialogContent>
+      </Dialog>
 
       {/* 持仓 */}
       <Card className="border-border/70 bg-card">

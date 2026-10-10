@@ -217,3 +217,28 @@ Stage Summary:
 - 网站代码无问题；掉线根因是平台沙箱周期回收后台进程
 - keepalive.sh 常驻尽力自愈（存活期间 20s 内恢复）；平台清理守护时需对话侧重新拉起
 - 已向用户说明彻底方案：部署到 Vercel/自有服务器等正式托管
+
+---
+Task ID: 13
+Agent: Super Z (main)
+Task: 默认杠杆 20x + 充值按钮（增加总权益）+ 异动做空建议加入 24h 趋势过滤（强多头急杀提示低吸）
+
+Work Log:
+- trade-modal.tsx：默认杠杆 10→20x（滑块/预填联动最大可开保证金自动跟随）
+- schema.prisma：PaperAccount 新增 totalDeposited 字段（db push 同步）
+- paper.ts：新增 deposit(amount)（校验 10~1,000,000，balance 与 totalDeposited 同步增加）；snapshot ROI 本金基数改为 初始资金+累计充值（充值不计入盈利）；reset 时 totalDeposited 归零
+- 新增 POST /api/paper/deposit + useDeposit hook（toast 显示到账/累计充值）
+- paper-panel.tsx：头部新增金色「+充值」按钮 → Dialog 弹窗（快速 100/500/1000/5000 + 自定义金额）；可用余额卡显示「累计充值 +N」；徽章动态显示本金基数（含充值）
+- anomaly-monitor.tsx：suggest() 引入 24h 趋势过滤（useTickers 构建 chg24Map）
+  - SPIKE_DOWN 且 24h≥+3% → 做多（保守·低吸）：「急杀疑似插针洗盘，破位前不宜追空」，金色徽章标注
+  - VOLUME_SURGE 放量下杀且 24h≥+3% → 同上低吸处理
+  - SPIKE_UP 且 24h≤-2% → 做空：「急拉疑似反抽出货，追多需谨慎」（对称保守）
+  - BREAKOUT_LOW（跌破 24h 新低，24h 必为负）→ 保持顺势做空
+- bun run lint 零错误
+- API 实测：充值 1000 → balance/totalDeposited 正确、ROI (2149.51-2000)/2000=7.48% ✓；金额 5 被拒绝 ✓
+- 逻辑用例 8/8 通过（强多头急杀低吸/中性急杀做空/弱空头急拉反抽/破位顺趋势等）
+- 浏览器截图：默认杠杆 20× ✓、充值按钮+本金徽章「2,000 USDT（含充值）」✓、异动监控新文案生效 ✓
+
+Stage Summary:
+- 开仓默认 20x 杠杆；模拟盘支持充值扩仓，ROI 口径正确（本金=初始+充值）
+- 异动建议从「纯动量」升级为「动量+趋势」：多头趋势中的急杀提示低吸而非追空，空头趋势中的急拉提示反抽而非追多，破位信号维持顺势
