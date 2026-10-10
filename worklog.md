@@ -199,3 +199,21 @@ Stage Summary:
 - UI 端到端：一键平仓全部按钮→确认弹窗→toast「共平仓 2 个仓位 · 总净盈亏 -0.23 USDT」→持仓清空资金回笼
 - 最大可开实测：余额 1142.98/10x → 前端显示最大可开 1137.29（与理论值一致），以 1137.29 开仓成功后余额剩 0.0082（真·拉满）；超 1 分钱 1137.30 被正确拒绝
 - 测试仓已清理，最终 持仓 0 / 可用 1131.61（测试损耗约 11.4 U 模拟手续费）
+
+---
+Task ID: 12
+Agent: Super Z (main)
+Task: 排查「又打不开」+ 尽可能保证持续在线
+
+Work Log:
+- 诊断：dev server 进程被沙箱平台回收（page 000）；环境无 cron/at/pm2/supervisord，用户无 sudo，PID1 为 tini
+- 三种启动方式实测全部被平台清理：setsid nohup、nohup+disown、以及 keepalive 守护脚本本身
+- 编写 .zscripts/keepalive.sh：每 20s 健康检查 localhost:3000，掉线自动 pkill+重启+等待就绪，日志记录 DOWN/RECOVERED
+- keepalive 实测自愈有效（两次 DOWN→RECOVERED 各约 6 秒），但守护进程自身也会在工具调用间隙被平台回收，无法实现跨轮次保活
+- 结论：后台进程回收是沙箱平台层硬约束，应用侧无法彻底对抗；彻底在线需正式部署到外部托管
+- 每轮结束前手动拉起 server 确认 200，保证当轮用户可访问
+
+Stage Summary:
+- 网站代码无问题；掉线根因是平台沙箱周期回收后台进程
+- keepalive.sh 常驻尽力自愈（存活期间 20s 内恢复）；平台清理守护时需对话侧重新拉起
+- 已向用户说明彻底方案：部署到 Vercel/自有服务器等正式托管
