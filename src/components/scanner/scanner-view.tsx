@@ -40,9 +40,9 @@ export function ScannerView() {
           机会扫描器
         </span>
         <span>
-          扫描 24h 涨幅榜 / 跌幅榜 Top40 + 近 4 小时异动币种（已剔除股票 / 商品代币）·
-          榜单每 10 分钟重建、新进榜实时并入 · 3m/5m/15m 均线 + 4h 大级别支撑 · 当前覆盖{' '}
-          {status?.coverage ?? 0} 个
+          扫描 24h 涨幅榜 / 跌幅榜 Top20 + 近 4 小时异动币种（已剔除股票 / 商品代币）·
+          涨幅榜出做多、跌幅榜出做空、异动双向 · 榜单每 10 分钟重建、新进榜实时并入 ·
+          当前覆盖 {status?.coverage ?? 0} 个
           {status?.universe
             ? `（涨 ${status.universe.gainers} / 跌 ${status.universe.losers} / 异动 ${status.universe.anomalies}）`
             : ''}

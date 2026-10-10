@@ -1,9 +1,10 @@
 // ---------- 机会扫描引擎 ----------
 // 每 2 分钟：扫描宇宙 × 3m/5m/15m K 线 → 均线支撑/压力机会（评分 ≥3 输出）
 // 每 5 分钟：4h K 线 → 大级别支撑/压力（分形聚类）
-// 扫描宇宙 = 24h 涨幅榜 Top40 + 跌幅榜 Top40 + 近 4 小时异动币种（剔除代币化股票/商品代币）
+// 扫描宇宙 = 24h 涨幅榜 Top20 + 跌幅榜 Top20 + 近 4 小时异动币种（剔除代币化股票/商品代币）
 //   - 榜单每 10 分钟全量重建（刚开始反抽的新币及时纳入）
 //   - 两次重建之间：新进榜币种 / 新异动币种增量并入，不驱逐已有成员
+//   - 信号方向随榜单：涨幅榜 → 只出做多（回踩支撑）；跌幅榜 → 只出做空（反抽压力）；仅异动 → 双向
 // 单例（globalThis 驻留），扫描结果缓存在内存
 
 import { bFetch, type KlineRow } from './binance';
@@ -11,8 +12,8 @@ import { collector } from './collector';
 import { analyzeLevels, analyzeMa, type MaSignal, type ScannerTF, type SymbolLevels } from './indicators';
 import type { ScannerStatusDTO, TickerSnapshot } from './types';
 
-const GAINERS_TOP = 40; // 涨幅榜取前 40
-const LOSERS_TOP = 40; // 跌幅榜取前 40
+const GAINERS_TOP = 20; // 涨幅榜取前 20
+const LOSERS_TOP = 20; // 跌幅榜取前 20
 const UNIVERSE_REFRESH_MS = 10 * 60_000; // 涨跌幅榜单每 10 分钟全量重建
 const ANOMALY_WINDOW_MS = 4 * 60 * 60_000; // 近 4 小时有异动的币种纳入扫描
 const MAX_UNIVERSE = 200; // 宇宙成员上限（防止增量并入无限膨胀）
@@ -143,7 +144,7 @@ export class MarketScanner {
 
   /**
    * 刷新扫描宇宙：
-   *  - 每 10 分钟全量重建一次（涨幅榜 Top40 + 跌幅榜 Top40 + 近 4h 异动）
+   *  - 每 10 分钟全量重建一次（涨幅榜 Top20 + 跌幅榜 Top20 + 近 4h 异动）
    *  - 两次重建之间增量并入新进榜 / 新异动币种，已有成员不驱逐（保证信号生命周期完整）
    *  - 异动观测记忆化：异动流水环形缓冲仅 300 条，按币种记 4h，避免高频期遗漏
    */
@@ -202,6 +203,11 @@ export class MarketScanner {
       const worker = async () => {
         while (cursor < symbols.length) {
           const t = symbols[cursor++];
+          // 信号方向随榜单来源：涨幅榜→做多、跌幅榜→做空、仅异动→双向
+          // （成员暂时查不到时宽松放行，避免扫描期间宇宙重建导致整轮信号为空）
+          const m = this.universe.get(t.symbol);
+          const allowLong = !m || m.tags.has('UP') || m.tags.has('ANOM');
+          const allowShort = !m || m.tags.has('DOWN') || m.tags.has('ANOM');
           for (const tf of TF_LIST) {
             try {
               const kl = await bFetch<KlineRow[]>('/api/v3/klines', {
@@ -214,7 +220,10 @@ export class MarketScanner {
                 quoteVolume24h: t.quoteVolume24h,
                 now,
               });
-              if (sig) out.push(sig);
+              if (!sig) continue;
+              if (sig.type === 'LONG_MA_SUPPORT' && !allowLong) continue;
+              if (sig.type === 'SHORT_MA_RESIST' && !allowShort) continue;
+              out.push(sig);
             } catch {
               // 单币种/周期失败忽略
             }

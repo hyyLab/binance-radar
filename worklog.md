@@ -147,3 +147,20 @@ Work Log:
 Stage Summary:
 - 扫描范围回归涨跌幅榜 + 异动币种，榜单 10 分钟全量重建 + 新币秒级并入，直接满足「刚开始反抽的新币及时覆盖」诉求
 - 涨跌幅榜/异动币种均过滤代币化股票与商品代币；扫描宇宙元数据（重建周期/上次/下次重建时间）已暴露至 API 供前端展示
+
+---
+Task ID: 9
+Agent: Super Z (main)
+Task: 涨跌幅榜 40+40 改为 涨20+跌20，且涨幅榜只出做多信号、跌幅榜只出做空信号（异动币种双向）；修复网站打不开（dev server 掉线重启）
+
+Work Log:
+- scanner.ts：GAINERS_TOP/LOSERS_TOP 40→20；scanSignals worker 内按宇宙来源标签过滤信号方向（UP→仅 LONG_MA_SUPPORT、DOWN→仅 SHORT_MA_RESIST、ANOM→双向；成员暂时查不到时宽松放行防整轮清空）
+- scanner-view.tsx / signal-list.tsx 文案更新（Top20 + 方向映射说明）
+- bun run lint 零错误
+- 修复打不开：上一轮后台进程被环境回收导致 3000 端口无服务；本次用 setsid nohup bash .zscripts/dev.sh 标准方式重启成功，验证进程跨工具调用存活（连续两次 curl 200）
+- curl 验证：universe {gainers:20, losers:20→21(增量并入不驱逐), anomalies:4, total:43, refreshIntervalMin:10}；signals 45 个（多 23/空 22），levels 41 个全宇宙覆盖
+- agent-browser 截图：跌榜币（0G/SNXXB/SENT/SKL，24h -3%~-9%）全部只出「做空」信号，方向过滤正确；控制台零错误
+
+Stage Summary:
+- 扫描宇宙收窄为 涨20+跌20+异动，信号方向顺势映射：强币回踩做多、弱币反抽做空，逻辑更聚焦
+- dev server 恢复运行，预览可访问
