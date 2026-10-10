@@ -1,0 +1,311 @@
+// ---------- 模拟建仓引擎（Paper Trading） ----------
+// 规则：初始 1000 USDT；最高 20x；Taker 手续费 0.05%（开/平仓都收）；
+// 维持保证金率 0.5%（用于估算强平价）；触及强平价自动清算（亏损全部保证金）
+
+import { db } from '@/lib/db';
+import { collector } from './collector';
+import type {
+  PaperAccountDTO,
+  PaperPositionDTO,
+  PaperTradeDTO,
+} from './types';
+
+export const TAKER_FEE = 0.0005;
+const MMR = 0.005;
+export const INITIAL_CAPITAL = 1000;
+export const MAX_LEVERAGE = 20;
+export const MIN_MARGIN = 5;
+export const MAX_OPEN_POSITIONS = 20;
+const ACCOUNT_NAME = 'default';
+
+const CLOSE_ACTIONS = ['CLOSE_LONG', 'CLOSE_SHORT'];
+
+export class PaperError extends Error {}
+
+export class PaperEngine {
+  private async getAccount() {
+    let acc = await db.paperAccount.findUnique({ where: { name: ACCOUNT_NAME } });
+    if (!acc) {
+      acc = await db.paperAccount.create({
+        data: { name: ACCOUNT_NAME, balance: INITIAL_CAPITAL },
+      });
+    }
+    return acc;
+  }
+
+  private markPrice(symbol: string): number {
+    const row = collector.getTickers().find((t) => t.symbol === symbol);
+    return row ? row.price : 0;
+  }
+
+  /** 强平检查：标记价触及强平价 → 自动清算（每次查询/交易前执行） */
+  private async liquidationCheck(accountId: string): Promise<void> {
+    const open = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
+    for (const p of open) {
+      const mark = this.markPrice(p.symbol);
+      if (mark <= 0) continue;
+      const hit = p.side === 'LONG' ? mark <= p.liqPrice : mark >= p.liqPrice;
+      if (!hit) continue;
+      await db.paperPosition.update({
+        where: { id: p.id },
+        data: { status: 'LIQUIDATED', exitPrice: p.liqPrice, pnl: -p.margin, closedAt: new Date() },
+      });
+      await db.paperTrade.create({
+        data: {
+          accountId,
+          positionId: p.id,
+          symbol: p.symbol,
+          action: 'LIQUIDATE',
+          price: p.liqPrice,
+          qty: p.qty,
+          fee: 0,
+          pnl: -p.margin,
+        },
+      });
+    }
+  }
+
+  private dirSign(side: string): 1 | -1 {
+    return side === 'LONG' ? 1 : -1;
+  }
+
+  async snapshot(): Promise<{
+    account: PaperAccountDTO;
+    positions: PaperPositionDTO[];
+    history: PaperTradeDTO[];
+    ts: number;
+  }> {
+    const acc = await this.getAccount();
+    await this.liquidationCheck(acc.id);
+
+    const openRows = await db.paperPosition.findMany({
+      where: { accountId: acc.id, status: 'OPEN' },
+      orderBy: { openedAt: 'desc' },
+    });
+    const trades = await db.paperTrade.findMany({
+      where: { accountId: acc.id },
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    });
+
+    let unrealized = 0;
+    let marginUsed = 0;
+    const positions: PaperPositionDTO[] = openRows.map((p) => {
+      const mark = this.markPrice(p.symbol) || p.entryPrice;
+      const sign = this.dirSign(p.side);
+      const upnl = (mark - p.entryPrice) * p.qty * sign;
+      unrealized += upnl;
+      marginUsed += p.margin;
+      return {
+        id: p.id,
+        symbol: p.symbol,
+        base: p.base,
+        side: p.side as 'LONG' | 'SHORT',
+        leverage: p.leverage,
+        margin: p.margin,
+        qty: p.qty,
+        entryPrice: p.entryPrice,
+        markPrice: mark,
+        liqPrice: p.liqPrice,
+        notional: p.qty * mark,
+        unrealizedPnl: upnl,
+        roePct: p.margin > 0 ? (upnl / p.margin) * 100 : 0,
+        openedAt: p.openedAt.toISOString(),
+      };
+    });
+
+    const [realAgg, feeAgg, closedCount, liqCount, winCount] = await Promise.all([
+      db.paperTrade.aggregate({
+        where: { accountId: acc.id, action: { in: [...CLOSE_ACTIONS, 'LIQUIDATE'] } },
+        _sum: { pnl: true },
+      }),
+      db.paperTrade.aggregate({ where: { accountId: acc.id }, _sum: { fee: true } }),
+      db.paperPosition.count({ where: { accountId: acc.id, status: 'CLOSED' } }),
+      db.paperPosition.count({ where: { accountId: acc.id, status: 'LIQUIDATED' } }),
+      db.paperTrade.count({
+        where: { accountId: acc.id, action: { in: CLOSE_ACTIONS }, pnl: { gt: 0 } },
+      }),
+    ]);
+
+    const realizedPnl = realAgg._sum.pnl ?? 0;
+    const feePaid = feeAgg._sum.fee ?? 0;
+    const equity = acc.balance + marginUsed + unrealized;
+    const decided = closedCount + liqCount;
+
+    const account: PaperAccountDTO = {
+      balance: acc.balance,
+      marginUsed,
+      unrealizedPnl: unrealized,
+      equity,
+      initialCapital: INITIAL_CAPITAL,
+      realizedPnl,
+      feePaid,
+      winRate: decided > 0 ? (winCount / decided) * 100 : 0,
+      closedCount,
+      liquidatedCount: liqCount,
+      roiPct: ((equity - INITIAL_CAPITAL) / INITIAL_CAPITAL) * 100,
+    };
+
+    const history: PaperTradeDTO[] = trades.map((t) => ({
+      id: t.id,
+      symbol: t.symbol,
+      action: t.action as PaperTradeDTO['action'],
+      price: t.price,
+      qty: t.qty,
+      fee: t.fee,
+      pnl: t.pnl,
+      createdAt: t.createdAt.toISOString(),
+    }));
+
+    return { account, positions, history, ts: Date.now() };
+  }
+
+  async open(input: {
+    symbol: string;
+    side: 'LONG' | 'SHORT';
+    leverage: number;
+    margin: number;
+  }): Promise<PaperPositionDTO> {
+    const symbol = input.symbol.toUpperCase();
+    const price = this.markPrice(symbol);
+    if (price <= 0) throw new PaperError('未知交易对或行情未就绪');
+    if (!Number.isFinite(input.leverage) || input.leverage < 1 || input.leverage > MAX_LEVERAGE) {
+      throw new PaperError(`杠杆需在 1-${MAX_LEVERAGE}x 之间`);
+    }
+    if (!Number.isFinite(input.margin) || input.margin < MIN_MARGIN) {
+      throw new PaperError(`保证金至少 ${MIN_MARGIN} USDT`);
+    }
+
+    const acc = await this.getAccount();
+    await this.liquidationCheck(acc.id);
+
+    const dup = await db.paperPosition.findFirst({
+      where: { accountId: acc.id, status: 'OPEN', symbol, side: input.side },
+    });
+    if (dup) throw new PaperError(`该币种已有${input.side === 'LONG' ? '多' : '空'}单持仓，请先平仓`);
+
+    const openCount = await db.paperPosition.count({ where: { accountId: acc.id, status: 'OPEN' } });
+    if (openCount >= MAX_OPEN_POSITIONS) throw new PaperError(`最多同时持有 ${MAX_OPEN_POSITIONS} 个仓位`);
+
+    const fee = input.margin * input.leverage * TAKER_FEE;
+    if (input.margin + fee > acc.balance) {
+      throw new PaperError(
+        `可用余额不足：需 ${input.margin.toFixed(2)} + 手续费 ${fee.toFixed(2)}，当前可用 ${acc.balance.toFixed(2)}`,
+      );
+    }
+
+    const notional = input.margin * input.leverage;
+    const qty = notional / price;
+    const liqPrice =
+      input.side === 'LONG' ? price * (1 - 1 / input.leverage + MMR) : price * (1 + 1 / input.leverage - MMR);
+
+    const [pos] = await db.$transaction([
+      db.paperPosition.create({
+        data: {
+          accountId: acc.id,
+          symbol,
+          base: symbol.replace(/USDT$/, ''),
+          side: input.side,
+          leverage: input.leverage,
+          margin: input.margin,
+          qty,
+          entryPrice: price,
+          liqPrice,
+          openFee: fee,
+        },
+      }),
+      db.paperAccount.update({ where: { id: acc.id }, data: { balance: { decrement: input.margin + fee } } }),
+      db.paperTrade.create({
+        data: {
+          accountId: acc.id,
+          symbol,
+          action: input.side === 'LONG' ? 'OPEN_LONG' : 'OPEN_SHORT',
+          price,
+          qty,
+          fee,
+          pnl: 0,
+        },
+      }),
+    ]);
+
+    return {
+      id: pos.id,
+      symbol,
+      base: pos.base,
+      side: input.side,
+      leverage: input.leverage,
+      margin: input.margin,
+      qty,
+      entryPrice: price,
+      markPrice: price,
+      liqPrice,
+      notional,
+      unrealizedPnl: 0,
+      roePct: 0,
+      openedAt: pos.openedAt.toISOString(),
+    };
+  }
+
+  async close(positionId: string): Promise<{ pnl: number; symbol: string; side: string; price: number }> {
+    const acc = await this.getAccount();
+    await this.liquidationCheck(acc.id);
+
+    const pos = await db.paperPosition.findUnique({ where: { id: positionId } });
+    if (!pos || pos.accountId !== acc.id) throw new PaperError('仓位不存在');
+    if (pos.status !== 'OPEN') throw new PaperError('该仓位已平仓或已清算');
+
+    const mark = this.markPrice(pos.symbol);
+    if (mark <= 0) throw new PaperError('行情暂不可用，请稍后再试');
+
+    const sign = this.dirSign(pos.side);
+    const grossPnl = (mark - pos.entryPrice) * pos.qty * sign;
+    const closeFee = mark * pos.qty * TAKER_FEE;
+    const netPnl = grossPnl - closeFee;
+
+    await db.$transaction([
+      db.paperPosition.update({
+        where: { id: pos.id },
+        data: {
+          status: 'CLOSED',
+          exitPrice: mark,
+          pnl: grossPnl,
+          closeFee,
+          closedAt: new Date(),
+        },
+      }),
+      db.paperAccount.update({
+        where: { id: acc.id },
+        data: { balance: { increment: pos.margin + grossPnl - closeFee } },
+      }),
+      db.paperTrade.create({
+        data: {
+          accountId: acc.id,
+          positionId: pos.id,
+          symbol: pos.symbol,
+          action: pos.side === 'LONG' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
+          price: mark,
+          qty: pos.qty,
+          fee: closeFee,
+          pnl: netPnl,
+        },
+      }),
+    ]);
+
+    return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark };
+  }
+
+  async reset(): Promise<void> {
+    const acc = await this.getAccount();
+    await db.$transaction([
+      db.paperTrade.deleteMany({ where: { accountId: acc.id } }),
+      db.paperPosition.deleteMany({ where: { accountId: acc.id } }),
+      db.paperAccount.update({ where: { id: acc.id }, data: { balance: INITIAL_CAPITAL } }),
+    ]);
+  }
+}
+
+const g = globalThis as typeof globalThis & {
+  __binanceRadarPaper?: PaperEngine;
+};
+
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper ??= new PaperEngine());

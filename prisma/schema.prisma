@@ -25,3 +25,53 @@ model AnomalyEvent {
   @@index([symbol, createdAt(sort: Desc)])
   @@index([type, createdAt(sort: Desc)])
 }
+
+// ---------- 模拟建仓系统 ----------
+
+// 模拟账户（余额 = 可用保证金，不含持仓占用）
+model PaperAccount {
+  id        String   @id @default(cuid())
+  name      String   @unique // 固定 "default"
+  balance   Float
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+// 模拟持仓（USDT 本位，全仓保证金模式）
+model PaperPosition {
+  id         String    @id @default(cuid())
+  accountId  String
+  symbol     String
+  base       String
+  side       String // LONG | SHORT
+  leverage   Float
+  margin     Float // 初始保证金
+  qty        Float // 币数量
+  entryPrice Float
+  liqPrice   Float // 预估强平价
+  openFee    Float     @default(0)
+  status     String    @default("OPEN") // OPEN | CLOSED | LIQUIDATED
+  exitPrice  Float?
+  pnl        Float? // 已实现毛盈亏
+  closeFee   Float     @default(0)
+  openedAt   DateTime  @default(now())
+  closedAt   DateTime?
+
+  @@index([accountId, status])
+}
+
+// 模拟成交流水
+model PaperTrade {
+  id         String   @id @default(cuid())
+  accountId  String
+  positionId String?
+  symbol     String
+  action     String // OPEN_LONG | OPEN_SHORT | CLOSE_LONG | CLOSE_SHORT | LIQUIDATE
+  price      Float
+  qty        Float
+  fee        Float    @default(0)
+  pnl        Float    @default(0) // 平仓净盈亏（扣手续费）；强平为 -margin
+  createdAt  DateTime @default(now())
+
+  @@index([accountId, createdAt(sort: Desc)])
+}

@@ -104,3 +104,102 @@ export interface ApiError {
   ok: false;
   error: string;
 }
+
+// ---------- 机会扫描 ----------
+
+export type { MaSignal, MajorLevel, SymbolLevels } from './indicators';
+import type { MaSignal, SymbolLevels } from './indicators';
+
+export interface ScannerStatusDTO {
+  scanning: boolean;
+  levelScanning: boolean;
+  lastSignalScanAt: number;
+  lastLevelScanAt: number;
+  coverage: number;
+}
+
+export interface SignalsResponse {
+  ok: true;
+  ts: number;
+  status: ScannerStatusDTO;
+  data: MaSignal[];
+}
+
+export interface LevelsResponse {
+  ok: true;
+  ts: number;
+  status: ScannerStatusDTO;
+  data: SymbolLevels[];
+}
+
+// ---------- 模拟建仓 ----------
+
+export type TradeAction =
+  | 'OPEN_LONG'
+  | 'OPEN_SHORT'
+  | 'CLOSE_LONG'
+  | 'CLOSE_SHORT'
+  | 'LIQUIDATE';
+
+export interface PaperPositionDTO {
+  id: string;
+  symbol: string;
+  base: string;
+  side: 'LONG' | 'SHORT';
+  leverage: number;
+  margin: number;
+  qty: number;
+  entryPrice: number;
+  markPrice: number;
+  liqPrice: number;
+  notional: number;
+  unrealizedPnl: number;
+  roePct: number;
+  openedAt: string;
+}
+
+export interface PaperTradeDTO {
+  id: string;
+  symbol: string;
+  action: TradeAction;
+  price: number;
+  qty: number;
+  fee: number;
+  pnl: number;
+  createdAt: string;
+}
+
+export interface PaperAccountDTO {
+  balance: number;
+  marginUsed: number;
+  unrealizedPnl: number;
+  equity: number;
+  initialCapital: number;
+  realizedPnl: number;
+  feePaid: number;
+  winRate: number;
+  closedCount: number;
+  liquidatedCount: number;
+  roiPct: number;
+}
+
+export interface PaperAccountResponse {
+  ok: true;
+  ts: number;
+  account: PaperAccountDTO;
+  positions: PaperPositionDTO[];
+  history: PaperTradeDTO[];
+}
+
+export interface PaperOpenResponse {
+  ok: true;
+  position: PaperPositionDTO;
+}
+
+export interface PaperCloseResponse {
+  ok: true;
+  symbol: string;
+  side: string;
+  price: number;
+  pnl: number;
+}

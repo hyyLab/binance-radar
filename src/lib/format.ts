@@ -25,6 +25,17 @@ export function fmtVol(v: number | null | undefined): string {
   return v.toFixed(0);
 }
 
+/** 成交数量：按量级动态精度 */
+export function fmtQty(v: number | null | undefined): string {
+  if (v == null || !Number.isFinite(v)) return '—';
+  const abs = Math.abs(v);
+  if (abs >= 100_000) return Math.round(v).toLocaleString('en-US');
+  if (abs >= 1000) return v.toLocaleString('en-US', { maximumFractionDigits: 1 });
+  if (abs >= 1) return v.toFixed(3);
+  if (abs >= 0.01) return v.toFixed(5);
+  return v.toPrecision(4);
+}
+
 export function fmtMult(v: number | null | undefined): string {
   if (v == null || !Number.isFinite(v)) return '—';
   return v.toFixed(1) + '×';
