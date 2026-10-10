@@ -66,3 +66,18 @@ Work Log:
 Stage Summary:
 - 热门池实测：134 个币种（DOT/ZK 三标签 VOL+UP+SURGE）；扫描范围从纯成交额 Top120 → 热门池优先，信号覆盖面显著扩大
 - K 线弹窗现在同时展示：K 线 + 成本线 + 强平线 + 持仓摘要，闭环「扫描 → 开仓 → 图上看持仓」
+
+---
+Task ID: 4
+Agent: Super Z (main agent)
+Task: K 线图记录并标注开仓位置与平仓位置
+
+Work Log:
+- 新增 GET /api/paper/trades?symbol=&limit=：按币种查询模拟交易流水（PaperEngine 补公开 getAccountId 方法）
+- kline-chart 接入 lightweight-charts v5 标记插件 createSeriesMarkers；ChartTradeMarker（timeMs/position/shape/color/text）由图表二分对齐到事件时刻（或之前最近）的 K 线，+8h 时区偏移与蜡烛一致
+- coin-dialog：usePaperTrades 拉取该币种流水 → 构建标记（开多▲绿/开空▼红标开仓价；平多/平空箭头按盈亏绿红着色标净盈亏；强平单独红标）→ 传入图表；底部新增「该币种已记录 N 笔交易 · ▲开仓 ▼平仓」说明条
+- 运维：发现重复重启导致双 next dev 进程争抢资源（命令超时），清理后单实例启动恢复；确认 dev.sh 方式启动可跨会话存活
+- 验证：trades API 返回 BTC 4 笔（2 开 2 平）；浏览器确认图上「开多 82,794.43 / 开多 82,728.64 / 平多 -1.19 / 平多 -0.50」箭头精确定位；控制台与 lint 零错误
+
+Stage Summary:
+- 复盘闭环完成：扫描 → 一键开仓 → K 线看成本线/强平线 → 平仓后图上永久保留开/平仓箭头（含盈亏），SQLite 流水支撑

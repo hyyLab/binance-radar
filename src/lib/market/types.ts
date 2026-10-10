@@ -212,3 +212,10 @@ export interface PaperCloseResponse {
   price: number;
   pnl: number;
 }
+
+export interface PaperTradesResponse {
+  ok: true;
+  ts: number;
+  count: number;
+  data: PaperTradeDTO[];
+}

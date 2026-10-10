@@ -7,6 +7,7 @@ import type {
   PaperAccountResponse,
   PaperCloseResponse,
   PaperOpenResponse,
+  PaperTradesResponse,
   SignalsResponse,
 } from '@/lib/market/types';
 
@@ -58,6 +59,19 @@ export function usePaperAccount() {
     queryFn: () => getJson<PaperAccountResponse>('/api/paper/account'),
     refetchInterval: 3000,
     staleTime: 2000,
+    placeholderData: (prev) => prev,
+  });
+}
+
+/** 按币种查询交易流水（K 线图标注开仓/平仓位置用） */
+export function usePaperTrades(symbol: string | null) {
+  return useQuery({
+    queryKey: ['paper-trades', symbol],
+    queryFn: () =>
+      getJson<PaperTradesResponse>(`/api/paper/trades?symbol=${encodeURIComponent(symbol ?? '')}`),
+    enabled: !!symbol,
+    refetchInterval: 15_000,
+    staleTime: 10_000,
     placeholderData: (prev) => prev,
   });
 }

@@ -4,11 +4,11 @@ import { useMemo, useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useKlines, useTickers } from '@/hooks/use-market';
-import { usePaperAccount } from '@/hooks/use-scanner';
+import { usePaperAccount, usePaperTrades } from '@/hooks/use-scanner';
 import { fmtPct, fmtPrice, fmtVol, pctClass } from '@/lib/format';
 import type { TickerSnapshot } from '@/lib/market/types';
 import { cn } from '@/lib/utils';
-import { KlineChart, type ChartPriceLine } from './kline-chart';
+import { KlineChart, type ChartPriceLine, type ChartTradeMarker } from './kline-chart';
 import { PctBadge } from './shared';
 
 const INTERVALS = [
@@ -40,6 +40,7 @@ export function CoinDialog({
   const { data: klines, isLoading } = useKlines(symbol, interval, !!symbol);
   const { data: tickersResp } = useTickers();
   const { data: paper } = usePaperAccount();
+  const { data: tradesResp } = usePaperTrades(symbol);
 
   const ticker: TickerSnapshot | undefined = symbol
     ? tickersResp?.data.find((t) => t.symbol === symbol)
@@ -71,6 +72,35 @@ export function CoinDialog({
     }
     return lines;
   }, [myPositions]);
+
+  // 历史交易 → 开仓/平仓位置标记（▲开仓 ▼平仓，颜色按方向/盈亏）
+  const tradeMarkers = useMemo<ChartTradeMarker[]>(() => {
+    const list = tradesResp?.data ?? [];
+    const out: ChartTradeMarker[] = [];
+    for (const t of list) {
+      const ts = new Date(t.createdAt).getTime();
+      const p = t.price;
+      const pnlTxt = `${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}`;
+      switch (t.action) {
+        case 'OPEN_LONG':
+          out.push({ timeMs: ts, position: 'belowBar', shape: 'arrowUp', color: '#0ecb81', text: `开多 ${fmtPrice(p)}` });
+          break;
+        case 'OPEN_SHORT':
+          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: '#f6465d', text: `开空 ${fmtPrice(p)}` });
+          break;
+        case 'CLOSE_LONG':
+          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: t.pnl >= 0 ? '#0ecb81' : '#f6465d', text: `平多 ${pnlTxt}` });
+          break;
+        case 'CLOSE_SHORT':
+          out.push({ timeMs: ts, position: 'belowBar', shape: 'arrowUp', color: t.pnl >= 0 ? '#0ecb81' : '#f6465d', text: `平空 ${pnlTxt}` });
+          break;
+        case 'LIQUIDATE':
+          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: '#f6465d', text: '强平' });
+          break;
+      }
+    }
+    return out;
+  }, [tradesResp]);
 
   return (
     <Dialog open={!!symbol} onOpenChange={(open) => !open && onClose()}>
@@ -115,7 +145,7 @@ export function CoinDialog({
         {isLoading && klines == null ? (
           <Skeleton className="h-[340px] w-full" />
         ) : klines && klines.data.length > 0 ? (
-          <KlineChart data={klines.data} priceLines={priceLines} />
+          <KlineChart data={klines.data} priceLines={priceLines} markers={tradeMarkers} />
         ) : (
           <div className="flex h-[340px] items-center justify-center rounded-lg border border-border/70 text-sm text-muted-foreground">
             {klines ? '暂无 K 线数据' : 'K 线加载失败，请稍后重试'}
@@ -136,7 +166,14 @@ export function CoinDialog({
                     {p.unrealizedPnl.toFixed(2)} U
                   </span>
                 ))}
-                <span className="ml-auto text-muted-foreground">已标注在 K 线图上</span>
+              </div>
+            )}
+            {(tradesResp?.data.length ?? 0) > 0 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-md bg-secondary/40 px-3 py-1.5 text-xs text-muted-foreground">
+                <span className="font-semibold text-foreground">
+                  该币种已记录 {tradesResp?.data.length} 笔交易
+                </span>
+                <span>▲ 开仓 · ▼ 平仓/强平（绿=盈利 红=亏损），位置已标注在 K 线上</span>
               </div>
             )}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

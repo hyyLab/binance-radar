@@ -33,6 +33,12 @@ export class PaperEngine {
     return acc;
   }
 
+  /** 公开：获取（或初始化）默认账户 ID */
+  async getAccountId(): Promise<string> {
+    const acc = await this.getAccount();
+    return acc.id;
+  }
+
   private markPrice(symbol: string): number {
     const row = collector.getTickers().find((t) => t.symbol === symbol);
     return row ? row.price : 0;

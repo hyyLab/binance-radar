@@ -7,9 +7,11 @@ import {
   HistogramSeries,
   LineStyle,
   createChart,
+  createSeriesMarkers,
   type IChartApi,
   type IPriceLine,
   type ISeriesApi,
+  type SeriesMarker,
   type UTCTimestamp,
 } from 'lightweight-charts';
 import { pricePrecision } from '@/lib/format';
@@ -25,20 +27,32 @@ export interface ChartPriceLine {
   dashed?: boolean;
 }
 
+/** 交易事件标记：timeMs 为事件发生时间（毫秒），由图表对齐到对应 K 线 */
+export interface ChartTradeMarker {
+  timeMs: number;
+  position: 'aboveBar' | 'belowBar';
+  shape: 'arrowUp' | 'arrowDown' | 'circle';
+  color: string;
+  text: string;
+}
+
 export function KlineChart({
   data,
   height = 340,
   priceLines,
+  markers,
 }: {
   data: KlinePoint[];
   height?: number;
   priceLines?: ChartPriceLine[];
+  markers?: ChartTradeMarker[];
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const priceLineRefs = useRef<IPriceLine[]>([]);
+  const markersPluginRef = useRef<ReturnType<typeof createSeriesMarkers> | null>(null);
 
   // 初始化图表（仅一次）
   useEffect(() => {
@@ -75,6 +89,7 @@ export function KlineChart({
       wickDownColor: DOWN,
     });
     candleRef.current = candle;
+    markersPluginRef.current = createSeriesMarkers(candle, []);
 
     const vol = chart.addSeries(HistogramSeries, {
       priceFormat: { type: 'volume' },
@@ -90,6 +105,7 @@ export function KlineChart({
       chartRef.current = null;
       candleRef.current = null;
       volRef.current = null;
+      markersPluginRef.current = null;
     };
   }, []);
 
@@ -160,6 +176,46 @@ export function KlineChart({
       }
     }
   }, [priceLines, linesKey, data]);
+
+  // 交易事件标记：对齐到事件发生时刻（或之前最近）的 K 线
+  useEffect(() => {
+    const plugin = markersPluginRef.current;
+    if (!plugin) return;
+    const times = data.map((d) => d.t);
+    const out: SeriesMarker<UTCTimestamp>[] = [];
+    if (times.length > 0 && markers && markers.length > 0) {
+      for (const m of markers) {
+        if (!Number.isFinite(m.timeMs)) continue;
+        // 二分找最后一根 openTime ≤ 事件时间的 K 线
+        let lo = 0;
+        let hi = times.length - 1;
+        let idx = -1;
+        while (lo <= hi) {
+          const mid = (lo + hi) >> 1;
+          if (times[mid] <= m.timeMs) {
+            idx = mid;
+            lo = mid + 1;
+          } else {
+            hi = mid - 1;
+          }
+        }
+        if (idx < 0) continue; // 事件早于图内首根 K 线，跳过
+        out.push({
+          time: (Math.floor(times[idx] / 1000) + 8 * 3600) as UTCTimestamp,
+          position: m.position,
+          color: m.color,
+          shape: m.shape,
+          text: m.text,
+        });
+      }
+      out.sort((a, b) => (a.time as number) - (b.time as number));
+    }
+    try {
+      plugin.setMarkers(out);
+    } catch {
+      // 图表销毁竞态忽略
+    }
+  }, [markers, data]);
 
   return (
     <div className="relative w-full" style={{ height }}>
