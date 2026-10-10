@@ -222,6 +222,14 @@ export interface PaperCloseResponse {
   pnl: number;
 }
 
+export interface PaperCloseAllResponse {
+  ok: true;
+  closed: number;
+  skipped: number;
+  totalPnl: number;
+  results: { symbol: string; side: string; pnl: number }[];
+}
+
 export interface PaperTradesResponse {
   ok: true;
   ts: number;

@@ -49,15 +49,20 @@ export function TradeModal({
   const price = ticker?.price ?? 0;
   const balance = paper?.account.balance ?? 0;
 
+  // 最大可开保证金：需满足 margin + margin×杠杆×费率 ≤ 余额
+  // 即 margin ≤ 余额 / (1 + 杠杆×费率)，向下取整到分，保证 100% 也能直接成交
+  const maxMargin =
+    balance > 0 ? Math.floor((balance / (1 + leverage * TAKER_FEE)) * 100) / 100 : 0;
+
   const suggestions = useMemo(() => {
     const kw = search.trim().toUpperCase();
     const src = kw ? hot.filter((t) => t.symbol.includes(kw)) : hot;
     return src.slice(0, 8);
   }, [hot, search]);
 
-  const presetMargin = balance * MARGIN_PRESETS[pctIdx];
+  const presetMargin = balance > 0 ? Math.min(balance * MARGIN_PRESETS[pctIdx], maxMargin) : 0;
   const margin = customMargin.trim() !== '' ? Number(customMargin) : presetMargin;
-  const marginValid = Number.isFinite(margin) && margin >= 5 && margin <= balance;
+  const marginValid = Number.isFinite(margin) && margin >= 5 && margin <= maxMargin + 1e-9;
   const notional = marginValid ? margin * leverage : 0;
   const fee = notional * TAKER_FEE;
   const qty = price > 0 && notional > 0 ? notional / price : 0;
@@ -69,7 +74,7 @@ export function TradeModal({
       : 0;
 
   const canSubmit =
-    marginValid && price > 0 && !!ticker && !openMutation.isPending && margin + fee <= balance;
+    marginValid && price > 0 && !!ticker && !openMutation.isPending && margin + fee <= balance + 1e-9;
 
   const submit = () => {
     if (!canSubmit || !ticker) return;
@@ -205,7 +210,10 @@ export function TradeModal({
         <div>
           <div className="mb-1.5 flex items-center justify-between text-xs">
             <span className="text-muted-foreground">保证金（USDT）</span>
-            <span className="tabular-nums text-muted-foreground">可用 {balance.toFixed(2)}</span>
+            <span className="tabular-nums text-muted-foreground">
+              可用 {balance.toFixed(2)} · 最大可开
+              <span className="ml-1 font-semibold text-gold">{maxMargin.toFixed(2)}</span>
+            </span>
           </div>
           <div className="flex gap-1.5">
             {MARGIN_PRESETS.map((p, i) => (
@@ -222,14 +230,14 @@ export function TradeModal({
                     : 'border-border text-muted-foreground hover:text-foreground',
                 )}
               >
-                {p * 100}%
+                {p >= 1 ? '最大' : `${p * 100}%`}
               </button>
             ))}
           </div>
           <input
             value={customMargin}
             onChange={(e) => setCustomMargin(e.target.value.replace(/[^\d.]/g, ''))}
-            placeholder={`自定义（≥5，当前 ${marginValid ? margin.toFixed(2) : '—'}）`}
+            placeholder={`自定义（5 ~ ${maxMargin.toFixed(2)}，当前 ${marginValid ? margin.toFixed(2) : '—'}）`}
             className={cn(inputCls, 'mt-1.5')}
             inputMode="decimal"
             aria-label="自定义保证金"
@@ -261,8 +269,8 @@ export function TradeModal({
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
             {balance < 5
               ? '可用余额不足 5 USDT，请先平仓回笼资金或重置账户'
-              : margin > balance
-                ? '保证金超过可用余额，请调低金额或比例'
+              : margin > maxMargin
+                ? `超过最大可开保证金 ${maxMargin.toFixed(2)} U（需预留开仓手续费），已自动拉满可直接成交`
                 : '保证金至少 5 USDT'}
           </div>
         )}

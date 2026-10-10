@@ -180,3 +180,22 @@ Work Log:
 
 Stage Summary:
 - 异动监控在扫描页可直接交易，方向建议与一键开仓联动，形成「发现异动→判断方向→立即建仓」闭环
+
+---
+Task ID: 11
+Agent: Super Z (main)
+Task: 一键平仓所有交易对按钮 + 修复 100% 买入无法成交（改为最大可买入量直接拉满）
+
+Work Log:
+- paper.ts 新增 closeAll()：逐仓复用 close()（各自事务互不影响），返回 {closed, skipped, totalPnl, 逐仓明细}；行情不可用的仓位安全跳过
+- types.ts 新增 PaperCloseAllResponse；新建 POST /api/paper/close-all 路由
+- use-scanner.ts 新增 useCloseAllPositions：toast 汇总「共平仓 N 个仓位 · 总净盈亏 ±X USDT」
+- paper-panel.tsx 持仓卡片头部新增红色「一键平仓全部」按钮（仅持仓>0 显示 + 仓位计数徽章），AlertDialog 确认弹窗展示仓位数与预估未实现盈亏（未含平仓手续费）
+- trade-modal.tsx 修复 100% 问题：根因是 margin=balance 时 margin+手续费>余额 永远被拒；新增 maxMargin = floor(余额/(1+杠杆×0.0005)×100)/100（随杠杆联动），100% 档改名「最大」取 min(余额×p, maxMargin)，校验与提交均按 maxMargin，标签行显示「可用 X · 最大可开 Y」，错误文案提示超限需预留手续费
+- bun run lint 零错误；dev server 多次被环境回收，全部采用「单命令内重启+等待就绪+验证」模式
+
+Stage Summary:
+- API 实测：close-all 6 仓全平（closed:6 skipped:0，逐仓明细正确，账目自洽 206.15+965.43-28.22=1143.37）
+- UI 端到端：一键平仓全部按钮→确认弹窗→toast「共平仓 2 个仓位 · 总净盈亏 -0.23 USDT」→持仓清空资金回笼
+- 最大可开实测：余额 1142.98/10x → 前端显示最大可开 1137.29（与理论值一致），以 1137.29 开仓成功后余额剩 0.0082（真·拉满）；超 1 分钱 1137.30 被正确拒绝
+- 测试仓已清理，最终 持仓 0 / 可用 1131.61（测试损耗约 11.4 U 模拟手续费）

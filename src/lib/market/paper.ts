@@ -300,6 +300,39 @@ export class PaperEngine {
     return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark };
   }
 
+  /** 一键平仓所有持仓：逐仓按标记价市价平掉，跳过行情不可用的仓位 */
+  async closeAll(): Promise<{
+    closed: number;
+    skipped: number;
+    totalPnl: number;
+    results: { symbol: string; side: string; pnl: number }[];
+  }> {
+    const acc = await this.getAccount();
+    await this.liquidationCheck(acc.id);
+
+    const open = await db.paperPosition.findMany({
+      where: { accountId: acc.id, status: 'OPEN' },
+      orderBy: { openedAt: 'asc' },
+    });
+
+    const results: { symbol: string; side: string; pnl: number }[] = [];
+    let skipped = 0;
+    let totalPnl = 0;
+
+    for (const p of open) {
+      // 逐仓复用 close（内部各自走事务，单仓失败不影响其余仓位）
+      try {
+        const r = await this.close(p.id);
+        results.push({ symbol: r.symbol, side: r.side, pnl: r.pnl });
+        totalPnl += r.pnl;
+      } catch {
+        skipped += 1;
+      }
+    }
+
+    return { closed: results.length, skipped, totalPnl, results };
+  }
+
   async reset(): Promise<void> {
     const acc = await this.getAccount();
     await db.$transaction([

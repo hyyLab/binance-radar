@@ -22,11 +22,11 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table';
-import { useClosePosition, useResetAccount } from '@/hooks/use-scanner';
+import { useCloseAllPositions, useClosePosition, useResetAccount } from '@/hooks/use-scanner';
 import { fmtPrice, fmtQty, fmtTime } from '@/lib/format';
 import type { PaperAccountResponse, PaperPositionDTO, PaperTradeDTO } from '@/lib/market/types';
 import { cn } from '@/lib/utils';
-import { Bot, History, RotateCcw, Wallet } from 'lucide-react';
+import { Bot, History, Layers, RotateCcw, Wallet } from 'lucide-react';
 
 function pnlCls(v: number) {
   if (v > 0) return 'text-up';
@@ -228,12 +228,15 @@ export function PaperPanel({
   onManualTrade: () => void;
 }) {
   const close = useClosePosition();
+  const closeAll = useCloseAllPositions();
   const reset = useResetAccount();
   const [resetOpen, setResetOpen] = useState(false);
+  const [closeAllOpen, setCloseAllOpen] = useState(false);
 
   const acc = data?.account;
   const positions = data?.positions ?? [];
   const history = data?.history ?? [];
+  const totalUpnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
 
   return (
     <div className="space-y-4">
@@ -327,7 +330,53 @@ export function PaperPanel({
       {/* 持仓 */}
       <Card className="border-border/70 bg-card">
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-bold">当前持仓</CardTitle>
+          <div className="flex items-center justify-between gap-2">
+            <CardTitle className="flex items-center gap-2 text-sm font-bold">
+              当前持仓
+              {positions.length > 0 && (
+                <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold tabular-nums">
+                  {positions.length}
+                </span>
+              )}
+            </CardTitle>
+            {positions.length > 0 && (
+              <AlertDialog open={closeAllOpen} onOpenChange={setCloseAllOpen}>
+                <AlertDialogTrigger asChild>
+                  <button
+                    disabled={closeAll.isPending}
+                    className="flex items-center gap-1 rounded-md bg-down px-3 py-1.5 text-xs font-bold text-background transition-opacity hover:opacity-90 disabled:opacity-50"
+                    aria-label="一键平仓所有持仓"
+                  >
+                    <Layers className="h-3.5 w-3.5" />
+                    {closeAll.isPending ? '平仓中…' : '一键平仓全部'}
+                  </button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>确认平掉全部 {positions.length} 个持仓？</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      将按最新标记价市价平仓所有交易对，预估未实现盈亏{' '}
+                      <span className={cn('font-bold tabular-nums', pnlCls(totalUpnl))}>
+                        {totalUpnl >= 0 ? '+' : ''}
+                        {totalUpnl.toFixed(2)} USDT
+                      </span>
+                      （未含平仓手续费）。此操作不可撤销。
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>取消</AlertDialogCancel>
+                    <AlertDialogAction
+                      onClick={() => closeAll.mutate()}
+                      disabled={closeAll.isPending}
+                      className="bg-down text-background hover:bg-down/90"
+                    >
+                      {closeAll.isPending ? '平仓中…' : '确认全部平仓'}
+                    </AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            )}
+          </div>
         </CardHeader>
         <CardContent className="p-0">
           <div className="custom-scroll overflow-x-auto">

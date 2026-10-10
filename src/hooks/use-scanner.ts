@@ -5,6 +5,7 @@ import { toast } from '@/hooks/use-toast';
 import type {
   LevelsResponse,
   PaperAccountResponse,
+  PaperCloseAllResponse,
   PaperCloseResponse,
   PaperOpenResponse,
   PaperTradesResponse,
@@ -117,6 +118,28 @@ export function useClosePosition() {
     },
     onError: (err: Error) => {
       toast({ title: '平仓失败', description: err.message, variant: 'destructive' });
+    },
+  });
+}
+
+/** 一键平仓所有持仓 */
+export function useCloseAllPositions() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: () => postJson<PaperCloseAllResponse>('/api/paper/close-all', {}),
+    onSuccess: (data) => {
+      const profit = data.totalPnl >= 0;
+      const parts: string[] = [`共平仓 ${data.closed} 个仓位`];
+      if (data.skipped > 0) parts.push(`${data.skipped} 个因行情不可用跳过`);
+      toast({
+        title: '全部持仓已平仓',
+        description: `${parts.join('，')} · 总净盈亏 ${profit ? '+' : ''}${data.totalPnl.toFixed(2)} USDT`,
+        variant: profit ? 'default' : 'destructive',
+      });
+      void qc.invalidateQueries({ queryKey: ['paper-account'] });
+    },
+    onError: (err: Error) => {
+      toast({ title: '一键平仓失败', description: err.message, variant: 'destructive' });
     },
   });
 }
