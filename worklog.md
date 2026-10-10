@@ -126,3 +126,24 @@ Work Log:
 
 Stage Summary:
 - 扫描范围最终形态：最活跃 Top20 纯虚拟币，信号干净聚焦主流币
+
+---
+Task ID: 8
+Agent: Super Z (main)
+Task: 机会扫描范围改回「涨幅榜 + 跌幅榜」，榜单每 10 分钟刷新（新反抽币及时纳入），并把异动监控币种加入扫描；保留股票代币排除
+
+Work Log:
+- 重写 src/lib/market/scanner.ts：SCAN_TOP=20 活跃币模式 → 宇宙成员制（Map<symbol, {tags, joinedAt}>）
+  - 宇宙 = 24h 涨幅榜 Top40（UP）+ 跌幅榜 Top40（DOWN）+ 近 4h 异动币种（ANOM，多标签可叠加）
+  - UNIVERSE_REFRESH_MS=10min 全量重建；两次重建之间 boards 增量比对，新进榜/新异动币种实时并入且不驱逐旧成员（保证信号生命周期完整）
+  - anomalySeen 记忆化：collector 异动环形缓冲仅 300 条，按币种记 4h 防高频期遗漏；MAX_UNIVERSE=200 防膨胀
+  - 保留股票代币排除（STOCK_TICKERS + B 后缀规则 MSTRB/CRCLB 等）与商品/稳定币排除
+- types.ts：ScannerStatusDTO.universe 扩展 total / refreshIntervalMin / lastRefreshAt / nextRefreshAt
+- scanner-view.tsx 状态条与 signal-list.tsx 空态文案同步新范围与刷新机制
+- bun run lint 零错误；dev server 重启（注：本会话环境后台进程跨工具调用会被清理，改为「单条命令内启动+等待+验证」模式）
+- curl 验证 /api/scanner/signals：universe {gainers:40, losers:40, total:80, refreshIntervalMin:10}，signals 60 个
+- agent-browser 端到端：切到「机会扫描·模拟盘」视图，状态条显示「覆盖 81 个（涨 40 / 跌 40 / 异动 1）」，异动币种已实时纳入，控制台零错误
+
+Stage Summary:
+- 扫描范围回归涨跌幅榜 + 异动币种，榜单 10 分钟全量重建 + 新币秒级并入，直接满足「刚开始反抽的新币及时覆盖」诉求
+- 涨跌幅榜/异动币种均过滤代币化股票与商品代币；扫描宇宙元数据（重建周期/上次/下次重建时间）已暴露至 API 供前端展示

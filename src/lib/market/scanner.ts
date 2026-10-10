@@ -1,16 +1,24 @@
 // ---------- 机会扫描引擎 ----------
-// 每 2 分钟：Top120 币种 × 3m/5m/15m K 线 → 均线支撑/压力机会（评分 ≥3 输出）
-// 每 5 分钟：Top120 币种 4h K 线 → 大级别支撑/压力（分形聚类）
+// 每 2 分钟：扫描宇宙 × 3m/5m/15m K 线 → 均线支撑/压力机会（评分 ≥3 输出）
+// 每 5 分钟：4h K 线 → 大级别支撑/压力（分形聚类）
+// 扫描宇宙 = 24h 涨幅榜 Top40 + 跌幅榜 Top40 + 近 4 小时异动币种（剔除代币化股票/商品代币）
+//   - 榜单每 10 分钟全量重建（刚开始反抽的新币及时纳入）
+//   - 两次重建之间：新进榜币种 / 新异动币种增量并入，不驱逐已有成员
 // 单例（globalThis 驻留），扫描结果缓存在内存
 
 import { bFetch, type KlineRow } from './binance';
 import { collector } from './collector';
 import { analyzeLevels, analyzeMa, type MaSignal, type ScannerTF, type SymbolLevels } from './indicators';
+import type { ScannerStatusDTO, TickerSnapshot } from './types';
 
-const SCAN_TOP = 20; // 只扫交易最活跃的前 20 个虚拟币
+const GAINERS_TOP = 40; // 涨幅榜取前 40
+const LOSERS_TOP = 40; // 跌幅榜取前 40
+const UNIVERSE_REFRESH_MS = 10 * 60_000; // 涨跌幅榜单每 10 分钟全量重建
+const ANOMALY_WINDOW_MS = 4 * 60 * 60_000; // 近 4 小时有异动的币种纳入扫描
+const MAX_UNIVERSE = 200; // 宇宙成员上限（防止增量并入无限膨胀）
 const SIGNAL_INTERVAL_MS = 2 * 60_000;
 const LEVEL_INTERVAL_MS = 5 * 60_000;
-const MIN_QV_UNIVERSE = 1_000_000; // 参与活跃度排序的最低 24h 成交额
+const MIN_QV_UNIVERSE = 1_000_000; // 进榜门槛：24h 成交额 ≥ 100 万 USDT
 const CONCURRENCY = 8;
 const TF_LIST: ScannerTF[] = ['3m', '5m', '15m'];
 
@@ -35,18 +43,19 @@ function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
 }
 
-export interface ScannerStatus {
-  scanning: boolean;
-  levelScanning: boolean;
-  lastSignalScanAt: number;
-  lastLevelScanAt: number;
-  coverage: number;
-  startedAt: number;
+type UniverseTag = 'UP' | 'DOWN' | 'ANOM';
+
+interface UniverseMember {
+  tags: Set<UniverseTag>; // 入选来源（可多标签）
+  joinedAt: number;
 }
 
 export class MarketScanner {
   private signals: MaSignal[] = [];
   private levels: SymbolLevels[] = [];
+  private universe = new Map<string, UniverseMember>();
+  private anomalySeen = new Map<string, number>(); // symbol -> 最近一次观测到异动的时间
+  private lastUniverseRefreshAt = 0;
   private scanning = false;
   private levelScanning = false;
   private lastSignalScanAt = 0;
@@ -78,14 +87,33 @@ export class MarketScanner {
     await Promise.race([this.starting, sleep(8000)]);
   }
 
-  getStatus(): ScannerStatus {
+  getStatus(): ScannerStatusDTO {
+    const members = this.universeTickers();
+    let gainers = 0;
+    let losers = 0;
+    let anomalies = 0;
+    for (const t of members) {
+      const m = this.universe.get(t.symbol);
+      if (!m) continue;
+      if (m.tags.has('UP')) gainers++;
+      if (m.tags.has('DOWN')) losers++;
+      if (m.tags.has('ANOM')) anomalies++;
+    }
     return {
       scanning: this.scanning,
       levelScanning: this.levelScanning,
       lastSignalScanAt: this.lastSignalScanAt,
       lastLevelScanAt: this.lastLevelScanAt,
-      coverage: this.topSymbols().length,
-      startedAt: this.meta.startedAt,
+      coverage: members.length,
+      universe: {
+        gainers,
+        losers,
+        anomalies,
+        total: members.length,
+        refreshIntervalMin: UNIVERSE_REFRESH_MS / 60_000,
+        lastRefreshAt: this.lastUniverseRefreshAt,
+        nextRefreshAt: this.lastUniverseRefreshAt + UNIVERSE_REFRESH_MS,
+      },
     };
   }
 
@@ -97,23 +125,77 @@ export class MarketScanner {
     return this.levels;
   }
 
-  /**
-   * 扫描范围：交易最活跃（24h 成交额）的前 20 个虚拟币，
-   * 剔除代币化股票 / 指数 ETF / 贵金属商品代币 / 稳定币。
-   */
-  private topSymbols() {
-    return collector
+  /** 排行榜快照：24h 涨幅榜 / 跌幅榜（剔除代币化股票 / 商品代币与低成交额币种） */
+  private boards() {
+    const rows = collector
       .getTickers()
-      .filter((t) => t.quoteVolume24h >= MIN_QV_UNIVERSE && !isExcludedBase(t.base))
-      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
-      .slice(0, SCAN_TOP);
+      .filter((t) => t.quoteVolume24h >= MIN_QV_UNIVERSE && !isExcludedBase(t.base));
+    const gainers = rows
+      .filter((t) => t.change24h > 0)
+      .sort((a, b) => b.change24h - a.change24h)
+      .slice(0, GAINERS_TOP);
+    const losers = rows
+      .filter((t) => t.change24h < 0)
+      .sort((a, b) => a.change24h - b.change24h)
+      .slice(0, LOSERS_TOP);
+    return { gainers, losers };
+  }
+
+  /**
+   * 刷新扫描宇宙：
+   *  - 每 10 分钟全量重建一次（涨幅榜 Top40 + 跌幅榜 Top40 + 近 4h 异动）
+   *  - 两次重建之间增量并入新进榜 / 新异动币种，已有成员不驱逐（保证信号生命周期完整）
+   *  - 异动观测记忆化：异动流水环形缓冲仅 300 条，按币种记 4h，避免高频期遗漏
+   */
+  private refreshUniverse(now: number) {
+    for (const ev of collector.getMemoryAnomalies()) {
+      const t = Date.parse(ev.createdAt);
+      if (!Number.isFinite(t) || now - t > ANOMALY_WINDOW_MS) continue;
+      const prev = this.anomalySeen.get(ev.symbol);
+      if (!prev || prev < t) this.anomalySeen.set(ev.symbol, t);
+    }
+    for (const [sym, t] of this.anomalySeen) {
+      if (now - t > ANOMALY_WINDOW_MS) this.anomalySeen.delete(sym);
+    }
+
+    const full = now - this.lastUniverseRefreshAt >= UNIVERSE_REFRESH_MS;
+    if (full) this.universe.clear();
+
+    const join = (symbol: string, tag: UniverseTag) => {
+      const m = this.universe.get(symbol);
+      if (m) {
+        m.tags.add(tag);
+        return;
+      }
+      if (!full && this.universe.size >= MAX_UNIVERSE) return;
+      this.universe.set(symbol, { tags: new Set([tag]), joinedAt: now });
+    };
+
+    const { gainers, losers } = this.boards();
+    for (const t of gainers) join(t.symbol, 'UP');
+    for (const t of losers) join(t.symbol, 'DOWN');
+    for (const sym of this.anomalySeen.keys()) join(sym, 'ANOM');
+
+    if (full) this.lastUniverseRefreshAt = now;
+  }
+
+  /** 当前扫描宇宙对应的实时行情快照（内存操作，可高频调用） */
+  private universeTickers(): TickerSnapshot[] {
+    this.refreshUniverse(Date.now());
+    const live = new Map(collector.getTickers().map((t) => [t.symbol, t as TickerSnapshot]));
+    const out: TickerSnapshot[] = [];
+    for (const [sym] of this.universe) {
+      const t = live.get(sym);
+      if (t) out.push(t); // 行情已下架 / 成交额过低的成员本轮跳过
+    }
+    return out;
   }
 
   private async scanSignals(): Promise<void> {
     if (this.scanning) return;
     this.scanning = true;
     try {
-      const symbols = this.topSymbols();
+      const symbols = this.universeTickers();
       const now = Date.now();
       const out: MaSignal[] = [];
       let cursor = 0;
@@ -156,7 +238,7 @@ export class MarketScanner {
     if (this.levelScanning) return;
     this.levelScanning = true;
     try {
-      const symbols = this.topSymbols();
+      const symbols = this.universeTickers();
       const out: SymbolLevels[] = [];
       let cursor = 0;
       const worker = async () => {

@@ -126,9 +126,13 @@ export interface ScannerStatusDTO {
   lastLevelScanAt: number;
   coverage: number;
   universe: {
-    gainers: number;
-    losers: number;
-    anomalies: number;
+    gainers: number; // 涨幅榜入选数
+    losers: number; // 跌幅榜入选数
+    anomalies: number; // 近 4h 异动入选数
+    total: number; // 去重后宇宙总量
+    refreshIntervalMin: number; // 榜单全量重建周期（分钟）
+    lastRefreshAt: number; // 上次全量重建时间戳
+    nextRefreshAt: number; // 下次全量重建时间戳（预估）
   };
 }
 

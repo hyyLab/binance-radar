@@ -104,10 +104,11 @@ export function SignalList({
         {!loading && filtered.length === 0 && (
           <div className="flex flex-col items-center gap-2 px-6 py-12 text-center">
             <div className="text-sm font-medium">
-              {scanning ? '正在扫描交易最活跃 Top20 虚拟币…' : '暂无符合条件的均线机会'}
+              {scanning ? '正在扫描涨幅榜 / 跌幅榜 / 异动币种…' : '暂无符合条件的均线机会'}
             </div>
             <p className="max-w-lg text-xs leading-relaxed text-muted-foreground">
-              扫描范围：24h 成交额最活跃的前 20 个虚拟币（代币化股票、ETF、贵金属商品代币与稳定币已剔除）。
+              扫描范围：24h 涨幅榜 Top40 + 跌幅榜 Top40 + 近 4 小时异动币种（代币化股票、ETF、贵金属商品代币与稳定币已剔除）。
+              榜单每 10 分钟重建、新进榜币种实时并入，确保刚开始反抽的新币被及时覆盖；
               趋势方向明确时捕捉回踩均线企稳（做多）或反抽受阻（做空）形态，评分 ≥3
               星才展示，每 2 分钟自动重扫。
             </p>
