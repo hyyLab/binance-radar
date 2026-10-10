@@ -6,6 +6,7 @@ import { fmtAgo } from '@/lib/format';
 import { MajorLevels } from './major-levels';
 import { PaperPanel } from './paper-panel';
 import { SignalList } from './signal-list';
+import { AnomalyMonitor } from './anomaly-monitor';
 import { TradeModal, type TradeIntent } from './trade-modal';
 import { CoinDialog } from '@/components/market/coin-dialog';
 import { ScanLine } from 'lucide-react';
@@ -76,6 +77,9 @@ export function ScannerView() {
           onSelectSymbol={setSelectedSymbol}
         />
       </div>
+
+      {/* 异动监控 · 一键交易（直接按建议方向开仓） */}
+      <AnomalyMonitor onTrade={openTrade} onSelectSymbol={setSelectedSymbol} />
 
       {/* 模拟建仓系统 */}
       <PaperPanel

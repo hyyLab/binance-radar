@@ -164,3 +164,19 @@ Work Log:
 Stage Summary:
 - 扫描宇宙收窄为 涨20+跌20+异动，信号方向顺势映射：强币回踩做多、弱币反抽做空，逻辑更聚焦
 - dev server 恢复运行，预览可访问
+
+---
+Task ID: 10
+Agent: Super Z (main)
+Task: 机会扫描页新增「异动监控 · 一键交易」板块：实时异动 + 建议做多/做空方向 + 直接模拟开仓
+
+Work Log:
+- 新建 src/components/scanner/anomaly-monitor.tsx：自包含组件（useAnomalies 5s 轮询，取最近 30 条）
+  - 建议方向映射：SPIKE_UP→做多（短时急拉动量顺势）、SPIKE_DOWN→做空、BREAKOUT_HIGH→做多（突破新高）、BREAKOUT_LOW→做空（跌破新低）、VOLUME_SURGE 按 changePct 正负（放量上攻做多/放量下杀做空）
+  - 每条异动：时间 + TypeBadge(强) + 币种(点开K线弹窗) + 详情/触发价/量比/1分钟额 + 「建议做多/做空 · 理由」徽章 + 双按钮（建议方向实心高亮，反向描边）
+- scanner-view.tsx：板块置于信号列表/大级别支撑下方、模拟建仓系统上方，复用 openTrade 与 CoinDialog
+- lint 零错误；组件层改动 HMR 生效，server 未重启
+- 浏览器端到端验证：板块渲染正常（LTC 突破新高行显示「建议做多 · 破位顺势做多」）；点击异动行「买入做多」→ TradeModal 预填 LTC/USDT + 做多方向 → 确认开仓 → toast「买入做多已成交 LTC/USDT · 10x · 开仓价 64.31」；控制台零错误
+
+Stage Summary:
+- 异动监控在扫描页可直接交易，方向建议与一键开仓联动，形成「发现异动→判断方向→立即建仓」闭环
