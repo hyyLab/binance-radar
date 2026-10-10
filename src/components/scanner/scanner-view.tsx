@@ -39,7 +39,11 @@ export function ScannerView() {
           <ScanLine className="h-4 w-4 text-gold" />
           机会扫描器
         </span>
-        <span>覆盖 {status?.coverage ?? 0} 个热门交易对 · 3m/5m/15m 均线 + 4h 大级别支撑</span>
+        <span>
+          聚焦涨幅榜 {status?.universe.gainers ?? 0} · 跌幅榜 {status?.universe.losers ?? 0} · 异动{' '}
+          {status?.universe.anomalies ?? 0}（共 {status?.coverage ?? 0} 个）· 3m/5m/15m 均线 + 4h
+          大级别支撑
+        </span>
         {status?.scanning ? (
           <span className="flex items-center gap-1.5 text-gold">
             <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-gold" />

@@ -125,6 +125,11 @@ export interface ScannerStatusDTO {
   lastSignalScanAt: number;
   lastLevelScanAt: number;
   coverage: number;
+  universe: {
+    gainers: number;
+    losers: number;
+    anomalies: number;
+  };
 }
 
 export interface SignalsResponse {

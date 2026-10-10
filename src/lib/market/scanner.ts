@@ -7,10 +7,13 @@ import { bFetch, type KlineRow } from './binance';
 import { collector } from './collector';
 import { analyzeLevels, analyzeMa, type MaSignal, type ScannerTF, type SymbolLevels } from './indicators';
 
-const SCAN_TOP = 150;
+const SCAN_TOP = 160;
 const SIGNAL_INTERVAL_MS = 2 * 60_000;
 const LEVEL_INTERVAL_MS = 5 * 60_000;
-const MIN_QV_SCAN = 2_000_000; // 参与扫描的最低 24h 成交额
+const MIN_QV_UNIVERSE = 1_000_000; // 参与涨幅/跌幅榜统计的最低 24h 成交额
+const TOP_GAINERS = 40; // 涨幅榜入扫数量
+const TOP_LOSERS = 40; // 跌幅榜入扫数量
+const ANOMALY_LOOKBACK_MS = 4 * 3600_000; // 异动币种回溯窗口
 const CONCURRENCY = 8;
 const TF_LIST: ScannerTF[] = ['3m', '5m', '15m'];
 
@@ -24,6 +27,11 @@ export interface ScannerStatus {
   lastSignalScanAt: number;
   lastLevelScanAt: number;
   coverage: number;
+  universe: {
+    gainers: number; // 涨幅榜入扫数量
+    losers: number; // 跌幅榜入扫数量
+    anomalies: number; // 异动/放量币种数量
+  };
   startedAt: number;
 }
 
@@ -36,6 +44,9 @@ export class MarketScanner {
   private lastLevelScanAt = 0;
   private started = false;
   private starting: Promise<void> | null = null;
+  private universeCache: string[] = [];
+  private universeStats = { gainers: 0, losers: 0, anomalies: 0 };
+  private universeAt = 0;
   private signalTimer: ReturnType<typeof setInterval> | null = null;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
   meta = { startedAt: 0, lastError: '' };
@@ -68,6 +79,7 @@ export class MarketScanner {
       lastSignalScanAt: this.lastSignalScanAt,
       lastLevelScanAt: this.lastLevelScanAt,
       coverage: this.topSymbols().length,
+      universe: this.universeStats,
       startedAt: this.meta.startedAt,
     };
   }
@@ -81,34 +93,77 @@ export class MarketScanner {
   }
 
   /**
-   * 扫描范围：今日热门池优先（含涨幅/跌幅/放量小币种），不足 150 个时按成交额补足。
+   * 扫描范围：聚焦机会密集的币种 ——
+   *  1) 24h 涨幅榜 Top40（做多动量集中区）
+   *  2) 24h 跌幅榜 Top40（做空动量集中区）
+   *  3) 近 4 小时触发过异动的币种（拉升/跳水/放量/新高新低）+ 实时放量（量比≥4）
+   * 每 30 秒重建一次候选池。
    */
-  private topSymbols() {
-    const all = collector.getTickers().filter((t) => t.quoteVolume24h >= MIN_QV_SCAN);
-    const map = new Map(all.map((t) => [t.symbol, t]));
-    const picked: typeof all = [];
+  private buildUniverse(): { symbols: string[]; gainers: number; losers: number; anomalies: number } {
+    const tickers = collector.getTickers().filter((t) => t.quoteVolume24h >= MIN_QV_UNIVERSE);
     const seen = new Set<string>();
-    // 1) 热门池成员优先（VOL → UP → DOWN → SURGE 的插入顺序天然按榜单强度排列）
-    for (const s of collector.getHotPool().symbols) {
-      if (picked.length >= SCAN_TOP) break;
+    const symbols: string[] = [];
+    const push = (t: { symbol: string }) => {
+      if (!seen.has(t.symbol)) {
+        seen.add(t.symbol);
+        symbols.push(t.symbol);
+      }
+    };
+
+    // 1) 涨幅榜 Top40
+    const gainers = [...tickers]
+      .filter((t) => t.change24h > 0)
+      .sort((a, b) => b.change24h - a.change24h)
+      .slice(0, TOP_GAINERS);
+    gainers.forEach(push);
+
+    // 2) 跌幅榜 Top40
+    const losers = [...tickers]
+      .filter((t) => t.change24h < 0)
+      .sort((a, b) => a.change24h - b.change24h)
+      .slice(0, TOP_LOSERS);
+    losers.forEach(push);
+
+    // 3) 近 4 小时异动币种
+    const cutoff = Date.now() - ANOMALY_LOOKBACK_MS;
+    const anomalySymbols = new Set<string>();
+    for (const ev of collector.getMemoryAnomalies()) {
+      if (new Date(ev.createdAt).getTime() >= cutoff) anomalySymbols.add(ev.symbol);
+    }
+    // 服务重启后内存可能为空：用热门池中的实时放量（SURGE）作为补充
+    for (const entry of collector.getHotPoolEntries()) {
+      if (entry.tags.includes('SURGE')) anomalySymbols.add(entry.symbol);
+    }
+    // 异动币种也需在行情列表内（有价格/成交额数据）
+    const tickerMap = new Map(tickers.map((t) => [t.symbol, t]));
+    for (const s of anomalySymbols) {
+      const t = tickerMap.get(s);
+      if (t) push(t);
+    }
+
+    return {
+      symbols: symbols.slice(0, SCAN_TOP),
+      gainers: gainers.length,
+      losers: losers.length,
+      anomalies: Math.min(anomalySymbols.size, SCAN_TOP),
+    };
+  }
+
+  private topSymbols() {
+    const now = Date.now();
+    if (now - this.universeAt > 30_000 || this.universeCache.length === 0) {
+      const u = this.buildUniverse();
+      this.universeCache = u.symbols;
+      this.universeStats = { gainers: u.gainers, losers: u.losers, anomalies: u.anomalies };
+      this.universeAt = now;
+    }
+    const map = new Map(collector.getTickers().map((t) => [t.symbol, t]));
+    const picked: NonNullable<ReturnType<typeof map.get>>[] = [];
+    for (const s of this.universeCache) {
       const t = map.get(s);
-      if (t && !seen.has(s)) {
-        picked.push(t);
-        seen.add(s);
-      }
+      if (t) picked.push(t);
     }
-    // 2) 成交额补足
-    if (picked.length < SCAN_TOP) {
-      const byVol = [...all].sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
-      for (const t of byVol) {
-        if (picked.length >= SCAN_TOP) break;
-        if (!seen.has(t.symbol)) {
-          picked.push(t);
-          seen.add(t.symbol);
-        }
-      }
-    }
-    return picked.slice(0, SCAN_TOP);
+    return picked;
   }
 
   private async scanSignals(): Promise<void> {

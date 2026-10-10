@@ -95,3 +95,18 @@ Work Log:
 
 Stage Summary:
 - K 线标记极简化：B 买 / S 卖，绿买红卖，视觉干净
+
+---
+Task ID: 6
+Agent: Super Z (main agent)
+Task: 机会扫描范围聚焦涨幅榜 / 跌幅榜 / 异动币种
+
+Work Log:
+- collector 新增 getHotPoolEntries()（symbol+标签明细）
+- scanner 重构 topSymbols → buildUniverse：24h 涨幅榜 Top40 + 跌幅榜 Top40 + 近 4h 异动币种（内存异动事件 + 热门池 SURGE 放量兜底），每 30s 重建候选池，去掉按成交额铺开的逻辑；ScannerStatus 新增 universe 构成明细（gainers/losers/anomalies）
+- UI：状态条改为「聚焦涨幅榜 X · 跌幅榜 Y · 异动 Z（共 N 个）」；信号空态说明同步更新
+- 运维：本次重启出现 dev.sh 60s 就绪窗口不够与进程被会话回收的情况；清理双实例后以 dev.sh 方式重启并在同会话完成验证，服务跨会话存活
+- 验证：覆盖 81 = 涨幅 40 + 跌幅 40 + 异动 3（去重），信号 60 个且集中在 STRK/CHIP/GRAM/AUDIO/CETUS 等动量小币；lint 与控制台零错误
+
+Stage Summary:
+- 扫描哲学从「覆盖面」转向「聚焦度」：只扫机会密集区（涨跌榜 + 异动），信号质量与相关性与用户交易场景对齐

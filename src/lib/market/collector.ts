@@ -534,6 +534,11 @@ export class MarketCollector {
     };
   }
 
+  /** 热门池明细（symbol + 入选标签），供扫描器等按标签筛选 */
+  getHotPoolEntries(): Array<{ symbol: string; tags: string[] }> {
+    return [...this.hotPool.entries()].map(([symbol, tags]) => ({ symbol, tags }));
+  }
+
   // ---------- 异动检测 ----------
 
   private detectPriceAnomalies(row: TickerRow, now: number) {
