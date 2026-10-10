@@ -40,9 +40,8 @@ export function ScannerView() {
           机会扫描器
         </span>
         <span>
-          聚焦涨幅榜 {status?.universe.gainers ?? 0} · 跌幅榜 {status?.universe.losers ?? 0} · 异动{' '}
-          {status?.universe.anomalies ?? 0}（共 {status?.coverage ?? 0} 个）· 3m/5m/15m 均线 + 4h
-          大级别支撑
+          仅扫描交易最活跃 Top20 虚拟币（已剔除股票/商品代币）· 3m/5m/15m 均线 + 4h
+          大级别支撑 · 当前覆盖 {status?.coverage ?? 0} 个
         </span>
         {status?.scanning ? (
           <span className="flex items-center gap-1.5 text-gold">

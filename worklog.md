@@ -110,3 +110,19 @@ Work Log:
 
 Stage Summary:
 - 扫描哲学从「覆盖面」转向「聚焦度」：只扫机会密集区（涨跌榜 + 异动），信号质量与相关性与用户交易场景对齐
+
+---
+Task ID: 7
+Agent: Super Z (main agent)
+Task: 机会扫描仅保留交易最活跃 Top20 虚拟币并剔除股票代币
+
+Work Log:
+- 基于实测数据确认股票代币命名规律：股票代码+B 后缀（CRCLB/MSTRB/SPCXB/SNDKB/SOXLB），另有贵金属 XAUT/PAXG、稳定币 RLUSD 混入
+- scanner 重构 topSymbols：24h 成交额 Top20 + isExcludedBase 剔除（STOCK_TICKERS 股票代码表 + B 后缀规则 + 贵金属/稳定币黑名单），动态覆盖未来新上市股票代币；移除涨幅/跌幅/异动 universe 逻辑与相关状态字段
+- collector STABLE_BASES 补充 RLUSD（稳定币全站剔除）
+- UI 文案：状态条「仅扫描交易最活跃 Top20 虚拟币（已剔除股票/商品代币）」；空态说明同步
+- 运维：多轮重启遇 .next 陈旧缓存卡死编译（rm -rf .next 解决）与会话回收问题（改用平台 init-fullstack.sh 官方路径重启，稳定存活）
+- 验证：覆盖恰好 20 个，信号涉及 ATOM/BNB/AVAX/UNI/SUI/ENA/STRK/NEAR/WLD/ZEC/RLC/KAIA/MAGIC，股票/商品/稳定币零混入；RLUSD 全站剔除；lint 与控制台零错误
+
+Stage Summary:
+- 扫描范围最终形态：最活跃 Top20 纯虚拟币，信号干净聚焦主流币

@@ -38,7 +38,7 @@ const STABLE_BASES = new Set([
   'USDC', 'FDUSD', 'TUSD', 'BUSD', 'DAI', 'USDP', 'PYUSD', 'EUR', 'AEUR', 'EURI',
   'XUSD', 'USD1', 'USDE', 'USDS', 'SUSD', 'USTC', 'BSC-USD', 'BRL', 'TRY', 'ARS',
   'JPY', 'RUB', 'ZAR', 'MXN', 'COP', 'CZK', 'PLN', 'RON', 'HUF', 'NGN', 'UAH',
-  'IDRT', 'VND', 'UAH',
+  'IDRT', 'VND', 'UAH', 'RLUSD',
 ]);
 
 const TOP_BACKFILL = 120;

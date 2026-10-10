@@ -7,15 +7,29 @@ import { bFetch, type KlineRow } from './binance';
 import { collector } from './collector';
 import { analyzeLevels, analyzeMa, type MaSignal, type ScannerTF, type SymbolLevels } from './indicators';
 
-const SCAN_TOP = 160;
+const SCAN_TOP = 20; // 只扫交易最活跃的前 20 个虚拟币
 const SIGNAL_INTERVAL_MS = 2 * 60_000;
 const LEVEL_INTERVAL_MS = 5 * 60_000;
-const MIN_QV_UNIVERSE = 1_000_000; // 参与涨幅/跌幅榜统计的最低 24h 成交额
-const TOP_GAINERS = 40; // 涨幅榜入扫数量
-const TOP_LOSERS = 40; // 跌幅榜入扫数量
-const ANOMALY_LOOKBACK_MS = 4 * 3600_000; // 异动币种回溯窗口
+const MIN_QV_UNIVERSE = 1_000_000; // 参与活跃度排序的最低 24h 成交额
 const CONCURRENCY = 8;
 const TF_LIST: ScannerTF[] = ['3m', '5m', '15m'];
+
+// 代币化股票 / ETF：真实股票代码表（Binance 命名为 代码+B，如 MSTRB / CRCLB / SNDKB / SOXLB）
+const STOCK_TICKERS = new Set([
+  'MSTR', 'CRCL', 'HOOD', 'TSLA', 'AAPL', 'NVDA', 'AMZN', 'GOOGL', 'GOOG', 'MSFT',
+  'META', 'COIN', 'PLTR', 'ORCL', 'NFLX', 'AVGO', 'LLY', 'JPM', 'ABNB', 'SBET',
+  'DFDV', 'CEP', 'SMLR', 'BTBT', 'SPY', 'QQQ', 'SOXL', 'SPCX', 'SNDK',
+]);
+// 其它非虚拟币：贵金属商品代币、稳定币
+const EXTRA_EXCLUDED_BASES = new Set(['XAUT', 'XAUTB', 'PAXG', 'PAXGB', 'KAU', 'KAUB', 'RLUSD']);
+
+function isExcludedBase(base: string): boolean {
+  if (EXTRA_EXCLUDED_BASES.has(base)) return true;
+  if (STOCK_TICKERS.has(base)) return true;
+  // 股票代币命名规则：股票代码 + B 后缀
+  if (base.endsWith('B') && STOCK_TICKERS.has(base.slice(0, -1))) return true;
+  return false;
+}
 
 function sleep(ms: number) {
   return new Promise<void>((r) => setTimeout(r, ms));
@@ -27,11 +41,6 @@ export interface ScannerStatus {
   lastSignalScanAt: number;
   lastLevelScanAt: number;
   coverage: number;
-  universe: {
-    gainers: number; // 涨幅榜入扫数量
-    losers: number; // 跌幅榜入扫数量
-    anomalies: number; // 异动/放量币种数量
-  };
   startedAt: number;
 }
 
@@ -44,9 +53,6 @@ export class MarketScanner {
   private lastLevelScanAt = 0;
   private started = false;
   private starting: Promise<void> | null = null;
-  private universeCache: string[] = [];
-  private universeStats = { gainers: 0, losers: 0, anomalies: 0 };
-  private universeAt = 0;
   private signalTimer: ReturnType<typeof setInterval> | null = null;
   private levelTimer: ReturnType<typeof setInterval> | null = null;
   meta = { startedAt: 0, lastError: '' };
@@ -79,7 +85,6 @@ export class MarketScanner {
       lastSignalScanAt: this.lastSignalScanAt,
       lastLevelScanAt: this.lastLevelScanAt,
       coverage: this.topSymbols().length,
-      universe: this.universeStats,
       startedAt: this.meta.startedAt,
     };
   }
@@ -93,77 +98,15 @@ export class MarketScanner {
   }
 
   /**
-   * 扫描范围：聚焦机会密集的币种 ——
-   *  1) 24h 涨幅榜 Top40（做多动量集中区）
-   *  2) 24h 跌幅榜 Top40（做空动量集中区）
-   *  3) 近 4 小时触发过异动的币种（拉升/跳水/放量/新高新低）+ 实时放量（量比≥4）
-   * 每 30 秒重建一次候选池。
+   * 扫描范围：交易最活跃（24h 成交额）的前 20 个虚拟币，
+   * 剔除代币化股票 / 指数 ETF / 贵金属商品代币 / 稳定币。
    */
-  private buildUniverse(): { symbols: string[]; gainers: number; losers: number; anomalies: number } {
-    const tickers = collector.getTickers().filter((t) => t.quoteVolume24h >= MIN_QV_UNIVERSE);
-    const seen = new Set<string>();
-    const symbols: string[] = [];
-    const push = (t: { symbol: string }) => {
-      if (!seen.has(t.symbol)) {
-        seen.add(t.symbol);
-        symbols.push(t.symbol);
-      }
-    };
-
-    // 1) 涨幅榜 Top40
-    const gainers = [...tickers]
-      .filter((t) => t.change24h > 0)
-      .sort((a, b) => b.change24h - a.change24h)
-      .slice(0, TOP_GAINERS);
-    gainers.forEach(push);
-
-    // 2) 跌幅榜 Top40
-    const losers = [...tickers]
-      .filter((t) => t.change24h < 0)
-      .sort((a, b) => a.change24h - b.change24h)
-      .slice(0, TOP_LOSERS);
-    losers.forEach(push);
-
-    // 3) 近 4 小时异动币种
-    const cutoff = Date.now() - ANOMALY_LOOKBACK_MS;
-    const anomalySymbols = new Set<string>();
-    for (const ev of collector.getMemoryAnomalies()) {
-      if (new Date(ev.createdAt).getTime() >= cutoff) anomalySymbols.add(ev.symbol);
-    }
-    // 服务重启后内存可能为空：用热门池中的实时放量（SURGE）作为补充
-    for (const entry of collector.getHotPoolEntries()) {
-      if (entry.tags.includes('SURGE')) anomalySymbols.add(entry.symbol);
-    }
-    // 异动币种也需在行情列表内（有价格/成交额数据）
-    const tickerMap = new Map(tickers.map((t) => [t.symbol, t]));
-    for (const s of anomalySymbols) {
-      const t = tickerMap.get(s);
-      if (t) push(t);
-    }
-
-    return {
-      symbols: symbols.slice(0, SCAN_TOP),
-      gainers: gainers.length,
-      losers: losers.length,
-      anomalies: Math.min(anomalySymbols.size, SCAN_TOP),
-    };
-  }
-
   private topSymbols() {
-    const now = Date.now();
-    if (now - this.universeAt > 30_000 || this.universeCache.length === 0) {
-      const u = this.buildUniverse();
-      this.universeCache = u.symbols;
-      this.universeStats = { gainers: u.gainers, losers: u.losers, anomalies: u.anomalies };
-      this.universeAt = now;
-    }
-    const map = new Map(collector.getTickers().map((t) => [t.symbol, t]));
-    const picked: NonNullable<ReturnType<typeof map.get>>[] = [];
-    for (const s of this.universeCache) {
-      const t = map.get(s);
-      if (t) picked.push(t);
-    }
-    return picked;
+    return collector
+      .getTickers()
+      .filter((t) => t.quoteVolume24h >= MIN_QV_UNIVERSE && !isExcludedBase(t.base))
+      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+      .slice(0, SCAN_TOP);
   }
 
   private async scanSignals(): Promise<void> {
