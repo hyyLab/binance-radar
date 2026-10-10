@@ -1,0 +1,27 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// 市场异动事件（持久化，服务重启后历史仍可查）
+model AnomalyEvent {
+  id             String   @id @default(cuid())
+  symbol         String // 交易对，如 BTCUSDT
+  baseAsset      String // 基础资产，如 BTC
+  type           String // 异动类型: SPIKE_UP | SPIKE_DOWN | VOLUME_SURGE | BREAKOUT_HIGH | BREAKOUT_LOW
+  severity       String   @default("MINOR") // 等级: MINOR | MAJOR
+  price          Float // 触发时价格
+  changePct      Float // 触发窗口内涨跌幅 %
+  volumeMultiple Float    @default(0) // 成交量相对均值倍数（成交量异动专用）
+  quoteVolume1m  Float    @default(0) // 触发时 1 分钟成交额（USDT）
+  detail         String   @default("") // 附加说明
+  createdAt      DateTime @default(now())
+
+  @@index([createdAt(sort: Desc)])
+  @@index([symbol, createdAt(sort: Desc)])
+  @@index([type, createdAt(sort: Desc)])
+}
