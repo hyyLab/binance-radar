@@ -73,29 +73,21 @@ export function CoinDialog({
     return lines;
   }, [myPositions]);
 
-  // 历史交易 → 开仓/平仓位置标记（▲开仓 ▼平仓，颜色按方向/盈亏）
+  // 历史交易 → 简洁 B/S 标记（B=买入 绿色▲，S=卖出 红色▼）
   const tradeMarkers = useMemo<ChartTradeMarker[]>(() => {
     const list = tradesResp?.data ?? [];
     const out: ChartTradeMarker[] = [];
     for (const t of list) {
       const ts = new Date(t.createdAt).getTime();
-      const p = t.price;
-      const pnlTxt = `${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(2)}`;
       switch (t.action) {
         case 'OPEN_LONG':
-          out.push({ timeMs: ts, position: 'belowBar', shape: 'arrowUp', color: '#0ecb81', text: `开多 ${fmtPrice(p)}` });
+        case 'CLOSE_SHORT': // 买入
+          out.push({ timeMs: ts, position: 'belowBar', shape: 'arrowUp', color: '#0ecb81', text: 'B' });
           break;
         case 'OPEN_SHORT':
-          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: '#f6465d', text: `开空 ${fmtPrice(p)}` });
-          break;
         case 'CLOSE_LONG':
-          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: t.pnl >= 0 ? '#0ecb81' : '#f6465d', text: `平多 ${pnlTxt}` });
-          break;
-        case 'CLOSE_SHORT':
-          out.push({ timeMs: ts, position: 'belowBar', shape: 'arrowUp', color: t.pnl >= 0 ? '#0ecb81' : '#f6465d', text: `平空 ${pnlTxt}` });
-          break;
-        case 'LIQUIDATE':
-          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: '#f6465d', text: '强平' });
+        case 'LIQUIDATE': // 卖出
+          out.push({ timeMs: ts, position: 'aboveBar', shape: 'arrowDown', color: '#f6465d', text: 'S' });
           break;
       }
     }
@@ -173,7 +165,10 @@ export function CoinDialog({
                 <span className="font-semibold text-foreground">
                   该币种已记录 {tradesResp?.data.length} 笔交易
                 </span>
-                <span>▲ 开仓 · ▼ 平仓/强平（绿=盈利 红=亏损），位置已标注在 K 线上</span>
+                <span>
+                  <span className="font-bold text-up">B</span> = 买入 ·{' '}
+                  <span className="font-bold text-down">S</span> = 卖出（已标注在 K 线上）
+                </span>
               </div>
             )}
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">

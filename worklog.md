@@ -81,3 +81,17 @@ Work Log:
 
 Stage Summary:
 - 复盘闭环完成：扫描 → 一键开仓 → K 线看成本线/强平线 → 平仓后图上永久保留开/平仓箭头（含盈亏），SQLite 流水支撑
+
+---
+Task ID: 5
+Agent: Super Z (main agent)
+Task: 交易标记简化为 B/S 样式
+
+Work Log:
+- 按用户要求将 K 线交易标记从长文字（开多 xx / 平多 +x.xx）简化为交易所经典 B/S 样式
+- 映射：OPEN_LONG 与 CLOSE_SHORT（买入）→ 绿色 ▲ B；OPEN_SHORT、CLOSE_LONG、LIQUIDATE（卖出）→ 红色 ▼ S
+- 弹窗说明条同步改为「B = 买入 · S = 卖出」
+- 浏览器验证：BTC 4 笔交易显示 2 个绿色 B + 2 个红色 S，零报错；lint 通过
+
+Stage Summary:
+- K 线标记极简化：B 买 / S 卖，绿买红卖，视觉干净
