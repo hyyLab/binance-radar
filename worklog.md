@@ -47,3 +47,22 @@ Work Log:
 Stage Summary:
 - 实测数据：60 个均线信号（3m 33 / 5m 24 / 15m 3）、117 个币种大级别 S/R（XAUT 5 点压力聚类）、模拟盘完整交易闭环
 - 关键决策：REST 轮询方案沿用；评分制过滤低质量信号（≥3 星）；同币种同方向单仓限制避免仓位叠加混乱；强平检查挂在账户查询/交易前（3 秒轮询内触发）
+
+---
+Task ID: 3
+Agent: Super Z (main agent)
+Task: K 线成本线标注 + 每日热门池（涨幅/跌幅/成交量榜综合选币）+ 扫描范围扩展
+
+Work Log:
+- Prisma 新增 HotPoolEntry（date+symbol 唯一，tags JSON，rank）并 db push；重启 dev server 加载新 Prisma Client
+- collector 新增热门池引擎：每日 00:00 (UTC+8) 重建，24h 成交额 Top80(VOL) + 涨幅榜 Top40(UP) + 跌幅榜 Top40(DOWN) + 实时放量 Top20(SURGE，量比≥4)，去重后约 130-180 个；当日每 30 分钟随 24h 滚动窗口轻度刷新；服务重启后量能就绪自动补 SURGE 标签（每分钟重试最多 10 次）；名单 best-effort 持久化 SQLite
+- getTickers() 每行携带 hotTags；stats 接口返回 hotPool 摘要（date/total/tags 计数）
+- scanner topSymbols 改为热门池优先 + 成交额补足，SCAN_TOP 提至 150 —— 涨跌幅小币种进入 3m/5m/15m 信号与大级别支撑扫描范围
+- kline-chart 新增 priceLines prop（lightweight-charts createPriceLine，key 比对避免轮询闪烁）；coin-dialog 自动标注该币种模拟持仓的多/空成本线（绿/红实线 + 杠杆标注）与强平价虚线，底部金色持仓摘要条
+- hot-table：币对列入选徽章（额/涨/跌/爆）、「仅看热门池」开关（默认开）、金色热门池构成说明条；行数上限提升
+- 修复：coin-dialog 误从 use-market 导入 usePaperAccount 导致整站 500；React Compiler lint 报错（ref 渲染期访问 / memo 依赖不匹配）改为 key 比较模式
+- 浏览器验证：热门池说明条 134 个（额80/涨40/跌40/爆3）、徽章显示、ALGO K 线成本线 0.11620 + 持仓摘要、扫描器覆盖 144 且出现 GRAM/MORPHO 等小币信号（DOT 带爆标签）、控制台与服务端零错误
+
+Stage Summary:
+- 热门池实测：134 个币种（DOT/ZK 三标签 VOL+UP+SURGE）；扫描范围从纯成交额 Top120 → 热门池优先，信号覆盖面显著扩大
+- K 线弹窗现在同时展示：K 线 + 成本线 + 强平线 + 持仓摘要，闭环「扫描 → 开仓 → 图上看持仓」

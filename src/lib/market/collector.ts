@@ -132,6 +132,12 @@ export class MarketCollector {
   private last24hRaw = new Map<string, Raw24h>();
   private cooldowns = new Map<string, number>();
   private memoryAnomalies: AnomalyEventDTO[] = [];
+  // 每日热门池：symbol -> 入选标签（VOL 成交额榜 / UP 涨幅榜 / DOWN 跌幅榜 / SURGE 放量）
+  private hotPool = new Map<string, string[]>();
+  private hotPoolDate = '';
+  private hotPoolAt = 0;
+  private hotPoolSurgeOk = false; // 上次构建时是否已包含放量数据
+  private earlyFixCount = 0; // 启动后补标签重试次数（上限 10 次）
   private started = false;
   private starting: Promise<void> | null = null;
   private backfillDone = false;
@@ -185,6 +191,7 @@ export class MarketCollector {
         vol1m: row.vol1m > 0 ? row.vol1m : null,
         volMultiple: row.volAvg20m > 0 && row.vol1m > 0 ? row.vol1m / row.volAvg20m : null,
         tickDir: row.tickDir,
+        hotTags: this.hotPool.get(row.symbol) ?? null,
         updatedAt: row.updatedAt,
       });
     }
@@ -412,10 +419,119 @@ export class MarketCollector {
       this.meta.last24hOk = now;
       this.meta.tfErr = 0;
       this.detectVolumeSurges(now);
+      this.ensureHotPool(now);
     } catch (e) {
       this.meta.tfErr++;
       this.meta.lastError = errMsg(e);
     }
+  }
+
+  // ---------- 每日热门池 ----------
+
+  /** UTC+8 日期字符串 */
+  private cnDate(now: number): string {
+    return new Date(now + 8 * 3600_000).toISOString().slice(0, 10);
+  }
+
+  /**
+   * 热门池选取（每日 00:00 UTC+8 重建，当日成员固定）：
+   *  - 24h 成交额 Top80（VOL）
+   *  - 24h 涨幅榜 Top40（UP，仅上涨币）
+   *  - 24h 跌幅榜 Top40（DOWN，仅下跌币）
+   *  - 实时放量 Top20（SURGE，量比 ≥ 4）
+   * 同一币种可多标签入选，去重后即“今日热门”，保障暴涨暴跌的小币种不被成交额门槛埋没。
+   */
+  private ensureHotPool(now: number) {
+    const date = this.cnDate(now);
+    const isNewDay = date !== this.hotPoolDate;
+    if (isNewDay) this.earlyFixCount = 0;
+    const isEmpty = this.hotPool.size === 0;
+    const refreshDue = now - this.hotPoolAt >= 30 * 60_000; // 当日内每 30 分钟随 24h 滚动窗口轻度刷新
+    const earlyFix =
+      this.earlyFixCount < 10 &&
+      !this.hotPoolSurgeOk &&
+      this.hotPoolAt > 0 &&
+      now - this.meta.startedAt >= 2 * 60_000 &&
+      now - this.hotPoolAt >= 60_000; // 服务重启后量能就绪，补上放量标签（每分钟重试，最多 10 次）
+    if (!isNewDay && !isEmpty && !refreshDue && !earlyFix) return;
+
+    const rows = [...this.tickers.values()].filter((r) => r.quoteVolume24h >= 1_000_000);
+    if (rows.length < 50) return; // 行情尚未就绪
+
+    const byVol = [...rows].sort((a, b) => b.quoteVolume24h - a.quoteVolume24h).slice(0, 80);
+    const byUp = [...rows]
+      .filter((r) => r.change24h > 0)
+      .sort((a, b) => b.change24h - a.change24h)
+      .slice(0, 40);
+    const byDown = [...rows]
+      .filter((r) => r.change24h < 0)
+      .sort((a, b) => a.change24h - b.change24h)
+      .slice(0, 40);
+    const bySurge = [...rows]
+      .filter((r) => r.volAvg20m > 0 && r.vol1m > 0 && r.vol1m / r.volAvg20m >= 4)
+      .sort((a, b) => b.vol1m / b.volAvg20m - a.vol1m / a.volAvg20m)
+      .slice(0, 20);
+
+    const pool = new Map<string, string[]>();
+    const add = (list: typeof rows, tag: string) => {
+      for (const r of list) {
+        const tags = pool.get(r.symbol) ?? [];
+        if (!tags.includes(tag)) tags.push(tag);
+        pool.set(r.symbol, tags);
+      }
+    };
+    add(byVol, 'VOL');
+    add(byUp, 'UP');
+    add(byDown, 'DOWN');
+    add(bySurge, 'SURGE');
+
+    this.hotPool = pool;
+    this.hotPoolDate = date;
+    this.hotPoolAt = now;
+    this.hotPoolSurgeOk = bySurge.length > 0;
+    if (this.hotPoolSurgeOk) this.earlyFixCount = 10;
+    else this.earlyFixCount++;
+
+    // 持久化当日名单（best-effort）
+    const entries = [...pool.entries()];
+    void (async () => {
+      try {
+        await db.hotPoolEntry.deleteMany({ where: { date } });
+        if (entries.length > 0) {
+          await db.hotPoolEntry.createMany({
+            data: entries.map(([symbol, tags], i) => ({
+              date,
+              symbol,
+              base: symbol.slice(0, -4),
+              tags: JSON.stringify(tags),
+              rank: i,
+            })),
+          });
+        }
+      } catch {
+        // 持久化失败不影响内存热榜
+      }
+    })();
+  }
+
+  getHotPool(): {
+    date: string;
+    total: number;
+    tags: Record<string, number>;
+    symbols: string[];
+    updatedAt: number;
+  } {
+    const tags: Record<string, number> = { VOL: 0, UP: 0, DOWN: 0, SURGE: 0 };
+    for (const arr of this.hotPool.values()) {
+      for (const t of arr) tags[t] = (tags[t] ?? 0) + 1;
+    }
+    return {
+      date: this.hotPoolDate,
+      total: this.hotPool.size,
+      tags,
+      symbols: [...this.hotPool.keys()],
+      updatedAt: this.hotPoolAt,
+    };
   }
 
   // ---------- 异动检测 ----------

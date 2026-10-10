@@ -2,6 +2,8 @@
 
 import { useMemo, useState } from 'react';
 import { Input } from '@/components/ui/input';
+import { Switch } from '@/components/ui/switch';
+import { useStats } from '@/hooks/use-market';
 import {
   Select,
   SelectContent,
@@ -25,6 +27,34 @@ const SORT_LABELS: Record<SortKey, string> = {
   chg1h: '1 小时涨跌',
 };
 
+const TAG_META: Record<string, { label: string; cls: string; name: string }> = {
+  VOL: { label: '额', cls: 'bg-gold/15 text-gold', name: '成交额榜' },
+  UP: { label: '涨', cls: 'bg-up/15 text-up', name: '涨幅榜' },
+  DOWN: { label: '跌', cls: 'bg-down/15 text-down', name: '跌幅榜' },
+  SURGE: { label: '爆', cls: 'bg-foreground/10 text-foreground ring-1 ring-gold/50', name: '实时放量' },
+};
+
+function HotTags({ tags }: { tags: string[] }) {
+  if (tags.length === 0) return null;
+  return (
+    <div className="mt-0.5 flex gap-0.5" aria-label={`入选${tags.map((t) => TAG_META[t]?.name ?? t).join('、')}`}>
+      {tags.map((tag) => {
+        const meta = TAG_META[tag];
+        if (!meta) return null;
+        return (
+          <span
+            key={tag}
+            title={`入选${meta.name}`}
+            className={cn('rounded px-1 text-[10px] font-bold leading-4', meta.cls)}
+          >
+            {meta.label}
+          </span>
+        );
+      })}
+    </div>
+  );
+}
+
 export function HotTable({
   tickers,
   loading,
@@ -36,10 +66,15 @@ export function HotTable({
 }) {
   const [search, setSearch] = useState('');
   const [sortBy, setSortBy] = useState<SortKey>('vol');
+  const [poolOnly, setPoolOnly] = useState(true);
+  const { data: statsResp } = useStats();
+  const hotPool = statsResp?.hotPool;
 
   const rows = useMemo(() => {
     const kw = search.trim().toUpperCase();
-    const filtered = kw ? tickers.filter((t) => t.symbol.includes(kw)) : tickers;
+    let list = tickers;
+    if (poolOnly && !kw) list = list.filter((t) => t.hotTags);
+    const filtered = kw ? list.filter((t) => t.symbol.includes(kw)) : list;
     const sorted = [...filtered];
     switch (sortBy) {
       case 'vol':
@@ -55,8 +90,8 @@ export function HotTable({
         sorted.sort((a, b) => (b.chg1h ?? -999) - (a.chg1h ?? -999));
         break;
     }
-    return sorted.slice(0, 50);
-  }, [tickers, search, sortBy]);
+    return sorted.slice(0, poolOnly ? 200 : 100);
+  }, [tickers, search, sortBy, poolOnly]);
 
   return (
     <div className="space-y-3">
@@ -86,17 +121,33 @@ export function HotTable({
             </SelectContent>
           </Select>
         </div>
+        <label className="flex cursor-pointer items-center gap-2 text-xs text-muted-foreground">
+          <Switch checked={poolOnly} onCheckedChange={setPoolOnly} aria-label="仅看热门池" />
+          仅看热门池
+        </label>
         <div className="text-xs text-muted-foreground sm:ml-auto">
-          {loading ? '加载中…' : `共 ${tickers.length} 个交易对，当前显示前 ${rows.length} 个`}
+          {loading ? '加载中…' : `显示 ${rows.length} / ${tickers.length} 个交易对`}
         </div>
       </div>
+
+      {/* 热门池说明 */}
+      {poolOnly && hotPool && hotPool.total > 0 && (
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-md border border-gold/25 bg-gold/5 px-3 py-2 text-xs text-muted-foreground">
+          <span className="font-semibold text-gold">今日热门池 {hotPool.total} 个</span>
+          <span>成交额榜 {hotPool.tags.VOL ?? 0}</span>
+          <span className="text-up">涨幅榜 {hotPool.tags.UP ?? 0}</span>
+          <span className="text-down">跌幅榜 {hotPool.tags.DOWN ?? 0}</span>
+          <span>放量 {hotPool.tags.SURGE ?? 0}</span>
+          <span className="ml-auto">每日 00:00（UTC+8）重建 · {hotPool.date} · 行情实时刷新</span>
+        </div>
+      )}
 
       <div className="custom-scroll max-h-[60vh] overflow-y-auto rounded-lg border border-border/70">
         <Table>
           <TableHeader className="sticky top-0 z-10 bg-card">
             <TableRow className="hover:bg-transparent">
               <TableHead className="w-10 pl-3 text-muted-foreground">#</TableHead>
-              <TableHead className="text-muted-foreground">币对</TableHead>
+              <TableHead className="text-muted-foreground">币对 / 入选</TableHead>
               <TableHead className="text-right text-muted-foreground">最新价</TableHead>
               <TableHead className="text-right text-muted-foreground">24h 涨跌</TableHead>
               <TableHead className="hidden text-right text-muted-foreground sm:table-cell">
@@ -142,6 +193,7 @@ export function HotTable({
                       /USDT
                     </span>
                   </div>
+                  {t.hotTags && <HotTags tags={t.hotTags} />}
                 </TableCell>
                 <TableCell className="text-right">
                   <FlashPrice value={t.price} dir={t.tickDir} />

@@ -26,7 +26,16 @@ export async function GET() {
       anomaliesLast24h = mem.filter((a) => now - new Date(a.createdAt).getTime() < 86400_000).length;
     }
 
-    const res: StatsResponse = { ok: true, ...stats, anomaliesLast1h, anomaliesLast24h };
+    const res: StatsResponse = {
+      ok: true,
+      ...stats,
+      anomaliesLast1h,
+      anomaliesLast24h,
+      hotPool: (() => {
+        const p = collector.getHotPool();
+        return { date: p.date, total: p.total, tags: p.tags, updatedAt: p.updatedAt };
+      })(),
+    };
     return NextResponse.json(res, { headers: { 'Cache-Control': 'no-store' } });
   } catch (e) {
     return NextResponse.json(

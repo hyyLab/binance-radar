@@ -1,13 +1,14 @@
 'use client';
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
 import { useKlines, useTickers } from '@/hooks/use-market';
+import { usePaperAccount } from '@/hooks/use-scanner';
 import { fmtPct, fmtPrice, fmtVol, pctClass } from '@/lib/format';
 import type { TickerSnapshot } from '@/lib/market/types';
 import { cn } from '@/lib/utils';
-import { KlineChart } from './kline-chart';
+import { KlineChart, type ChartPriceLine } from './kline-chart';
 import { PctBadge } from './shared';
 
 const INTERVALS = [
@@ -38,6 +39,7 @@ export function CoinDialog({
   const [interval, setInterval] = useState<string>('15m');
   const { data: klines, isLoading } = useKlines(symbol, interval, !!symbol);
   const { data: tickersResp } = useTickers();
+  const { data: paper } = usePaperAccount();
 
   const ticker: TickerSnapshot | undefined = symbol
     ? tickersResp?.data.find((t) => t.symbol === symbol)
@@ -45,6 +47,30 @@ export function CoinDialog({
 
   const base = symbol ? symbol.replace(/USDT$/, '') : '';
   const last = klines?.data[klines.data.length - 1];
+
+  // 该币种的模拟持仓 → 图上绘制开仓成本线 + 强平价虚线
+  const myPositions = useMemo(
+    () => paper?.positions.filter((p) => p.symbol === symbol) ?? [],
+    [paper?.positions, symbol],
+  );
+  const priceLines = useMemo<ChartPriceLine[]>(() => {
+    const lines: ChartPriceLine[] = [];
+    for (const p of myPositions) {
+      const isLong = p.side === 'LONG';
+      lines.push({
+        price: p.entryPrice,
+        color: isLong ? '#0ecb81' : '#f6465d',
+        title: `${isLong ? '多' : '空'}单成本 ${p.leverage}x`,
+      });
+      lines.push({
+        price: p.liqPrice,
+        color: '#f6465d',
+        title: '强平',
+        dashed: true,
+      });
+    }
+    return lines;
+  }, [myPositions]);
 
   return (
     <Dialog open={!!symbol} onOpenChange={(open) => !open && onClose()}>
@@ -89,7 +115,7 @@ export function CoinDialog({
         {isLoading && klines == null ? (
           <Skeleton className="h-[340px] w-full" />
         ) : klines && klines.data.length > 0 ? (
-          <KlineChart data={klines.data} />
+          <KlineChart data={klines.data} priceLines={priceLines} />
         ) : (
           <div className="flex h-[340px] items-center justify-center rounded-lg border border-border/70 text-sm text-muted-foreground">
             {klines ? '暂无 K 线数据' : 'K 线加载失败，请稍后重试'}
@@ -97,7 +123,23 @@ export function CoinDialog({
         )}
 
         {ticker && (
-          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+          <div className="space-y-2">
+            {myPositions.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2 rounded-md border border-gold/30 bg-gold/5 px-3 py-1.5 text-xs">
+                <span className="font-semibold text-gold">我的模拟持仓：</span>
+                {myPositions.map((p) => (
+                  <span key={p.id} className="tabular-nums">
+                    <span className={cn('font-bold', p.side === 'LONG' ? 'text-up' : 'text-down')}>
+                      {p.side === 'LONG' ? '多' : '空'} {p.leverage}x
+                    </span>{' '}
+                    成本 {fmtPrice(p.entryPrice)} · 浮盈 {p.unrealizedPnl >= 0 ? '+' : ''}
+                    {p.unrealizedPnl.toFixed(2)} U
+                  </span>
+                ))}
+                <span className="ml-auto text-muted-foreground">已标注在 K 线图上</span>
+              </div>
+            )}
+            <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
             <StatItem
               label="24h 最高"
               value={fmtPrice(ticker.high24h)}
@@ -128,6 +170,7 @@ export function CoinDialog({
                 ticker.volMultiple != null && ticker.volMultiple >= 6 ? 'text-gold' : undefined
               }
             />
+            </div>
           </div>
         )}
       </DialogContent>

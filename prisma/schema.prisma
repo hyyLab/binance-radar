@@ -75,3 +75,17 @@ model PaperTrade {
 
   @@index([accountId, createdAt(sort: Desc)])
 }
+
+// 每日热门池（UTC+8 每日 0 点重建：成交额 Top80 + 涨幅 Top40 + 跌幅 Top40 + 放量 Top20）
+model HotPoolEntry {
+  id        String   @id @default(cuid())
+  date      String // 日期 YYYY-MM-DD（UTC+8）
+  symbol    String
+  base      String
+  tags      String // JSON 数组，如 ["VOL","UP"]
+  rank      Int
+  createdAt DateTime @default(now())
+
+  @@unique([date, symbol])
+  @@index([date, rank])
+}

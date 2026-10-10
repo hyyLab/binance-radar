@@ -39,6 +39,7 @@ export interface TickerSnapshot {
   vol1m: number | null; // 最近 1 分钟成交额
   volMultiple: number | null; // 量比 = vol1m / 过去20分钟均值
   tickDir: 1 | -1 | 0; // 最新成交方向
+  hotTags: string[] | null; // 今日热门池入选标签 VOL/UP/DOWN/SURGE
   updatedAt: number;
 }
 
@@ -77,10 +78,18 @@ export interface AnomaliesResponse {
   data: AnomalyEventDTO[];
 }
 
+export interface HotPoolSummary {
+  date: string; // UTC+8 日期
+  total: number;
+  tags: Record<string, number>; // VOL/UP/DOWN/SURGE 计数
+  updatedAt: number;
+}
+
 export interface StatsResponse extends MarketStats {
   ok: true;
   anomaliesLast1h: number;
   anomaliesLast24h: number;
+  hotPool: HotPoolSummary;
 }
 
 export interface KlinePoint {

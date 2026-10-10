@@ -7,7 +7,7 @@ import { bFetch, type KlineRow } from './binance';
 import { collector } from './collector';
 import { analyzeLevels, analyzeMa, type MaSignal, type ScannerTF, type SymbolLevels } from './indicators';
 
-const SCAN_TOP = 120;
+const SCAN_TOP = 150;
 const SIGNAL_INTERVAL_MS = 2 * 60_000;
 const LEVEL_INTERVAL_MS = 5 * 60_000;
 const MIN_QV_SCAN = 2_000_000; // 参与扫描的最低 24h 成交额
@@ -80,12 +80,35 @@ export class MarketScanner {
     return this.levels;
   }
 
+  /**
+   * 扫描范围：今日热门池优先（含涨幅/跌幅/放量小币种），不足 150 个时按成交额补足。
+   */
   private topSymbols() {
-    return collector
-      .getTickers()
-      .filter((t) => t.quoteVolume24h >= MIN_QV_SCAN)
-      .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
-      .slice(0, SCAN_TOP);
+    const all = collector.getTickers().filter((t) => t.quoteVolume24h >= MIN_QV_SCAN);
+    const map = new Map(all.map((t) => [t.symbol, t]));
+    const picked: typeof all = [];
+    const seen = new Set<string>();
+    // 1) 热门池成员优先（VOL → UP → DOWN → SURGE 的插入顺序天然按榜单强度排列）
+    for (const s of collector.getHotPool().symbols) {
+      if (picked.length >= SCAN_TOP) break;
+      const t = map.get(s);
+      if (t && !seen.has(s)) {
+        picked.push(t);
+        seen.add(s);
+      }
+    }
+    // 2) 成交额补足
+    if (picked.length < SCAN_TOP) {
+      const byVol = [...all].sort((a, b) => b.quoteVolume24h - a.quoteVolume24h);
+      for (const t of byVol) {
+        if (picked.length >= SCAN_TOP) break;
+        if (!seen.has(t.symbol)) {
+          picked.push(t);
+          seen.add(t.symbol);
+        }
+      }
+    }
+    return picked.slice(0, SCAN_TOP);
   }
 
   private async scanSignals(): Promise<void> {

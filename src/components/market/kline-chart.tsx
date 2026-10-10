@@ -5,8 +5,10 @@ import {
   CandlestickSeries,
   ColorType,
   HistogramSeries,
+  LineStyle,
   createChart,
   type IChartApi,
+  type IPriceLine,
   type ISeriesApi,
   type UTCTimestamp,
 } from 'lightweight-charts';
@@ -16,17 +18,27 @@ import type { KlinePoint } from '@/lib/market/types';
 const UP = '#0ecb81';
 const DOWN = '#f6465d';
 
+export interface ChartPriceLine {
+  price: number;
+  color: string;
+  title: string;
+  dashed?: boolean;
+}
+
 export function KlineChart({
   data,
   height = 340,
+  priceLines,
 }: {
   data: KlinePoint[];
   height?: number;
+  priceLines?: ChartPriceLine[];
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const priceLineRefs = useRef<IPriceLine[]>([]);
 
   // 初始化图表（仅一次）
   useEffect(() => {
@@ -112,6 +124,42 @@ export function KlineChart({
   }, [data]);
 
   const lastPrice = useMemo(() => (data.length ? data[data.length - 1].c : 0), [data]);
+
+  // 持仓成本线 / 强平线：内容 key 未变化时跳过重建（避免轮询新数组导致闪烁）
+  const linesKey = (priceLines ?? []).map((l) => `${l.price}|${l.color}|${l.title}`).join(';');
+  const lastKeyRef = useRef<string>('');
+  useEffect(() => {
+    const series = candleRef.current;
+    if (!series) return;
+    if (lastKeyRef.current === linesKey) return; // 线未变化（data 刷新时无需重画）
+    lastKeyRef.current = linesKey;
+    for (const pl of priceLineRefs.current) {
+      try {
+        series.removePriceLine(pl);
+      } catch {
+        // 图表已销毁时忽略
+      }
+    }
+    priceLineRefs.current = [];
+    if (!priceLines || priceLines.length === 0) return;
+    for (const l of priceLines) {
+      if (!Number.isFinite(l.price) || l.price <= 0) continue;
+      try {
+        priceLineRefs.current.push(
+          series.createPriceLine({
+            price: l.price,
+            color: l.color,
+            lineWidth: 1,
+            lineStyle: l.dashed ? LineStyle.Dashed : LineStyle.Solid,
+            axisLabelVisible: true,
+            title: l.title,
+          }),
+        );
+      } catch {
+        // 忽略单条线创建失败
+      }
+    }
+  }, [priceLines, linesKey, data]);
 
   return (
     <div className="relative w-full" style={{ height }}>
