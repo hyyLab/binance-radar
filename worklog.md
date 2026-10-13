@@ -242,3 +242,20 @@ Work Log:
 Stage Summary:
 - 开仓默认 20x 杠杆；模拟盘支持充值扩仓，ROI 口径正确（本金=初始+充值）
 - 异动建议从「纯动量」升级为「动量+趋势」：多头趋势中的急杀提示低吸而非追空，空头趋势中的急拉提示反抽而非追多，破位信号维持顺势
+
+---
+Task ID: 37
+Agent: Super Z (main)
+Task: 平台回滚事故恢复——检测到仓库被回退至 10月11日快照（Task 31 之前），重建 Task 31-36 全部功能
+
+Work Log:
+- 事故定位：git 历史被平台检查点改写（HEAD=10-11 19:52 UTC，UUID 命名提交）；对象库全量枚举无 12-13 日提交；.next/dev/trace 仅存 peakPriority 字样（编译缓存压缩不可反提取）；文件系统无备份残留 → 结论：只能依据会话上下文重建
+- 受损范围：enhanced 引擎全套（6 模块+2 路由+hook+视图）、futures.ts、paper.ts 合约化、page.tsx 简化、collector/pause 路由、worklog 31-36 条目
+- 重建（按会话记录逐文件还原）：excluded.ts / futures.ts / paper.ts（v2 key+加仓合并+精确强平）/ trade-modal+paper-panel+use-scanner（10U/2U 下限/币安费率文案）/ page.tsx（双专题页切换）/ pause 路由 / enhanced types+config+aggregate+engine（逐字还原含 peakPriority+prioValue）/ klines.ts+detectors.ts（按规格重写：TTL 缓存中位数与 24h 范围、冻结基线状态机、PENDING 首进入产出、假突破 90s 观察窗、>25% 异常复核）/ anomalies+logs 路由 / use-enhanced / enhanced-view（冷却池最终版）
+- 踩坑两连：① paper.ts 导出 PAPER_MIN_DEPOSIT/MAX_DEPOSIT 未 import → ReferenceError（dev.log 定位）② trade-modal 编辑误删 presetMargin 行 → 运行时 ReferenceError（浏览器 overlay 定位）；均已修复
+- 验证：eslint 全绿；paper initialCapital=10、重置后 balance=10；BTC 20x 多 2U 强平 -4.62%（与原验证值吻合）；enhanced 冷启动 104 标的回填 232 req、基线就绪 104/104（100%）、活跃事件即时产生；四池/切换器/明细桌面+移动端截图正常；控制台零应用错误
+- 运维：全程未重启 server（pid 1096 保持运行）；引擎为首次访问冷启动（回填并发 2+200ms 间隔，无封禁）
+
+Stage Summary:
+- 页面恢复至 Task 36 最终形态：模拟盘（10U 合约规则）| 升级版异动交易（四池含冷却池）
+- 教训沉淀：平台快照可能回滚工作区——关键迭代后应立即 commit 并在 worklog 记录完整实现细节（本次依赖会话上下文完成无损重建）
