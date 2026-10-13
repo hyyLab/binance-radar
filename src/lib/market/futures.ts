@@ -32,11 +32,14 @@ const MMR_TIERS: Record<string, MmrTier[]> = {
     { limit: Infinity, mmr: 0.02 },
   ],
 };
+// 山寨/其他币对档位：对齐币安 USDT-M 真实水平（小额维持保证金率远低于初始保证金率）。
+// ⚠️ Task 47 事故教训：此前第 3/4 档（5%/10%）过高 —— 20x 满杠杆时初始保证金率 IMR=0.05
+// 与 MMR=0.05 相撞，逐仓强平价公式退化到开仓价（ICP 空单开仓 1 秒即被误强平，见 worklog Task 47）
 const DEFAULT_TIERS: MmrTier[] = [
-  { limit: 5_000, mmr: 0.01 },
-  { limit: 25_000, mmr: 0.025 },
-  { limit: 100_000, mmr: 0.05 },
-  { limit: Infinity, mmr: 0.1 },
+  { limit: 5_000, mmr: 0.005 },
+  { limit: 25_000, mmr: 0.01 },
+  { limit: 100_000, mmr: 0.025 },
+  { limit: Infinity, mmr: 0.05 },
 ];
 
 /** 按名义价值取维持保证金率 */
@@ -50,6 +53,12 @@ export function mmrFor(symbol: string, notional: number): number {
  * 币安逐仓强平价（精确式，含维持保证金计提）：
  * 多：liq = E × (1 − 1/L) / (1 − MMR)；空：liq = E × (1 + 1/L) / (1 + MMR)
  * 抽查：BTC 20x 多 −4.62% / 空 +4.58%；山寨 20x 多 −4.04%
+ *
+ * ⚠️ 退化防御（Task 47 修复）：当 MMR ≥ IMR（初始保证金率）时公式数学退化——
+ * IMR=MMR 时强平价 = 开仓价（开仓即触发强平）；IMR<MMR 时空单强平价低于开仓价 /
+ * 多单高于开仓价（开仓瞬间必然命中）。真实交易所通过限制大名义标的的最大杠杆保证
+ * IMR > MMR，模拟盘以「MMR ≤ IMR/2」钳制近似同一约束，确保强平价距开仓价
+ * 至少半个初始保证金率（20x ≥2.5%、10x ≥5%、5x ≥10%）。
  */
 export function liqPriceFor(input: {
   symbol: string;
@@ -60,6 +69,6 @@ export function liqPriceFor(input: {
 }): number {
   const { symbol, side, entry, leverage, notional } = input;
   const imr = 1 / leverage;
-  const mmr = mmrFor(symbol, notional);
+  const mmr = Math.min(mmrFor(symbol, notional), imr / 2); // 钳制：杜绝强平价退化/反转
   return side === 'LONG' ? (entry * (1 - imr)) / (1 - mmr) : (entry * (1 + imr)) / (1 + mmr);
 }
