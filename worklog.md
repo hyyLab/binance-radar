@@ -277,3 +277,17 @@ Work Log:
 Stage Summary:
 - 模拟盘页签精简为「异动监控 + 模拟建仓系统」；平仓流水折叠化（默认收起不占空间，合计盈亏常显，行可点开 K 线）
 - 异动事件池全部代币标签右上角常显触发时间（HH:MM），与已结束池时间格式一致
+
+---
+Task ID: 39
+Agent: Super Z (main)
+Task: 事件池标签时间改为「X 分钟前」相对格式（用户澄清 Task 38 的时间标注样式）
+
+Work Log:
+- enhanced-view.tsx EventChip：第二行时间从 fmtHM(firstAt)（HH:MM）改为相对时间；tooltip 保留绝对时间「触发于 HH:MM」
+- 首版直接用 fmtAgo 输出「29 分钟前」，截图发现窄卡片内与「证×2」一起折行 → format.ts 新增 fmtAgoShort()（无空格紧凑版：刚刚 / 29分前 / 3时前）
+- EventChip 第二行整体加 whitespace-nowrap，chg/证/时间/确认四个 span 全部 shrink-0 防压缩折行
+- 验证：eslint 零错误；桌面截图 PUMP「9分前 待」、GTC「1分前 双」单行无折行；移动端 390px 同样正常；相对时间随页面 1 秒心跳自动跳动
+
+Stage Summary:
+- 事件池三池标签时间样式定稿：「X分前」紧凑相对时间（自动刷新），悬停可见绝对触发时间
