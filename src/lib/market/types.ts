@@ -185,6 +185,8 @@ export interface PaperTradeDTO {
   fee: number;
   pnl: number;
   createdAt: string;
+  /** 仅平仓行附带：该仓位开仓（买入/卖出开仓）时已收的 Taker 手续费，用于流水合并展示双边费用 */
+  openFee?: number;
 }
 
 export interface PaperAccountDTO {

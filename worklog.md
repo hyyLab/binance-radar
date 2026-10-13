@@ -324,3 +324,22 @@ Work Log:
 Stage Summary:
 - 升级版页签闭环：事件池盯机会 → 事件明细看依据 → 持仓明细管仓位（涨跌 3s 刷新 + 一键平仓 + 手动开仓），不再需要切回模拟盘页签
 - PositionsTable 升级为跨页签共享组件（emptyHint 参数化）
+
+---
+Task ID: 42
+Agent: Super Z (main)
+Task: 模拟盘手续费双边口径透明化（买入开仓手续费在流水中可见，平仓盈亏改为双边净额）
+
+Work Log:
+- 用户反馈「币安买卖都有手续费，为什么这里没有买入时候的手续费」；核查 paper.ts 确认开仓费一直有收（开仓即从余额扣除 margin+fee，DB 中 OPEN 行 fee 合计 0.59），但两处展示缺口让它"隐形"：①Task 38 流水只显示平仓行，开仓行被过滤；②平仓行 pnl=毛盈亏-平仓费，未扣该仓开仓费，合计比余额变化虚高
+- paper.ts close()：netPnl 改为 毛盈亏-平仓费-开仓费（双边净额口径，对齐币安已实现盈亏含佣金）；position.pnl 同步净额；余额结算逻辑不变（开仓费开仓时已扣，不重复）
+- paper.ts snapshot()：新增按 positionId 批量取 openFee，平仓行 DTO 附带 openFee 字段；types.ts PaperTradeDTO 增 openFee?；LIQUIDATE 行保持原口径不动
+- paper-panel.tsx HistoryList：手续费列改显双边合计「手续费 0.153（含开仓 0.076）」（sm 以下只显合计，tooltip 展开明细）；移动端行列超宽问题修复——外层 overflow-auto + 内层 min-w-[520px] sm:min-w-0（窄屏横向滑动看全列，桌面布局不变）
+- trade-modal.tsx：计算区 4→6 格（新增「预估平仓手续费」）；脚注改「开/平仓双边均收 Taker 0.05%」；账户卡徽标同步「开/平双边」；useClosePosition 平仓 toast 注明「已扣开/平双边手续费」
+- scripts/migrate-close-pnl-net.ts：一次性迁移 8 条历史平仓行 pnl 回补扣除开仓费（迁移后 10+Σ平仓pnl=balance 严丝合缝：10-2.8377=7.1623）
+- 排查 dev 热更新失效：改 API 后响应不变，定位为 paperEngine 全局单例（globalThis.__binanceRadarPaper_v2）跨热更新复用旧类实例——bump key 至 _v3 重建实例（PaperEngine 无内存状态，安全）；这解释了此前"改服务端代码不生效"的现象
+- 验证：eslint 全绿；桌面 1440 流水每行显双边手续费、账户卡「费 1.18」=开0.59+平0.59、合计-2.84 与余额对账一致；移动 390 展开流水横向滑动正常；开仓弹窗 6 格布局正常；全程未重启 server
+
+Stage Summary:
+- 模拟盘费用模型与币安对齐且全程可对账：开仓扣 margin+开仓费 → 平仓回 margin+毛盈亏-平仓费 → 流水行显示双边合计费用与双边净额盈亏 → 合计盈亏+初始资金=当前余额（已实测零误差）
+- 发现并修复 dev 模式全局单例阻断服务端热更新的坑（bump 版本 key 解法），后续改 paperEngine 类方法后需再 bump

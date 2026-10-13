@@ -105,6 +105,24 @@ export class PaperEngine {
       take: 30,
     });
 
+    // 平仓行附带开仓手续费：从关联仓位取 openFee（开仓时已从余额扣除的费用，流水合并展示）
+    const posIds = [
+      ...new Set(
+        trades
+          .filter((t) => CLOSE_ACTIONS.includes(t.action))
+          .map((t) => t.positionId)
+          .filter((id): id is string => !!id),
+      ),
+    ];
+    const openFeeMap = new Map<string, number>();
+    if (posIds.length > 0) {
+      const feeRows = await db.paperPosition.findMany({
+        where: { id: { in: posIds } },
+        select: { id: true, openFee: true },
+      });
+      for (const r of feeRows) openFeeMap.set(r.id, r.openFee);
+    }
+
     let unrealized = 0;
     let marginUsed = 0;
     const positions: PaperPositionDTO[] = openRows.map((p) => {
@@ -175,6 +193,10 @@ export class PaperEngine {
       fee: t.fee,
       pnl: t.pnl,
       createdAt: t.createdAt.toISOString(),
+      openFee:
+        CLOSE_ACTIONS.includes(t.action) && t.positionId
+          ? openFeeMap.get(t.positionId)
+          : undefined,
     }));
 
     return { account, positions, history, ts: Date.now() };
@@ -344,7 +366,8 @@ export class PaperEngine {
     const sign = this.dirSign(pos.side);
     const grossPnl = (mark - pos.entryPrice) * pos.qty * sign;
     const closeFee = mark * pos.qty * TAKER_FEE;
-    const netPnl = grossPnl - closeFee;
+    // 净盈亏扣除双边手续费：开仓费（开仓时已从余额扣除）+ 平仓费（此处结算时扣除）
+    const netPnl = grossPnl - closeFee - pos.openFee;
 
     await db.$transaction([
       db.paperPosition.update({
@@ -352,7 +375,7 @@ export class PaperEngine {
         data: {
           status: 'CLOSED',
           exitPrice: mark,
-          pnl: grossPnl,
+          pnl: netPnl,
           closeFee,
           closedAt: new Date(),
         },
@@ -444,7 +467,8 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  __binanceRadarPaper_v2?: PaperEngine;
+  // v3: 平仓净盈亏改为双边手续费口径（净额扣开仓费）。bump key 以便 dev 热更新后重建引擎实例（本引擎无内存状态，安全）
+  __binanceRadarPaper_v3?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v2 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v3 ??= new PaperEngine());

@@ -258,6 +258,10 @@ export function TradeModal({
             <span className="font-semibold">{fee > 0 ? fee.toFixed(3) : '—'} U</span>
           </div>
           <div className="flex justify-between">
+            <span className="text-muted-foreground">预估平仓手续费</span>
+            <span className="font-semibold">{fee > 0 ? fee.toFixed(3) : '—'} U</span>
+          </div>
+          <div className="flex justify-between">
             <span className="text-muted-foreground">预估强平价</span>
             <span className="font-semibold text-down">{liqPrice > 0 ? fmtPrice(liqPrice) : '—'}</span>
           </div>
@@ -292,7 +296,7 @@ export function TradeModal({
               : `一键卖出做空 ${symbol.replace(/USDT$/, '')}`}
         </button>
         <p className="text-center text-[11px] text-muted-foreground">
-          模拟盘 · 无真实资金 · Taker 费率 0.05% / Maker 0.02%（币安 USDT-M）· 触及强平价自动清算
+          模拟盘 · 无真实资金 · 开/平仓双边均收 Taker 0.05%（币安 USDT-M）· 触及强平价自动清算
         </p>
       </DialogContent>
     </Dialog>

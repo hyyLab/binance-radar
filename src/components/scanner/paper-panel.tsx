@@ -187,8 +187,9 @@ function HistoryList({
     );
   }
   return (
-    <div className="custom-scroll max-h-56 overflow-y-auto">
-      {rows.map((h) => (
+    <div className="custom-scroll max-h-56 overflow-auto">
+      <div className="min-w-[520px] sm:min-w-0">
+        {rows.map((h) => (
         <button
           key={h.id}
           onClick={() => onSelectSymbol(h.symbol)}
@@ -214,15 +215,30 @@ function HistoryList({
           <span className="w-20 shrink-0 text-right tabular-nums text-muted-foreground">
             {fmtPrice(h.price)}
           </span>
-          <span className="flex-1 text-right tabular-nums text-muted-foreground">
-            手续费 {h.fee.toFixed(3)}
+          <span
+            className="flex-1 whitespace-nowrap text-right tabular-nums text-muted-foreground"
+            title={
+              h.openFee && h.openFee > 0
+                ? `双边手续费 ${(h.fee + h.openFee).toFixed(3)} = 开仓 ${h.openFee.toFixed(3)} + 平仓 ${h.fee.toFixed(3)}`
+                : undefined
+            }
+          >
+            {h.openFee && h.openFee > 0 ? (
+              <>
+                手续费 {(h.fee + h.openFee).toFixed(3)}
+                <span className="ml-0.5 hidden text-[10px] sm:inline">（含开仓 {h.openFee.toFixed(3)}）</span>
+              </>
+            ) : (
+              <>手续费 {h.fee.toFixed(3)}</>
+            )}
           </span>
           <span className={cn('w-24 shrink-0 text-right font-bold tabular-nums', pnlCls(h.pnl))}>
             {h.pnl >= 0 ? '+' : ''}
             {h.pnl.toFixed(2)} U
           </span>
         </button>
-      ))}
+        ))}
+      </div>
     </div>
   );
 }
@@ -281,7 +297,7 @@ export function PaperPanel({
             </CardTitle>
             <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold">
               本金 {acc ? (acc.initialCapital + acc.totalDeposited).toLocaleString('en-US') : '10'} USDT
-              {acc && acc.totalDeposited > 0 ? '（含充值）' : ''} · 最高 20× · 币安 USDT-M 费率 Taker 0.05%/Maker 0.02%
+              {acc && acc.totalDeposited > 0 ? '（含充值）' : ''} · 最高 20× · 币安 USDT-M 开/平双边 Taker 0.05%
             </span>
             <div className="ml-auto flex items-center gap-2">
               <button

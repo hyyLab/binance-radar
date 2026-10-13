@@ -112,7 +112,7 @@ export function useClosePosition() {
       const profit = data.pnl >= 0;
       toast({
         title: `已平仓 ${data.symbol.replace(/USDT$/, '')}`,
-        description: `${data.side === 'LONG' ? '多' : '空'}单 · 净盈亏 ${profit ? '+' : ''}${data.pnl.toFixed(2)} USDT`,
+        description: `${data.side === 'LONG' ? '多' : '空'}单 · 净盈亏（已扣开/平双边手续费） ${profit ? '+' : ''}${data.pnl.toFixed(2)} USDT`,
         variant: profit ? 'default' : 'destructive',
       });
       void qc.invalidateQueries({ queryKey: ['paper-account'] });
