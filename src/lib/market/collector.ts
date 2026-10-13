@@ -352,7 +352,11 @@ export class MarketCollector {
         const prevRaw = this.last24hRaw.get(raw.symbol);
         if (prevRaw) {
           const dtMin = (raw.closeTime - prevRaw.closeTime) / 60_000;
-          if (dtMin >= 0.7 && dtMin <= 6) {
+          // 接受窗口必须覆盖实际轮询节奏（30s）：dtMin≈0.5min。
+          // 旧值 >= 0.7（42s）导致正常 30s 间隔差分几乎全部被丢弃，vol1m 长时间冻结为旧值，
+          // 引擎在异动瞬间看到的是异动前的低成交量 → 被成交额门槛拦截 → 中小币异动成片漏报。
+          // perMin 本身已按 dtMin 归一化为每分钟速率，窗口下限仅需防零间隔抖动（18s）。
+          if (dtMin >= 0.35 && dtMin <= 6) {
             const perMin = (qv - Number(prevRaw.quoteVolume)) / dtMin;
             if (Number.isFinite(perMin) && perMin >= 0) {
               const bucket = Math.floor(now / 60_000) * 60_000;
@@ -736,8 +740,32 @@ export class MarketCollector {
 }
 
 // ---------- 全局单例（HMR 安全） ----------
+// v2：vol1m 差分窗口修复（dtMin>=0.7 → >=0.35）。
+// ⚠️ dev 下 Turbopack 每个 API 路由可持有独立模块图：模块级 IIFE 会在每次图评估时执行，
+// 因此这里必须「同 key 必复用」（跨路由收敛到同一实例），绝不能无条件替换——
+// 替换会把他图正在服务的实例定时器清掉，造成数据冻结。代码更新靠 bump key（v2→v3…）。
 const g = globalThis as typeof globalThis & {
   __binanceRadarCollector?: MarketCollector;
+  __binanceRadarCollector_v2?: MarketCollector;
 };
 
-export const collector: MarketCollector = (g.__binanceRadarCollector ??= new MarketCollector());
+function clearCollectorTimers(c: unknown): void {
+  const legacy = c as {
+    priceTimer?: ReturnType<typeof setInterval> | null;
+    tfTimer?: ReturnType<typeof setInterval> | null;
+  } | null;
+  if (!legacy) return;
+  if (legacy.priceTimer) clearInterval(legacy.priceTimer);
+  if (legacy.tfTimer) clearInterval(legacy.tfTimer);
+  legacy.priceTimer = null;
+  legacy.tfTimer = null;
+}
+
+export const collector: MarketCollector = (() => {
+  const existing = g.__binanceRadarCollector_v2;
+  if (existing) return existing; // 任何图的任何次评估都复用同一实例
+  if (g.__binanceRadarCollector) clearCollectorTimers(g.__binanceRadarCollector); // v1 遗留停表
+  const fresh = new MarketCollector();
+  g.__binanceRadarCollector_v2 = fresh;
+  return fresh;
+})();

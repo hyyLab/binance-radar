@@ -343,3 +343,22 @@ Work Log:
 Stage Summary:
 - 模拟盘费用模型与币安对齐且全程可对账：开仓扣 margin+开仓费 → 平仓回 margin+毛盈亏-平仓费 → 流水行显示双边合计费用与双边净额盈亏 → 合计盈亏+初始资金=当前余额（已实测零误差）
 - 发现并修复 dev 模式全局单例阻断服务端热更新的坑（bump 版本 key 解法），后续改 paperEngine 类方法后需再 bump
+
+---
+Task ID: 43
+Agent: Super Z (main)
+Task: 排查「RSR 11:32 明显异动未监测到」——定位并修复 vol1m 全市场冻结导致的成片漏报
+
+Work Log:
+- 复盘 11:32 RSR：拉币安 1m K 线还原——1m +2.21%（超 MAJOR 固定阈值 2.0）、5m +2.81%、量比 15×、qv1m 41.7K；自适应阈值复算（medAbs1m=0.297%）证明阈值当时就是固定值，SPIKE 本应 MAJOR 触发 → 问题在输入端
+- 发现 AnomalyEvent 表 0 行（enhanced 引擎纯内存缓冲），DB 无从回查；改用 API 缓冲 + 币安 K 线双源还原
+- 根因：collector.refresh24h 每 30s 拉全市场 24hr 差分每分钟成交额，但接受条件 dtMin>=0.7（42s）> 轮询间隔（30s）→ 差分几乎全被丢弃 → vol1m/volAvg20m 长时间冻结为旧值（实测 3.5 分钟 0 更新）→ 引擎在异动瞬间看到的是异动前的低量 → SPIKE（qv1m≥1万）与 VOLUME（qv1m≥5万）双双被门槛拦死；大币冻结值恰好高于门槛仍能靠价格触发，中小币成片漏报，VOLUME 检测器全天瘫痪
+- 修复：dtMin 窗口改 >=0.35（18s 下限防抖动，perMin 本就按 dtMin 归一化）；collector 单例 key bump v2
+- 踩坑与二次修复：dev 下 Turbopack 每个 API 路由可持有独立模块图，首版「无条件替换式」IIFE 把他图正在服务的实例定时器清掉，造成 tickers 路由数据冻结（updatedAt 卡 12:17:09）——改为「同 key 必复用」收敛式单例（跨图共享同实例，代码更新靠 bump key），touch 全部 17 个 route.ts 强制各图重估收敛，随后 ?reset=1 重挂增强引擎（K 线仓库保留）
+- 验证：修复前探针 3.5min vol1m 0 更新；修复后 BTC 6 次/RSR 7 次（平均年龄 14-19s、最大 57s）；实时抓到 RSR 12:34:16 MAJOR·P1（量比 21.3×，qv1m 5.0 万U，正是探针看到 49K 跳动的时刻），VOLUME 检测器全线复活（牛来 30×/SPCXB 51×/U 57×）；UI P1 池正常显示 RSR/牛来；eslint 全绿；全程未重启 server
+- 现在回看 11:32 RSR：vol1m 修复后 SPIKE 门槛（qv1m≥1万）可过 → 1m +2.21% 会以 MAJOR 触发；VOLUME 检测器 5 万门槛对 41.7K 仍拦（设计门槛，属 Task 32 阶段二分层校准范畴）
+
+Stage Summary:
+- 漏报主因修复：vol1m 差分窗口对齐 30s 轮询节奏，量能输入从「冻结假数据」变为 30s 级实时速率，SPIKE/VOLUME 两检测器的成交额门槛恢复判别力
+- 架构认知落档：Turbopack dev 每路由独立模块图 → 模块级单例必须「同 key 必复用」；paperEngine（v3）/collector（v2）均已按此模式，后续改这两个引擎代码需 bump key + touch 相关 route.ts
+- 遗留：VOLUME 5 万/分钟门槛对中小币偏严（RSR 类 15× 放量仍被拦）、自适应阈值倍数校准——归入 Task 32 阶段二
