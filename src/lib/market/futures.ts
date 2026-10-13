@@ -1,5 +1,5 @@
 // ---------- 模拟盘 · 币安 USDT-M 合约规则（客户端/服务端同源，防两处公式漂移） ----------
-// 重置资金 10 USDT · 最高 20x 杠杆 · 最低保证金 2 USDT
+// 重置资金 10 USDT · 最高 20x 杠杆 · 最低保证金 2 USDT · 单仓保证金 ≤ 可用余额 50%
 // 手续费：Taker 0.05%（市价开/平仓双边收取）· Maker 0.02%（限价挂单，备案；模拟盘统一按 Taker 计）
 // 强平价：币安逐仓精确式 liq = E(1±IMR)/(1∓MMR)，MMR 按名义价值分层（BTC/ETH/其他 各自档位）
 
@@ -8,6 +8,23 @@ export const PAPER_MAX_LEVERAGE = 20;
 export const PAPER_MIN_MARGIN = 2;
 export const PAPER_MIN_DEPOSIT = 10;
 export const PAPER_MAX_DEPOSIT = 1_000_000;
+
+/** 单仓风险上限（Task 48）：单仓保证金最高占可用余额的比例——收窄「最大可开」，
+ *  避免全仓梭哈一把就被强平打穿账户（强平价公式本身不动，仍按币安规则，见 liqPriceFor） */
+export const PAPER_MAX_MARGIN_RATIO = 0.5;
+
+/**
+ * 单仓最大可开保证金（客户端/服务端同源，Task 48 用户要求收紧）：
+ * 取「可用余额 × 50%」与「预留开仓手续费后的全额上限」两者较小值，向下取整到分。
+ * 前端 trade-modal 展示「最大可开」与服务端 PaperEngine.open 拒绝阈值由本函数唯一提供。
+ */
+export function maxOpenableMargin(available: number, leverage: number): number {
+  if (!Number.isFinite(available) || available <= 0) return 0;
+  const ratioCap = available * PAPER_MAX_MARGIN_RATIO; // 单仓比例上限
+  const feeCap = available / (1 + leverage * TAKER_FEE); // 需预留开仓手续费（恒大于比例上限，防御性保留）
+  // +1e-9 抵消浮点伪影：如 4960.4×0.5 实算 2480.1999999999998，裸 floor 会丢一分钱
+  return Math.floor((Math.min(ratioCap, feeCap) + 1e-9) * 100) / 100;
+}
 
 /** 币安 USDT-M 合约费率 */
 export const TAKER_FEE = 0.0005; // 0.05% 市价单
@@ -50,7 +67,8 @@ export function mmrFor(symbol: string, notional: number): number {
 }
 
 /**
- * 币安逐仓强平价（精确式，含维持保证金计提）：
+ * 币安逐仓强平价（精确式，含维持保证金计提）——⚠️ Task 48 后此公式冻结不动，
+ * 仓位风险控制改由 maxOpenableMargin（单仓保证金上限）承担：
  * 多：liq = E × (1 − 1/L) / (1 − MMR)；空：liq = E × (1 + 1/L) / (1 + MMR)
  * 抽查：BTC 20x 多 −4.62% / 空 +4.58%；山寨 20x 多 −4.04%
  *

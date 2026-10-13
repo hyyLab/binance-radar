@@ -11,8 +11,10 @@ import {
   PAPER_MIN_MARGIN,
   PAPER_MIN_DEPOSIT,
   PAPER_MAX_DEPOSIT,
+  PAPER_MAX_MARGIN_RATIO,
   TAKER_FEE,
   liqPriceFor,
+  maxOpenableMargin,
 } from './futures';
 import type {
   PaperAccountDTO,
@@ -239,6 +241,18 @@ export class PaperEngine {
     const openCount = await db.paperPosition.count({ where: { accountId: acc.id, status: 'OPEN' } });
     if (!dup && openCount >= MAX_OPEN_POSITIONS) {
       throw new PaperError(`最多同时持有 ${MAX_OPEN_POSITIONS} 个仓位`);
+    }
+
+    // 单仓风险上限（Task 48 用户要求收紧「最大可开」）：单仓保证金最多动用可用余额的
+    // PAPER_MAX_MARGIN_RATIO（50%），避免全仓梭哈一把就被强平打穿账户。强平价公式
+    // （liqPriceFor）不动，仍按币安逐仓规则；加仓合并场景同样只约束本次新增部分。
+    const maxMargin = maxOpenableMargin(acc.balance, input.leverage);
+    if (input.margin > maxMargin + 1e-9) {
+      throw new PaperError(
+        `超出单仓上限：保证金最高 ${maxMargin.toFixed(2)} USDT（可用余额的 ${(
+          PAPER_MAX_MARGIN_RATIO * 100
+        ).toFixed(0)}%），可平仓回笼资金或充值后再开`,
+      );
     }
 
     const fee = input.margin * input.leverage * TAKER_FEE;
@@ -478,10 +492,9 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  // v4: markPrice 改为经 __binanceRadarCollectorActive 动态解析活跃 collector；
-  // 重建实例以摆脱 v3 闭包绑定的 v1 僵尸 collector（其定时器已在 collector v2 上线时停掉，
-  // 导致持仓 markPrice 冻结在停表价）。本引擎无内存状态（全走 DB），重建安全。
-  __binanceRadarPaper_v4?: PaperEngine;
+  // v5: open() 新增单仓保证金上限校验（可用余额 50%，与前端同源 futures.maxOpenableMargin）。
+  // 本引擎无内存状态（全走 DB），重建安全。
+  __binanceRadarPaper_v5?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v4 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v5 ??= new PaperEngine());
