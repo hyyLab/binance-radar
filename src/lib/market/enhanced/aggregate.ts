@@ -255,6 +255,8 @@ export class Aggregator {
       ((dto.dir === 'UP' && kinds.has('BREAKOUT_UP')) || (dto.dir === 'DOWN' && kinds.has('BREAKOUT_DOWN')));
     const boPending = dto.breakout.status === 'PENDING';
     const boFalse = dto.breakout.status === 'FALSE';
+    // 冲高/杀跌回落（§8.2）：整事件窗口高低差回撤过半（方向判定与冷却判定共用，同 snap 幂等）
+    const retraced = this.spikeRetraced(ev, snap);
 
     if (dto.breakout.status === 'CONFIRMED' && (kinds.has('BREAKOUT_UP') || kinds.has('BREAKOUT_DOWN'))) {
       // §8.4/8.5 有效突破
@@ -272,7 +274,7 @@ export class Aggregator {
     } else if (kinds.has('SPIKE_UP') || kinds.has('SPIKE_DOWN')) {
       // §8.2/8.3 急拉/急杀
       const up = kinds.has('SPIKE_UP');
-      const retrace = this.spikeRetraced(ev, snap);
+      const retrace = retraced;
       if (retrace) {
         caution = up ? '冲高回落风险：急拉后未能维持涨幅' : '急跌后快速回收，注意假破位';
         tendency = 'UNKNOWN';
@@ -306,7 +308,7 @@ export class Aggregator {
     } else if (kinds.has('VOLUME_UP') || kinds.has('VOLUME_DOWN')) {
       // §8.6/8.7 放量
       const up = kinds.has('VOLUME_UP');
-      const retrace = this.spikeRetraced(ev, snap);
+      const retrace = retraced;
       if (retrace) {
         caution = up ? '放量上涨但价格未能维持高位，冲高回落风险' : '放量下跌后快速收回，等待进一步确认';
         tendency = 'UNKNOWN';
@@ -359,7 +361,11 @@ export class Aggregator {
     dto.direction = { tendency, confirm, reasons, caution };
 
     // ============ 优先级（§十） ============
-    dto.priority = this.priorityOf(dto, confirm, boConfirmed, wasUpgraded);
+    // 冷却判定（§十 P1 语义的另一面）：曾达 P1 且热度已过（冲高回落/假突破）→ 降出 P1 进冷却池。
+    // 只约束「曾经热过、现在凉了」的事件；新发生的异动不受影响（MAJOR 急拉急跌发生即 P1，方向可不明）。
+    // 有效突破例外：突破有效性由 FALSE 链路单独判定，价格回落但未回到区间内前仍按有效突破对待。
+    const cooled = dto.peakPriority === 'P1' && !boConfirmed && (retraced || boFalse);
+    dto.priority = this.priorityOf(dto, confirm, boConfirmed, wasUpgraded, cooled);
     // P1 时间语义：记录最近一次「进入 P1」的时刻（回落后再升级会刷新；P1/冷却/已结束池展示用）
     if (dto.priority === 'P1' && prevPriority !== 'P1') dto.p1At = now;
     // 历史最高优先级只升不降（冷却池判定：曾达 P1 的事件优先级回落且方向转不明时进入冷却池）
@@ -372,7 +378,11 @@ export class Aggregator {
     confirm: ConfirmLevel,
     boConfirmed: boolean,
     wasUpgraded: boolean,
+    cooled: boolean,
   ): Priority {
+    // 冷却：曾达 P1、现已回落/假突破的事件让出紧急池（P3 → 前端冷却池；peakPriority 保持 P1）。
+    // 若热度回归（价格再创新高/新证据触发，retrace 消失）会重新达 P1，p1At 随之刷新。
+    if (cooled) return 'P3';
     const hasSpike = dto.evidence.some((e) => e.kind === 'SPIKE_UP' || e.kind === 'SPIKE_DOWN');
     const hasVolume = dto.evidence.some((e) => e.kind === 'VOLUME_UP' || e.kind === 'VOLUME_DOWN');
     // P1（§十逐条对应）：已确认 MAJOR 急拉急跌（行情有效性已确认即推送，方向可不明——
@@ -414,6 +424,14 @@ export class Aggregator {
   sweep(now: number): void {
     for (const [key, ev] of this.active) {
       const quietFor = now - ev.lastDetectionAt;
+      // 动量衰减冷却（§十）：曾达 P1 仍挂紧急池的事件，静默超阈值 → 先降出 P1 进冷却池；
+      // 到 quietEndMs 结束线仍按原规则结束归档（冷却池保有 coolDownQuietMs → quietEndMs 的观察期）。
+      // 若之后再次触发（新证据 merge → rejudge），热度回归会重新达 P1 并刷新 p1At。
+      if (ev.dto.priority === 'P1' && quietFor >= AGG.coolDownQuietMs && quietFor < AGG.quietEndMs) {
+        ev.dto.priority = 'P3';
+        this.format(ev.dto); // headline/lines 中的 [P1] 同步为 [P3]；peakPriority/p1At 保持不动
+        continue;
+      }
       if (quietFor >= AGG.quietEndMs || now - ev.dto.firstAt >= AGG.maxEventAgeMs) {
         this.endEvent(key, now);
       }

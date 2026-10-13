@@ -92,6 +92,7 @@ export const AGG = {
   mergeWindowMs: 60_000, // 同币种同方向 60s 内优先合并
   cooldownMs: 5 * 60_000, // 兜底冷却（保留原 5 分钟，但不机械执行）
   quietEndMs: 90_000, // 条件消失且价格稳定该时长后事件结束
+  coolDownQuietMs: 45_000, // 曾达 P1 的事件静默该时长后先降出 P1 进冷却池（动量衰减；须 < quietEndMs）
   maxEventAgeMs: 30 * 60_000, // 事件最长存活
   maxEventsKept: 400, // 已结束事件保留条数（内存）
 } as const;

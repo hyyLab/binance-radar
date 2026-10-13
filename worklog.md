@@ -399,3 +399,21 @@ Stage Summary:
 - P1/冷却/已结束池时间语义定稿：「进入P1时刻」起算（p1At），P2 池保持首次触发时间，tooltip 保留完整时间线
 - P2 门槛收紧为「不同类型第二证据」（§九），同类型重复触发不再凑数
 - 规格书阶段二遗留项不变：medQv1m 成交额分层统计量、VOLUME 5万门槛对中小币校准、自适应倍数回放校准
+---
+Task ID: 46
+Agent: Super Z (main)
+Task: 排查「冷却池一直没东西」——冷却降级链路缺失（曾P1事件永不降出P1）+ 前端冷却池条件过窄
+
+Work Log:
+- 用户反馈冷却池一直为空；先拉引擎实时数据取证：BAT 事件 peak=P1/pri=P2/tend=UNKNOWN（曾达P1已回落方向不明）却挤在 P2 池——前端冷却池条件 priority==='P3' 收不到它；更关键的根因在后端 priorityOf：MAJOR 急拉事件 dto.level==='MAJOR'&&hasSpike 恒成立 → priority 永不回落，即使冲高回落/假突破也一直占 P1 池直到 90s 静默结束，「P3+曾P1」组合几乎不可能出现，冷却池成死路
+- 后端修复①（retrace/假突破冷却）：rejudge 提出 retraced=spikeRetraced(ev,snap) 到方向分支外（方向判定与冷却判定共用，同 snap 幂等）；priorityOf 新增 cooled 参数——cooled = peakPriority==='P1' && !boConfirmed && (retraced||boFalse) → 返回 P3；只约束「曾经热过现在凉了」的事件，新发生异动不受影响（MAJOR 急拉急跌发生即 P1 口径不变）；有效突破例外：回落未回区间前突破有效性由 FALSE 链路单独判定，不按回撤冷却
+- 后端修复②（动量衰减冷却）：sweep 新增——曾P1 仍挂 P1 的事件静默 ≥AGG.coolDownQuietMs（新增配置 45s，须<quietEndMs 90s）→ 先降 P3 进冷却池（peakPriority/p1At 保持，format 同步 headline）；到 90s 结束线照常结束归档 → 冷却池保有 45~90s 观察期；再触发（新证据 merge→rejudge）热度回归会重新达 P1 并刷新 p1At
+- 前端修复③：冷却池条件放宽为 priority!=='P1' && peakPriority==='P1' && tendency==='UNKNOWN'（回落途中 P2/P3 都算冷却，P2 只是过渡档位）；P2 池同步排除冷却事件不重复展示（!cooled.includes 引用比较安全——同源 filter）
+- 验证：scripts/verify-cooldown-rule.ts 单元断言 27/27 通过（回落进冷却+headline同步[P3]、创新高回P1+p1At刷新、假突破冷却、未达P1不冷却、有效突破回落仍P1、sweep 45s降冷却/90s结束、sweep降级后再触发回P1刷p1At、BAT场景P2+曾P1+UNKNOWN命中冷却条件）；旧规则 verify-p1-rule.ts 11/11 无回归；eslint 全绿
+- ?reset=1 重挂引擎（K线仓库保留）后真实事件即刻实证：TIA 突破确认进P1(06:38:02)→价格回到区间标假突破→新逻辑降出P1进冷却池→90s结束归档已结束池（行首显示进入P1时刻 06:38:02）；LUMIA 假突破降级后在冷却池稳定展示（曾P1金徽标+147秒前=p1At起算），事件明细完整（MAJOR/P3/曾达P1徽标、疑似假突破风险提示、方向不明隐藏交易按钮）；桌面1440+移动390截图正常
+- 全程未重启 server；用户验证期间自开的 LUMIA 20x 多单不受影响（账户对账自洽：总权益=余额+浮亏、ROI 相对初始资金）
+
+Stage Summary:
+- 冷却池从「死路」变「活水」：曾达P1 的事件现在有三条真实的降级路径进冷却池——冲高回落（retrace>振幅一半）、假突破（FALSE 标记）、动量衰减（静默45s），且热度回归自动重返P1并刷新 p1At
+- P1 池语义回归「紧急」：不再被已回落/已停触发的事件长期占位，异动发生即进、热度过即出
+- 池子流转全景：P1（紧急）→ 冷却池（曾P1+方向不明，45-90s观察期）→ 已结束池（MAJOR·曾P1归档）；P2 池只留方向仍明确的事件

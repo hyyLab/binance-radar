@@ -400,12 +400,13 @@ export function EnhancedView() {
 
   // --- 池分组：沿用服务端稳定排序（优先级 + 触发时间队列序），过滤不改顺序 ---
   const p1 = active.filter((e) => e.priority === 'P1');
-  const p2 = active.filter((e) => e.priority === 'P2');
-  // 第三池（替代原 P3 池）：曾进入 P1 紧急池、优先级回落且方向转不明的「冷却」事件；
-  // 其余普通 P3（从未达到 P1）不再展示，仅引擎内部记录。
+  // 冷却池：曾进入 P1 紧急池、现已降出 P1 且方向转不明的「冷却」事件
+  //（冲高回落 / 动量衰减 / 假突破）。回落途中无论当前落在 P2 还是 P3 都算冷却
+  //（P2 只是过渡档位，方向不明就不再算「观察」），P2 池中不再重复展示。
   const cooled = active.filter(
-    (e) => e.priority === 'P3' && e.peakPriority === 'P1' && e.direction.tendency === 'UNKNOWN',
+    (e) => e.priority !== 'P1' && e.peakPriority === 'P1' && e.direction.tendency === 'UNKNOWN',
   );
+  const p2 = active.filter((e) => e.priority === 'P2' && !cooled.includes(e));
   const selectedEvent =
     [...active, ...ended].find((e) => e.id === selectedEventId) ?? null;
 
