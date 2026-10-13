@@ -1,23 +1,32 @@
 // ---------- 模拟建仓引擎（Paper Trading） ----------
-// 规则：初始 1000 USDT；最高 20x；Taker 手续费 0.05%（开/平仓都收）；
-// 维持保证金率 0.5%（用于估算强平价）；触及强平价自动清算（亏损全部保证金）
+// 规则（对齐币安 USDT-M 合约，见 ./futures）：初始 10 USDT；最高 20x；最低保证金 2 USDT；
+// Taker 手续费 0.05%（开/平仓都收，Maker 0.02% 备案）；
+// 强平价按币安逐仓精确式（分层维持保证金率）；触及强平价自动清算（小名义价值下亏损全部保证金）
 
 import { db } from '@/lib/db';
 import { collector } from './collector';
+import {
+  PAPER_INITIAL_CAPITAL,
+  PAPER_MAX_LEVERAGE,
+  PAPER_MIN_MARGIN,
+  PAPER_MIN_DEPOSIT,
+  PAPER_MAX_DEPOSIT,
+  TAKER_FEE,
+  liqPriceFor,
+} from './futures';
 import type {
   PaperAccountDTO,
   PaperPositionDTO,
   PaperTradeDTO,
 } from './types';
 
-export const TAKER_FEE = 0.0005;
-const MMR = 0.005;
-export const INITIAL_CAPITAL = 1000;
-export const MAX_LEVERAGE = 20;
-export const MIN_MARGIN = 5;
+export { TAKER_FEE };
+export const INITIAL_CAPITAL = PAPER_INITIAL_CAPITAL;
+export const MAX_LEVERAGE = PAPER_MAX_LEVERAGE;
+export const MIN_MARGIN = PAPER_MIN_MARGIN;
 export const MAX_OPEN_POSITIONS = 20;
-export const MIN_DEPOSIT = 10;
-export const MAX_DEPOSIT = 1_000_000;
+export const MIN_DEPOSIT = PAPER_MIN_DEPOSIT;
+export const MAX_DEPOSIT = PAPER_MAX_DEPOSIT;
 const ACCOUNT_NAME = 'default';
 
 const CLOSE_ACTIONS = ['CLOSE_LONG', 'CLOSE_SHORT'];
@@ -193,10 +202,11 @@ export class PaperEngine {
     const dup = await db.paperPosition.findFirst({
       where: { accountId: acc.id, status: 'OPEN', symbol, side: input.side },
     });
-    if (dup) throw new PaperError(`该币种已有${input.side === 'LONG' ? '多' : '空'}单持仓，请先平仓`);
 
     const openCount = await db.paperPosition.count({ where: { accountId: acc.id, status: 'OPEN' } });
-    if (openCount >= MAX_OPEN_POSITIONS) throw new PaperError(`最多同时持有 ${MAX_OPEN_POSITIONS} 个仓位`);
+    if (!dup && openCount >= MAX_OPEN_POSITIONS) {
+      throw new PaperError(`最多同时持有 ${MAX_OPEN_POSITIONS} 个仓位`);
+    }
 
     const fee = input.margin * input.leverage * TAKER_FEE;
     if (input.margin + fee > acc.balance) {
@@ -207,8 +217,71 @@ export class PaperEngine {
 
     const notional = input.margin * input.leverage;
     const qty = notional / price;
-    const liqPrice =
-      input.side === 'LONG' ? price * (1 - 1 / input.leverage + MMR) : price * (1 + 1 / input.leverage - MMR);
+
+    // 同币同向已有持仓 → 加仓合并（加权均价重算开仓价，按合并后名义价值重算强平价）
+    if (dup) {
+      const mergedMargin = dup.margin + input.margin;
+      const mergedQty = dup.qty + qty;
+      const mergedEntry = (dup.entryPrice * dup.qty + price * qty) / mergedQty;
+      const mergedNotional = mergedMargin * input.leverage;
+      const mergedLiq = liqPriceFor({
+        symbol,
+        side: input.side,
+        entry: mergedEntry,
+        leverage: input.leverage,
+        notional: mergedNotional,
+      });
+      await db.$transaction([
+        db.paperPosition.update({
+          where: { id: dup.id },
+          data: {
+            leverage: input.leverage,
+            margin: mergedMargin,
+            qty: mergedQty,
+            entryPrice: mergedEntry,
+            liqPrice: mergedLiq,
+            openFee: dup.openFee + fee,
+          },
+        }),
+        db.paperAccount.update({ where: { id: acc.id }, data: { balance: { decrement: input.margin + fee } } }),
+        db.paperTrade.create({
+          data: {
+            accountId: acc.id,
+            positionId: dup.id,
+            symbol,
+            action: input.side === 'LONG' ? 'OPEN_LONG' : 'OPEN_SHORT',
+            price,
+            qty,
+            fee,
+            pnl: 0,
+          },
+        }),
+      ]);
+      return {
+        id: dup.id,
+        symbol,
+        base: dup.base,
+        side: input.side,
+        leverage: input.leverage,
+        margin: mergedMargin,
+        qty: mergedQty,
+        entryPrice: mergedEntry,
+        markPrice: price,
+        liqPrice: mergedLiq,
+        notional: mergedQty * price,
+        unrealizedPnl: 0,
+        roePct: 0,
+        openedAt: dup.openedAt.toISOString(),
+      };
+    }
+
+    const liqPrice = liqPriceFor({
+      symbol,
+      side: input.side,
+      entry: price,
+      leverage: input.leverage,
+      notional,
+    });
 
     const [pos] = await db.$transaction([
       db.paperPosition.create({
@@ -371,7 +444,7 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  __binanceRadarPaper?: PaperEngine;
+  __binanceRadarPaper_v2?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v2 ??= new PaperEngine());

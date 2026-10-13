@@ -6,12 +6,11 @@ import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { useOpenPosition, usePaperAccount } from '@/hooks/use-scanner';
 import { useTickers } from '@/hooks/use-market';
+import { PAPER_MIN_MARGIN, TAKER_FEE, liqPriceFor } from '@/lib/market/futures';
 import { fmtPrice, fmtQty } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { AlertTriangle, TrendingDown, TrendingUp } from 'lucide-react';
 
-const TAKER_FEE = 0.0005;
-const MMR = 0.005;
 const LEV_PRESETS = [5, 10, 20];
 const MARGIN_PRESETS = [0.1, 0.25, 0.5, 1];
 
@@ -62,15 +61,15 @@ export function TradeModal({
 
   const presetMargin = balance > 0 ? Math.min(balance * MARGIN_PRESETS[pctIdx], maxMargin) : 0;
   const margin = customMargin.trim() !== '' ? Number(customMargin) : presetMargin;
-  const marginValid = Number.isFinite(margin) && margin >= 5 && margin <= maxMargin + 1e-9;
+  const marginValid =
+    Number.isFinite(margin) && margin >= PAPER_MIN_MARGIN && margin <= maxMargin + 1e-9;
   const notional = marginValid ? margin * leverage : 0;
   const fee = notional * TAKER_FEE;
   const qty = price > 0 && notional > 0 ? notional / price : 0;
+  // 强平价：币安逐仓精确式（分层维持保证金率，同服务端 futures.liqPriceFor）
   const liqPrice =
-    price > 0 && leverage > 0
-      ? side === 'LONG'
-        ? price * (1 - 1 / leverage + MMR)
-        : price * (1 + 1 / leverage - MMR)
+    price > 0 && marginValid
+      ? liqPriceFor({ symbol, side, entry: price, leverage, notional })
       : 0;
 
   const canSubmit =
@@ -92,7 +91,7 @@ export function TradeModal({
       <DialogContent className="max-h-[92vh] w-[min(480px,95vw)] overflow-y-auto custom-scroll">
         <DialogTitle className="text-lg font-bold">模拟建仓 · 市价单</DialogTitle>
         <DialogDescription className="text-xs">
-          以最新成交价即时成交 · 初始资金 1,000 USDT · 最高 20× 杠杆
+          以最新成交价即时成交 · 初始资金 10 USDT · 最高 20× 杠杆 · 币安 USDT-M 合约规则
         </DialogDescription>
 
         {/* 币种选择 */}
@@ -237,7 +236,7 @@ export function TradeModal({
           <input
             value={customMargin}
             onChange={(e) => setCustomMargin(e.target.value.replace(/[^\d.]/g, ''))}
-            placeholder={`自定义（5 ~ ${maxMargin.toFixed(2)}，当前 ${marginValid ? margin.toFixed(2) : '—'}）`}
+            placeholder={`自定义（${PAPER_MIN_MARGIN} ~ ${maxMargin.toFixed(2)}，当前 ${marginValid ? margin.toFixed(2) : '—'}）`}
             className={cn(inputCls, 'mt-1.5')}
             inputMode="decimal"
             aria-label="自定义保证金"
@@ -267,11 +266,11 @@ export function TradeModal({
         {!marginValid && balance > 0 && (
           <div className="flex items-center gap-1.5 rounded-md bg-down/10 px-3 py-2 text-xs text-down">
             <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-            {balance < 5
-              ? '可用余额不足 5 USDT，请先平仓回笼资金或重置账户'
+            {balance < PAPER_MIN_MARGIN
+              ? `可用余额不足 ${PAPER_MIN_MARGIN} USDT，请先平仓回笼资金或重置账户`
               : margin > maxMargin
                 ? `超过最大可开保证金 ${maxMargin.toFixed(2)} U（需预留开仓手续费），已自动拉满可直接成交`
-                : '保证金至少 5 USDT'}
+                : `保证金至少 ${PAPER_MIN_MARGIN} USDT`}
           </div>
         )}
 
@@ -293,7 +292,7 @@ export function TradeModal({
               : `一键卖出做空 ${symbol.replace(/USDT$/, '')}`}
         </button>
         <p className="text-center text-[11px] text-muted-foreground">
-          模拟盘 · 无真实资金 · 以现货最新价成交，触及强平价将自动清算
+          模拟盘 · 无真实资金 · Taker 费率 0.05% / Maker 0.02%（币安 USDT-M）· 触及强平价自动清算
         </p>
       </DialogContent>
     </Dialog>

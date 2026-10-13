@@ -168,7 +168,7 @@ export function useResetAccount() {
   return useMutation({
     mutationFn: () => postJson<{ ok: true }>('/api/paper/reset', {}),
     onSuccess: () => {
-      toast({ title: '账户已重置', description: '资金已恢复至 1000 USDT' });
+      toast({ title: '账户已重置', description: '资金已恢复至 10 USDT' });
       void qc.invalidateQueries({ queryKey: ['paper-account'] });
     },
     onError: (err: Error) => {
