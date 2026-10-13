@@ -306,3 +306,21 @@ Work Log:
 Stage Summary:
 - 事件池标签时间定稿为纯秒数格式（自动跳动，精确感知新鲜度）
 - 已结束池语义收窄为「重要事件归档」：仅 MAJOR 且曾进入 P1 紧急池的事件入库展示，MINOR/普通 P3 结束事件仅引擎内部记录
+
+---
+Task ID: 41
+Agent: Super Z (main)
+Task: 升级版异动交易页签新增「持仓明细」面板（免切页签盯持仓涨跌）
+
+Work Log:
+- lib/utils.ts 新增共享 pnlCls()（盈亏红绿着色），paper-panel.tsx 删本地同名函数改 import
+- paper-panel.tsx PositionsTable 导出（export）并新增 emptyHint 可选 prop（空态文案按页签语境定制）
+- 新建 src/components/enhanced/positions-panel.tsx：Card「持仓明细」——标题行含数量徽标 + 浮动盈亏/总权益/ROI 摘要（红绿着色）+「3 秒刷新 · 与模拟盘同账户」+ 金色「手动开仓」按钮；表体复用 PositionsTable（币对点开 K 线 / 一键平仓 / 强平价 / ROE 全功能）；空态文案「在上方事件池点买入做多/卖出做空，或点右上手动开仓」
+- 数据源 usePaperAccount（queryKey ['paper-account'] 3s 轮询，与模拟盘同 key 自动去重共享缓存）；useClosePosition 平仓后 toast + 缓存失效联动
+- enhanced-view.tsx：EnhancedView 底部（事件明细之后）挂 PositionsPanel；补 openManual()（此前仅 ScannerView 有，漏定义曾致 Runtime ReferenceError，dev overlay 定位后即修）
+- 验证：eslint 零错误；API 开 BTC 20x/2U 测试仓 → 升级页持仓明细实时显示（浮动盈亏 -0.01U/总权益 7.92U/ROI -20.80% 与模拟盘一致）→ 页内点「一键平仓」成功（toast「已平仓 BTC」+ 回空态）；桌面+移动端截图正常；期间冷却池吃进真实降级事件 SKHYB（曾P1 徽标）二次实证 Task 36 链路；测试仓已平掉，账户恢复 0 仓位
+- 全程未重启 server
+
+Stage Summary:
+- 升级版页签闭环：事件池盯机会 → 事件明细看依据 → 持仓明细管仓位（涨跌 3s 刷新 + 一键平仓 + 手动开仓），不再需要切回模拟盘页签
+- PositionsTable 升级为跨页签共享组件（emptyHint 参数化）

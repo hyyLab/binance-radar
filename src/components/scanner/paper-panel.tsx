@@ -32,14 +32,8 @@ import {
 import { useCloseAllPositions, useClosePosition, useDeposit, useResetAccount } from '@/hooks/use-scanner';
 import { fmtPrice, fmtQty, fmtTime } from '@/lib/format';
 import type { PaperAccountResponse, PaperPositionDTO, PaperTradeDTO } from '@/lib/market/types';
-import { cn } from '@/lib/utils';
+import { cn, pnlCls } from '@/lib/utils';
 import { Bot, ChevronDown, History, Layers, Plus, RotateCcw, Wallet } from 'lucide-react';
-
-function pnlCls(v: number) {
-  if (v > 0) return 'text-up';
-  if (v < 0) return 'text-down';
-  return 'text-muted-foreground';
-}
 
 function AccountCard({
   label,
@@ -69,21 +63,23 @@ const ACTION_LABEL: Record<PaperTradeDTO['action'], string> = {
   LIQUIDATE: '强平',
 };
 
-function PositionsTable({
+export function PositionsTable({
   positions,
   onSelectSymbol,
   onClose,
   closing,
+  emptyHint,
 }: {
   positions: PaperPositionDTO[];
   onSelectSymbol: (s: string) => void;
   onClose: (id: string) => void;
   closing: boolean;
+  emptyHint?: string;
 }) {
   if (positions.length === 0) {
     return (
       <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-        暂无持仓 · 点击上方异动信号的「买入做多 / 卖出做空」或「手动开仓」一键建仓
+        {emptyHint ?? '暂无持仓 · 点击上方异动信号的「买入做多 / 卖出做空」或「手动开仓」一键建仓'}
       </div>
     );
   }

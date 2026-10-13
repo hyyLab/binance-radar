@@ -6,6 +6,7 @@ import { fmtAgo, fmtAgoShort, fmtHM, fmtPrice, fmtTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { TradeModal, type TradeIntent } from '@/components/scanner/trade-modal';
 import { CoinDialog } from '@/components/market/coin-dialog';
+import { PositionsPanel } from './positions-panel';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Activity,
@@ -407,6 +408,10 @@ export function EnhancedView() {
     setTradeIntent({ open: true, symbol, side });
     setTradeKey((k) => k + 1);
   };
+  const openManual = () => {
+    setTradeIntent({ open: true });
+    setTradeKey((k) => k + 1);
+  };
 
   return (
     <>
@@ -603,6 +608,9 @@ export function EnhancedView() {
             </div>
           )
         )}
+
+        {/* 持仓明细：与模拟盘同账户（3s 轮询），本页直接盯涨跌 + 一键平仓 */}
+        <PositionsPanel onSelectSymbol={setSelectedSymbol} onManualTrade={openManual} />
       </div>
 
       <TradeModal key={tradeKey} intent={tradeIntent} onClose={() => setTradeIntent(null)} />
