@@ -54,8 +54,8 @@ export function TradeModal({
   const price = ticker?.price ?? 0;
   const balance = paper?.account.balance ?? 0;
 
-  // 最大可开保证金（Task 48 收紧）：单仓最多动用可用余额的 50%（防全仓梭哈一把强平），
-  // 与服务端 PaperEngine.open 同源（futures.maxOpenableMargin，内含预留开仓手续费）
+  // 最大可开保证金（与服务器同源 futures.maxOpenableMargin，内含预留开仓手续费）：
+  // 比例常量 PAPER_MAX_MARGIN_RATIO——Task 48 曾收紧至 0.5，Task 49 按用户要求放开为 1（几乎全仓）
   const maxMargin = maxOpenableMargin(balance, leverage);
 
   const suggestions = useMemo(() => {
@@ -281,9 +281,11 @@ export function TradeModal({
             {balance < PAPER_MIN_MARGIN
               ? `可用余额不足 ${PAPER_MIN_MARGIN} USDT，请先平仓回笼资金或重置账户`
               : margin > maxMargin
-                ? `超过最大可开保证金 ${maxMargin.toFixed(2)} U（单仓上限为可用余额的 ${(
-                    PAPER_MAX_MARGIN_RATIO * 100
-                  ).toFixed(0)}%），已自动拉满可直接成交`
+                ? `超过最大可开保证金 ${maxMargin.toFixed(2)} U${
+                    PAPER_MAX_MARGIN_RATIO < 1
+                      ? `（单仓上限为可用余额的 ${(PAPER_MAX_MARGIN_RATIO * 100).toFixed(0)}%）`
+                      : '（需预留开仓手续费）'
+                  }，已自动拉满可直接成交`
                 : `保证金至少 ${PAPER_MIN_MARGIN} USDT`}
           </div>
         )}
@@ -306,8 +308,14 @@ export function TradeModal({
               : `一键卖出做空 ${symbol.replace(/USDT$/, '')}`}
         </button>
         <p className="text-center text-[11px] text-muted-foreground">
-          模拟盘 · 无真实资金 · 开/平仓双边均收 Taker 0.05%（币安 USDT-M）· 单仓保证金上限
-          {(PAPER_MAX_MARGIN_RATIO * 100).toFixed(0)}% · 触及强平价自动清算
+          模拟盘 · 无真实资金 · 开/平仓双边均收 Taker 0.05%（币安 USDT-M）
+          {PAPER_MAX_MARGIN_RATIO < 1 && (
+            <>
+              {' '}
+              · 单仓保证金上限{(PAPER_MAX_MARGIN_RATIO * 100).toFixed(0)}%
+            </>
+          )}{' '}
+          · 触及强平价自动清算
         </p>
       </DialogContent>
     </Dialog>

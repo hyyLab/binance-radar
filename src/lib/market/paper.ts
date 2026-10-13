@@ -243,15 +243,18 @@ export class PaperEngine {
       throw new PaperError(`最多同时持有 ${MAX_OPEN_POSITIONS} 个仓位`);
     }
 
-    // 单仓风险上限（Task 48 用户要求收紧「最大可开」）：单仓保证金最多动用可用余额的
-    // PAPER_MAX_MARGIN_RATIO（50%），避免全仓梭哈一把就被强平打穿账户。强平价公式
-    // （liqPriceFor）不动，仍按币安逐仓规则；加仓合并场景同样只约束本次新增部分。
+    // 单仓风险上限：单仓保证金最高 = maxOpenableMargin(余额, 杠杆)（与前端同源）。
+    // 比例常量 PAPER_MAX_MARGIN_RATIO：Task 48 曾收紧至 0.5，Task 49 按用户要求放开为 1
+    //（几乎全仓，仅需预留开仓手续费，等价初版规则）。强平价公式（liqPriceFor）不动；
+    // 加仓合并场景同样只约束本次新增部分。
     const maxMargin = maxOpenableMargin(acc.balance, input.leverage);
     if (input.margin > maxMargin + 1e-9) {
+      const ratioHint =
+        PAPER_MAX_MARGIN_RATIO < 1
+          ? `（可用余额的 ${(PAPER_MAX_MARGIN_RATIO * 100).toFixed(0)}%）`
+          : '（需预留开仓手续费）';
       throw new PaperError(
-        `超出单仓上限：保证金最高 ${maxMargin.toFixed(2)} USDT（可用余额的 ${(
-          PAPER_MAX_MARGIN_RATIO * 100
-        ).toFixed(0)}%），可平仓回笼资金或充值后再开`,
+        `超出单仓上限：保证金最高 ${maxMargin.toFixed(2)} USDT${ratioHint}，可平仓回笼资金或充值后再开`,
       );
     }
 
@@ -492,9 +495,10 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  // v5: open() 新增单仓保证金上限校验（可用余额 50%，与前端同源 futures.maxOpenableMargin）。
+  // v6: open() 的单仓上限比例放开为 1（几乎全仓，Task 49）。类方法闭包绑定创建时模块图的
+  // maxOpenableMargin——不 bump key 旧实例会继续按旧比例（0.5）拒绝开仓（本次 API 实测踩坑实证）。
   // 本引擎无内存状态（全走 DB），重建安全。
-  __binanceRadarPaper_v5?: PaperEngine;
+  __binanceRadarPaper_v6?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v5 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v6 ??= new PaperEngine());

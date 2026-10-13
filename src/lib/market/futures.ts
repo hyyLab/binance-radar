@@ -1,5 +1,5 @@
 // ---------- 模拟盘 · 币安 USDT-M 合约规则（客户端/服务端同源，防两处公式漂移） ----------
-// 重置资金 10 USDT · 最高 20x 杠杆 · 最低保证金 2 USDT · 单仓保证金 ≤ 可用余额 50%
+// 重置资金 10 USDT · 最高 20x 杠杆 · 最低保证金 2 USDT · 单仓最高几乎全仓（余额预留手续费后可拉满）
 // 手续费：Taker 0.05%（市价开/平仓双边收取）· Maker 0.02%（限价挂单，备案；模拟盘统一按 Taker 计）
 // 强平价：币安逐仓精确式 liq = E(1±IMR)/(1∓MMR)，MMR 按名义价值分层（BTC/ETH/其他 各自档位）
 
@@ -9,19 +9,22 @@ export const PAPER_MIN_MARGIN = 2;
 export const PAPER_MIN_DEPOSIT = 10;
 export const PAPER_MAX_DEPOSIT = 1_000_000;
 
-/** 单仓风险上限（Task 48）：单仓保证金最高占可用余额的比例——收窄「最大可开」，
- *  避免全仓梭哈一把就被强平打穿账户（强平价公式本身不动，仍按币安规则，见 liqPriceFor） */
-export const PAPER_MAX_MARGIN_RATIO = 0.5;
+/** 单仓风险上限：单仓保证金最高占可用余额的比例。
+ *  Task 48 曾收紧至 0.5（防全仓梭哈），用户反馈过紧——Task 49 放开为 1（几乎全仓：
+ *  仅需预留开仓手续费，与初版规则一致）。保留常量与 maxOpenableMargin 封装，
+ *  未来再调比例只改这一个数字，前后端与报错文案自动跟随。强平价公式不受此值影响。 */
+export const PAPER_MAX_MARGIN_RATIO = 1;
 
 /**
- * 单仓最大可开保证金（客户端/服务端同源，Task 48 用户要求收紧）：
- * 取「可用余额 × 50%」与「预留开仓手续费后的全额上限」两者较小值，向下取整到分。
+ * 单仓最大可开保证金（客户端/服务端同源）：
+ * 取「可用余额 × 比例上限」与「预留开仓手续费后的全额上限」两者较小值，向下取整到分。
+ * 比例 = 1 时手续费上限恒为主导，等价于初版几乎全仓口径；< 1 时比例上限主导。
  * 前端 trade-modal 展示「最大可开」与服务端 PaperEngine.open 拒绝阈值由本函数唯一提供。
  */
 export function maxOpenableMargin(available: number, leverage: number): number {
   if (!Number.isFinite(available) || available <= 0) return 0;
   const ratioCap = available * PAPER_MAX_MARGIN_RATIO; // 单仓比例上限
-  const feeCap = available / (1 + leverage * TAKER_FEE); // 需预留开仓手续费（恒大于比例上限，防御性保留）
+  const feeCap = available / (1 + leverage * TAKER_FEE); // 需预留开仓手续费
   // +1e-9 抵消浮点伪影：如 4960.4×0.5 实算 2480.1999999999998，裸 floor 会丢一分钱
   return Math.floor((Math.min(ratioCap, feeCap) + 1e-9) * 100) / 100;
 }
