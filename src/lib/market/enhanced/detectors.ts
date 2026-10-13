@@ -119,17 +119,17 @@ export function detectVolume(
   snap: TickSnap,
   store: KlineStore,
   now: number,
-): { detection: Detection | null } {
+): { detection: Detection | null; baseline?: 'NO_STORE' | 'SHORT' | 'INSUFFICIENT' } {
   void now;
   if (snap.quoteVolume24h < VOLUME.minQv24h) return { detection: null };
   const qv1m = snap.vol1m ?? 0;
   if (qv1m < VOLUME.minQv1m) return { detection: null };
-  if (!store.has(snap.symbol)) return { detection: null };
+  if (!store.has(snap.symbol)) return { detection: null, baseline: 'NO_STORE' }; // §五：未跟踪/基线不可用
 
   const qvs = store.recentClosedQv(snap.symbol, VOLUME.baselineCandles);
-  if (qvs.length < VOLUME.baselineCandles) return { detection: null }; // 基线未就绪
+  if (qvs.length < VOLUME.baselineCandles) return { detection: null, baseline: 'SHORT' }; // 基线未就绪
   const med = median(qvs);
-  if (med == null || med < VOLUME.minBaselineQv) return { detection: null }; // BASELINE_INSUFFICIENT
+  if (med == null || med < VOLUME.minBaselineQv) return { detection: null, baseline: 'INSUFFICIENT' }; // BASELINE_INSUFFICIENT
 
   const mult = qv1m / med;
   if (mult < VOLUME.minorMult) return { detection: null };

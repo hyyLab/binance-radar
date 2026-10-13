@@ -87,6 +87,9 @@ export interface EnhancedEventDTO {
   priority: Priority;
   /** 历史最高优先级（只升不降；「冷却池」判定用：曾达 P1 且现方向不明） */
   peakPriority: Priority;
+  /** 最近一次进入 P1 的时刻（§十 P1 时间语义：P1/冷却/已结束池的展示时间以「进入P1」起算，
+   *  而非事件首次触发时间；回落后再升级会刷新；从未达 P1 则缺省，展示层回退 firstAt） */
+  p1At?: number;
   /** 是否应提醒（升级/新证据/方向变化才置 true；UI 用作高亮） */
   notify: boolean;
   firstAt: number;

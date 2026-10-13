@@ -7,7 +7,7 @@
 import { bFetch } from '../binance';
 import { collector } from '../collector';
 import { isExcludedBase } from '../excluded';
-import { AGG, STORE, VALIDITY, tierOf } from './config';
+import { AGG, STORE, VALIDITY, VOLUME, tierOf } from './config';
 import { KlineStore } from './klines';
 import { BreakoutTracker, detectSpike, detectVolume, type TickSnap } from './detectors';
 import { Aggregator, type FeedCtx } from './aggregate';
@@ -65,6 +65,7 @@ export class EnhancedEngine {
 
   private tickSizeMap = new Map<string, ExchangeInfoEntry>();
   private suspects = new Map<string, SuspectState>();
+  private baselineNoteAt = new Map<string, number>(); // BASELINE_INSUFFICIENT 节流
   private expansionQueue: string[] = [];
   private rotateCursor = 0;
   private dataAnomalies = 0;
@@ -143,6 +144,7 @@ export class EnhancedEngine {
       return;
     }
     this.rebuildWatchlist();
+    if (this.baselineNoteAt.size > 800) this.baselineNoteAt.clear(); // 节流表防膨胀
     // 冷启动回填：按成交额降序，前 bootBackfillCap 个立即回填（并发 2 + 间隔，防突发）
     const list = this.candidateUniverse()
       .filter((c) => c.qv >= 5_000_000 && !this.store.has(c.symbol))
@@ -238,8 +240,27 @@ export class EnhancedEngine {
     const now = Date.now();
     for (const snap of this.validSnaps(now)) {
       if (this.suspects.has(snap.symbol)) continue;
-      const { detection } = detectVolume(snap, this.store, now);
-      if (detection) this.feedDetection(detection, snap, now);
+      // 门槛外的币无需关注基线状态（过了双门槛才可能产出放量检测）
+      if (snap.quoteVolume24h < VOLUME.minQv24h || (snap.vol1m ?? 0) < VOLUME.minQv1m) continue;
+      const { detection, baseline } = detectVolume(snap, this.store, now);
+      if (detection) {
+        this.feedDetection(detection, snap, now);
+        continue;
+      }
+      // §五：历史K线不足时标记 BASELINE_INSUFFICIENT（节流：每标的 10 分钟一条，防刷屏）
+      if (baseline) {
+        const last = this.baselineNoteAt.get(snap.symbol) ?? 0;
+        if (now - last >= 600_000) {
+          this.baselineNoteAt.set(snap.symbol, now);
+          const why =
+            baseline === 'NO_STORE'
+              ? '未纳入K线跟踪（成交额排名/请求预算限制），放量检测不可用'
+              : baseline === 'SHORT'
+                ? '历史K线不足 20 根，放量基准未就绪'
+                : '成交额基线接近零，不输出放量倍数';
+          this.log(snap, now, 'BASELINE_INSUFFICIENT', why);
+        }
+      }
     }
   }
 
@@ -349,18 +370,21 @@ export class EnhancedEngine {
 
   // ============ 统计 ============
 
-  private statsOf(snap: TickSnap, now: number): SymStats | undefined {
-    if (!this.store.has(snap.symbol)) return undefined;
-    const s = this.store.get(snap.symbol)!;
+  private statsOf(snap: TickSnap, _now: number): SymStats | undefined {
+    // §三：自适应基准仅对已纳入K线跟踪的标的可用；不在仓库的币 medAbs=null →
+    // detectSpike 自动退回固定阈值检测（绝不因缺K线而漏检 SPIKE，Task 45 修复：
+    // 此前直接 undefined 导致 265 个达标币只有 220 个被检测）
+    const tracked = this.store.has(snap.symbol);
+    const s = tracked ? this.store.get(snap.symbol)! : null;
     const info = this.tickSizeMap.get(snap.symbol);
     return {
       symbol: snap.symbol,
       tier: tierOf(snap.quoteVolume24h),
       quoteVolume24h: snap.quoteVolume24h,
-      medAbs1m: this.store.medAbsReturn1m(snap.symbol, now),
-      medAbs5m: this.store.medAbsReturn5m(snap.symbol, now),
+      medAbs1m: s ? this.store.medAbsReturn1m(snap.symbol, _now) : null,
+      medAbs5m: s ? this.store.medAbsReturn5m(snap.symbol, _now) : null,
       medQv1m: null,
-      dataCoverage: this.store.coverage(s, now),
+      dataCoverage: s ? this.store.coverage(s, _now) : 0,
       tickSize: info?.tickSize || snap.price * 0.0001,
       tradingOk: info ? info.status === 'TRADING' : true,
     };

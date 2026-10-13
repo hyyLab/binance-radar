@@ -180,7 +180,12 @@ export class Aggregator {
       dto.breakout.beyondPct = d.magnitude;
     }
     if (d.detector === 'SPIKE' && d.level === 'MAJOR') dto.level = 'MAJOR';
-    if (d.detector === 'VOLUME' && d.level === 'MAJOR' && dto.level === 'MINOR' && prevKinds.length > 1) {
+    if (
+      d.detector === 'VOLUME' &&
+      d.level === 'MAJOR' &&
+      dto.level === 'MINOR' &&
+      new Set(prevKinds).size > 1 // 不同类型证据相互支持才升级（§九，同类型重复不凑数）
+    ) {
       dto.level = 'MAJOR';
     }
 
@@ -194,11 +199,11 @@ export class Aggregator {
       dto.evidence.push({ kind, at: now, magnitude: d.magnitude, detail: d.detail });
     }
 
-    this.rejudge(ev, ctx);
+    const upgraded = prevLevel === 'MINOR' && dto.level === 'MAJOR'; // 提前算：传给 rejudge（§十升级进 P1）
+    this.rejudge(ev, ctx, upgraded);
 
     // §7.4 通知判定：升级 / 新证据类型 / 方向变化 → 通知；仅再触发 → 不重复
     const kindAdded = !prevKinds.includes(kind) && kind !== 'VOLUME_NEUTRAL';
-    const upgraded = prevLevel === 'MINOR' && dto.level === 'MAJOR';
     const dirChanged = prevTendency !== dto.direction.tendency;
     const milestone =
       dto.breakout.status === 'CONFIRMED' &&
@@ -228,9 +233,11 @@ export class Aggregator {
 
   // ============ 方向引擎（§八）+ 置信度（§九）============
 
-  private rejudge(ev: ActiveEvent, ctx: FeedCtx): void {
+  /** 方向引擎重判：wasUpgraded = 本次本轮证据导致 MINOR→MAJOR 升级（§十：升级进 P1） */
+  private rejudge(ev: ActiveEvent, ctx: FeedCtx, wasUpgraded = false): void {
     const { snap, now } = ctx;
     const dto = ev.dto;
+    const prevPriority = dto.priority; // 记录重判前的池位（P1 时间语义用）
     const kinds = new Set(dto.evidence.map((e) => e.kind));
     const reasons: string[] = [];
     let tendency: Tendency = 'UNKNOWN';
@@ -352,23 +359,34 @@ export class Aggregator {
     dto.direction = { tendency, confirm, reasons, caution };
 
     // ============ 优先级（§十） ============
-    dto.priority = this.priorityOf(dto, confirm, boConfirmed);
+    dto.priority = this.priorityOf(dto, confirm, boConfirmed, wasUpgraded);
+    // P1 时间语义：记录最近一次「进入 P1」的时刻（回落后再升级会刷新；P1/冷却/已结束池展示用）
+    if (dto.priority === 'P1' && prevPriority !== 'P1') dto.p1At = now;
     // 历史最高优先级只升不降（冷却池判定：曾达 P1 的事件优先级回落且方向转不明时进入冷却池）
     if (prioValue(dto.priority) < prioValue(dto.peakPriority)) dto.peakPriority = dto.priority;
     this.format(dto);
-    void now;
   }
 
-  private priorityOf(dto: EnhancedEventDTO, confirm: ConfirmLevel, boConfirmed: boolean): Priority {
+  private priorityOf(
+    dto: EnhancedEventDTO,
+    confirm: ConfirmLevel,
+    boConfirmed: boolean,
+    wasUpgraded: boolean,
+  ): Priority {
     const hasSpike = dto.evidence.some((e) => e.kind === 'SPIKE_UP' || e.kind === 'SPIKE_DOWN');
     const hasVolume = dto.evidence.some((e) => e.kind === 'VOLUME_UP' || e.kind === 'VOLUME_DOWN');
-    // P1：已确认 MAJOR 急拉急跌 / 已确认 MAJOR 有效突破 / 多重印证
-    if ((dto.level === 'MAJOR' && hasSpike && confirm !== 'PENDING') || (boConfirmed && confirm !== 'PENDING') || confirm === 'MULTI') {
+    // P1（§十逐条对应）：已确认 MAJOR 急拉急跌（行情有效性已确认即推送，方向可不明——
+    // 「已确认」不等于方向确认，否则方向不明的急拉会被吞进 P3 造成漏报）/
+    // MINOR 升级为 MAJOR / 已确认的 MAJOR 有效突破 / 多重印证
+    if (wasUpgraded || (dto.level === 'MAJOR' && hasSpike) || boConfirmed || confirm === 'MULTI') {
       return 'P1';
     }
     // P2：MINOR 获第二项证据 / 普通有效突破 / 显著放量且方向明确 / 双重确认的方向
+    // 「第二项证据」必须是不同类型（§九：至少两个不同类型的有效证据相互支持）——
+    // 同类型证据隔窗重复触发不凑数（Task 45 修复：此前 evidence.length 允许同类重复，MINOR 单类型也进 P2）
+    const distinctKinds = new Set(dto.evidence.map((e) => e.kind)).size;
     if (
-      (dto.level === 'MINOR' && dto.evidence.length >= 2) ||
+      (dto.level === 'MINOR' && distinctKinds >= 2) ||
       dto.breakout.status === 'CONFIRMED' ||
       (hasVolume && dto.direction.tendency !== 'UNKNOWN') ||
       (dto.direction.tendency !== 'UNKNOWN' && confirm === 'DOUBLE')

@@ -246,14 +246,19 @@ function EventChip({
   flashing,
   selected,
   onSelect,
+  timeBase,
 }: {
   ev: EnhancedEventDTO;
   flashing: boolean;
   selected: boolean;
   onSelect: (id: string) => void;
+  /** 展示时间基准：P1/冷却池传「进入P1时刻」（§十时间语义：从出现在 P1 起算，
+   *  而非事件首次触发）；P2 池不传，保持首次触发时间 */
+  timeBase?: number;
 }) {
   const chg = ev.chg1m ?? ev.chg5m;
   const up = ev.dir === 'UP';
+  const shownAt = timeBase ?? ev.firstAt;
   return (
     <button
       onClick={() => onSelect(ev.id)}
@@ -264,7 +269,7 @@ function EventChip({
           : 'border-border/60 bg-background/40 hover:border-gold/40',
         flashing && 'animate-pulse ring-2 ring-gold/70 shadow-[0_0_12px_-2px] shadow-gold/50',
       )}
-      title={`${ev.base} ${ev.priority}${ev.peakPriority === 'P1' && ev.priority !== 'P1' ? '（曾P1）' : ''} ${ev.level} · 触发于 ${fmtHM(ev.firstAt)}`}
+      title={`${ev.base} ${ev.priority}${ev.peakPriority === 'P1' && ev.priority !== 'P1' ? '（曾P1）' : ''} ${ev.level} · 触发于 ${fmtHM(ev.firstAt)}${timeBase && timeBase !== ev.firstAt ? ` · 进入P1 ${fmtHM(timeBase)}` : ''}`}
     >
       <div className="flex items-center gap-1.5">
         <span className="font-mono text-xs font-bold">{ev.base}</span>
@@ -281,7 +286,7 @@ function EventChip({
           {chg == null ? (ev.volumeMultiple != null ? `${ev.volumeMultiple.toFixed(1)}×量` : '—') : `${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`}
         </span>
         <span className="shrink-0">证×{new Set(ev.evidence.map((e) => e.kind)).size}</span>
-        <span className="ml-auto shrink-0">{fmtAgoShort(ev.firstAt)}</span>
+        <span className="ml-auto shrink-0">{fmtAgoShort(shownAt)}</span>
         <span className="shrink-0 font-semibold text-foreground/70">
           {CONFIRM_SHORT[ev.direction.confirm] ?? '待'}
         </span>
@@ -474,6 +479,7 @@ export function EnhancedView() {
                         flashing={flashing(ev.id)}
                         selected={selectedEventId === ev.id}
                         onSelect={setSelectedEventId}
+                        timeBase={ev.p1At ?? ev.firstAt}
                       />
                     ))}
                   </div>
@@ -522,6 +528,7 @@ export function EnhancedView() {
                         flashing={flashing(ev.id)}
                         selected={selectedEventId === ev.id}
                         onSelect={setSelectedEventId}
+                        timeBase={ev.p1At ?? ev.firstAt}
                       />
                     ))}
                   </div>
@@ -545,13 +552,14 @@ export function EnhancedView() {
                       <button
                         key={ev.id}
                         onClick={() => setSelectedEventId(ev.id)}
+                        title={`触发于 ${fmtTime(ev.firstAt)} · 进入P1 ${fmtTime(ev.p1At ?? ev.firstAt)} · 结束于 ${fmtTime(ev.updatedAt)}`}
                         className={cn(
                           'flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] tabular-nums hover:bg-secondary/40',
                           selectedEventId === ev.id && 'bg-gold/10',
                           flashing(ev.id) && 'animate-pulse ring-1 ring-gold/70',
                         )}
                       >
-                        <span className="w-14 shrink-0 text-muted-foreground">{fmtTime(ev.firstAt)}</span>
+                        <span className="w-14 shrink-0 text-muted-foreground">{fmtTime(ev.p1At ?? ev.firstAt)}</span>
                         <span className="w-16 shrink-0 truncate font-mono font-semibold">{ev.base}</span>
                         <span className={cn('shrink-0', ev.dir === 'UP' ? 'text-up' : 'text-down')}>
                           {ev.dir === 'UP' ? '↑' : '↓'}

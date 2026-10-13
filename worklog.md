@@ -379,3 +379,23 @@ Work Log:
 Stage Summary:
 - 持仓价格冻结根因修复：paperEngine markPrice 经 __binanceRadarCollectorActive 调用时动态解析，collector 未来 bump key 对 paper 透明，不再产生僵尸绑定
 - 架构规则落档：globalThis 单例引擎相互引用必须「调用时经稳定别名解析」，绝不能依赖模块图捕获的旧绑定；改 collector 代码 bump key 后无需再连带 bump 消费方引擎
+
+---
+Task ID: 45
+Agent: Super Z (main)
+Task: 对照完整需求规格书逐条核查增强异动引擎；修复 P1 时间语义（「进入P1时刻」起算）与 4 处文档违规
+
+Work Log:
+- 通读 enhanced 全部代码（config/detectors/aggregate/engine/klines/types/enhanced-view），逐条对照规格书十四节核查；检测节奏（SPIKE/BREAKOUT 2s、VOLUME 30s）、固定阈值、24h 滚动基准（完整已收盘 1m K线重算+15s缓存，无基准漂移）、聚合合并/冷却/结束、方向规则（§8.2-8.7 全部落地）、置信度分层、通知格式、有效性检查（±50%/80% 疑似复核 + DATA_ANOMALY）均合规
+- 量化「事件不多」：近 27 分钟引擎实际产出 60 个新事件（VOLUME 52/SPIKE 11/BREAKOUT 2），少的是「可见事件」——P1/P2 池常空、已结束池仅 6 条。三个根因：①MAJOR 急拉急跌因「方向不明→confirm=PENDING」被压 P3 不可见（27 分钟 3 个 MAJOR SPIKE 2 个被吞，违反§十「已确认的MAJOR急拉急跌→P1」）；②SPIKE 覆盖缺口——statsOf 对不在K线仓库的币返回 undefined 导致 265 个达标币只测 220 个（违反§三「历史不足退回固定阈值」）；③VOLUME 无方向放量按文档本就 P3 仅记录（合规，属设计）
+- 修复 4 处违规 + 时间语义：①priorityOf 放宽——MAJOR SPIKE（方向可不明）/有效突破/MINOR→MAJOR升级/MULTI 均进 P1（mergeInto 提前算 upgraded 传入 rejudge）；②statsOf 放开 store.has 限制——无K线币 medAbs=null 自动退回固定阈值（全市场 265 个达标币全覆盖）；③excluded.ts 补稳定币 base 集合（USDC/FDUSD/TUSD/USDP/DAI/USD1/USDE/USDS/PYUSD/AEUR/EURI/EUR/XUSD/BUSD，§2.1）；④detectVolume 暴露基线状态（NO_STORE/SHORT/INSUFFICIENT），engine.volumeTick 节流记录 BASELINE_INSUFFICIENT 日志（每标的 10min 一条，§五）
+- P1 时间语义（用户指出的核心）：types.ts EventDTO 新增 p1At（最近一次进入P1时刻，回落再升级会刷新）；aggregate.rejudge 检测 P1 晋级记 p1At；前端 EventChip 增 timeBase 参数——P1/冷却池传 p1At??firstAt、P2 保持 firstAt；已结束池行首绝对时间改 p1At，tooltip 完整时间线（触发于/进入P1/结束于）
+- 检查中新发现的违规：P2 条件 evidence.length>=2 允许同类型证据隔窗重复凑数（OGN MINOR 单类型证×1 进 P2）——违反§九「至少两个不同类型」；P2 改 distinctKinds>=2、VOLUME 升级条件同步改 new Set(prevKinds).size>1
+- 验证：scripts/verify-p1-rule.ts 单元断言 11/11 通过（MAJOR SPIKE 方向不明→P1、MINOR 单证据→P3、升级→P1+p1At、p1At 不反复刷新、NEUTRAL MAJOR→P3、同类型重复不凑数→P3、MINOR+异类型→P2）；?reset=1 重挂引擎（K线仓库保留 220/220）；eslint 全绿；截图实证 OGN 事件完整生命周期——P2(64秒前)→升P1(6秒前，金框高亮，p1At 语义)→回落P2(曾P1徽标，130秒前 firstAt 语义)；BASELINE_INSUFFICIENT 标记已在日志出现（币安人生USDT）
+- 全程未重启 server
+
+Stage Summary:
+- 可见事件恢复文档口径：MAJOR 急拉急跌/有效突破/升级事件全部进 P1 立即推送（方向不明不再吞事件），SPIKE 覆盖扩展至全市场 265 个达标币
+- P1/冷却/已结束池时间语义定稿：「进入P1时刻」起算（p1At），P2 池保持首次触发时间，tooltip 保留完整时间线
+- P2 门槛收紧为「不同类型第二证据」（§九），同类型重复触发不再凑数
+- 规格书阶段二遗留项不变：medQv1m 成交额分层统计量、VOLUME 5万门槛对中小币校准、自适应倍数回放校准
