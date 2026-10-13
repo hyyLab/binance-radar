@@ -744,9 +744,13 @@ export class MarketCollector {
 // ⚠️ dev 下 Turbopack 每个 API 路由可持有独立模块图：模块级 IIFE 会在每次图评估时执行，
 // 因此这里必须「同 key 必复用」（跨路由收敛到同一实例），绝不能无条件替换——
 // 替换会把他图正在服务的实例定时器清掉，造成数据冻结。代码更新靠 bump key（v2→v3…）。
+// ⚠️ 跨引擎引用规则（Task 44）：其他引擎（paper 等）在调用时必须经稳定别名
+// __binanceRadarCollectorActive 动态解析活跃实例，绝不能依赖各自模块图捕获的旧绑定——
+// 否则本模块未来 bump key 后，旧引擎会继续读已停表的僵尸实例（持仓价格冻结根因）。
 const g = globalThis as typeof globalThis & {
   __binanceRadarCollector?: MarketCollector;
   __binanceRadarCollector_v2?: MarketCollector;
+  __binanceRadarCollectorActive?: MarketCollector;
 };
 
 function clearCollectorTimers(c: unknown): void {
@@ -763,9 +767,13 @@ function clearCollectorTimers(c: unknown): void {
 
 export const collector: MarketCollector = (() => {
   const existing = g.__binanceRadarCollector_v2;
-  if (existing) return existing; // 任何图的任何次评估都复用同一实例
+  if (existing) {
+    g.__binanceRadarCollectorActive = existing; // 每次图评估都刷新稳定别名，指向当前活跃实例
+    return existing; // 任何图的任何次评估都复用同一实例
+  }
   if (g.__binanceRadarCollector) clearCollectorTimers(g.__binanceRadarCollector); // v1 遗留停表
   const fresh = new MarketCollector();
   g.__binanceRadarCollector_v2 = fresh;
+  g.__binanceRadarCollectorActive = fresh;
   return fresh;
 })();

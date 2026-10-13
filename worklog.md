@@ -362,3 +362,20 @@ Stage Summary:
 - 漏报主因修复：vol1m 差分窗口对齐 30s 轮询节奏，量能输入从「冻结假数据」变为 30s 级实时速率，SPIKE/VOLUME 两检测器的成交额门槛恢复判别力
 - 架构认知落档：Turbopack dev 每路由独立模块图 → 模块级单例必须「同 key 必复用」；paperEngine（v3）/collector（v2）均已按此模式，后续改这两个引擎代码需 bump key + touch 相关 route.ts
 - 遗留：VOLUME 5 万/分钟门槛对中小币偏严（RSR 类 15× 放量仍被拦）、自适应阈值倍数校准——归入 Task 32 阶段二
+
+---
+Task ID: 44
+Agent: Super Z (main)
+Task: 排查并修复「持仓里面的价格没有变化」——paperEngine 闭包绑定 v1 僵尸 collector
+
+Work Log:
+- 复现：/api/paper/account 两次调用 RSR 持仓 markPrice 恒为 0.002044（=entryPrice，upnl=0），而 /api/market/tickers 中 RSR 实时价 0.00217 且 updatedAt 毫秒级新鲜——collector 主实例是活的，唯独 paper 链路冻结
+- account 路由加临时探针（Task 42 已验证路由热重载可靠）：同请求内路由直读 collector 为 656 币种/RSR 0.002154/4.5s 新鲜，但 paperEngine.snapshot() 算出的 markPrice 仍是 0.002044 → 引擎读的不是同一个 collector
+- 根因：Turbopack 每路由独立模块图 + globalThis 单例跨代引用——paperEngine v3 实例创建于 Task 42（collector 重写之前），其类方法闭包绑定了当时模块图导出的 v1 collector；Task 43 修复时执行「v1 遗留停表」清掉 v1 定时器 → v3 引擎从此读僵尸实例（数据停在停表时刻 0.002044）。scanner/enhanced 引擎实测价格与 live 一致，仅 paper 中招
+- 修复两层：①collector.ts 新增稳定别名 __binanceRadarCollectorActive（单例解析的每个分支都刷新该别名，v2 复用与新建均指活跃实例）；②paper.ts markPrice() 改为调用时经 globalThis 别名动态解析 activeCollector()（别名缺失才回退模块绑定），并 bump paper key v3→v4 重建实例摆脱僵尸闭包；注释落档跨引擎引用规则
+- 验证：修复后 markPrice 0.002123→0.002125 实时跳动、upnl +7.64→+7.84、与 tickers 接口价一致；用户 RSR 多单真实浮盈 +8.42U/ROE +85.1% 得以显示（此前被冻结隐藏）；用户随后 04:53:56 手动平仓于实时价 0.002126，净盈亏 +7.7335U，对账 10+7.7224=17.7224 严丝合缝；eslint 全绿；桌面 1440 持仓面板截图两帧差异 bbox 证实持续刷新，移动端 390 空态正确（仓位已平）
+- 探针已还原，account 路由回到干净版；全程未重启 server
+
+Stage Summary:
+- 持仓价格冻结根因修复：paperEngine markPrice 经 __binanceRadarCollectorActive 调用时动态解析，collector 未来 bump key 对 paper 透明，不再产生僵尸绑定
+- 架构规则落档：globalThis 单例引擎相互引用必须「调用时经稳定别名解析」，绝不能依赖模块图捕获的旧绑定；改 collector 代码 bump key 后无需再连带 bump 消费方引擎

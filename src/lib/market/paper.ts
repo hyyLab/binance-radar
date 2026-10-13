@@ -31,6 +31,17 @@ const ACCOUNT_NAME = 'default';
 
 const CLOSE_ACTIONS = ['CLOSE_LONG', 'CLOSE_SHORT'];
 
+// Turbopack dev 下每个 API 路由持有独立模块图：本文件捕获的 `collector` 绑定取决于
+// 引擎实例创建时所在图的模块版本——若 collector 事后 bump key 重建，旧引擎会继续读
+// 已停表的僵尸实例（Task 44 持仓价格冻结根因）。因此 markPrice 一律在调用时经
+// globalThis 稳定别名动态解析活跃 collector，仅在别名缺失时回退模块绑定。
+function activeCollector(): typeof collector {
+  const g = globalThis as typeof globalThis & {
+    __binanceRadarCollectorActive?: typeof collector;
+  };
+  return g.__binanceRadarCollectorActive ?? collector;
+}
+
 export class PaperError extends Error {}
 
 export class PaperEngine {
@@ -51,7 +62,7 @@ export class PaperEngine {
   }
 
   private markPrice(symbol: string): number {
-    const row = collector.getTickers().find((t) => t.symbol === symbol);
+    const row = activeCollector().getTickers().find((t) => t.symbol === symbol);
     return row ? row.price : 0;
   }
 
@@ -467,8 +478,10 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  // v3: 平仓净盈亏改为双边手续费口径（净额扣开仓费）。bump key 以便 dev 热更新后重建引擎实例（本引擎无内存状态，安全）
-  __binanceRadarPaper_v3?: PaperEngine;
+  // v4: markPrice 改为经 __binanceRadarCollectorActive 动态解析活跃 collector；
+  // 重建实例以摆脱 v3 闭包绑定的 v1 僵尸 collector（其定时器已在 collector v2 上线时停掉，
+  // 导致持仓 markPrice 冻结在停表价）。本引擎无内存状态（全走 DB），重建安全。
+  __binanceRadarPaper_v4?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v3 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v4 ??= new PaperEngine());
