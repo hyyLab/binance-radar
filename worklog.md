@@ -259,3 +259,21 @@ Work Log:
 Stage Summary:
 - 页面恢复至 Task 36 最终形态：模拟盘（10U 合约规则）| 升级版异动交易（四池含冷却池）
 - 教训沉淀：平台快照可能回滚工作区——关键迭代后应立即 commit 并在 worklog 记录完整实现细节（本次依赖会话上下文完成无损重建）
+
+---
+Task ID: 38
+Agent: Super Z (main)
+Task: 三项 UI 迭代——删除均线支撑机会与大级别支撑/压力区块、平仓流水可点开、异动事件池标签标注触发时间
+
+Work Log:
+- scanner-view.tsx：移除 SignalList（均线支撑位机会）+ MajorLevels（大级别支撑·做多参考/大级别压力·做空参考）及顶部「机会扫描器」状态条（其数据源 useSignals 随信号区一并失去展示意义）；页签现仅保留 异动监控（一键交易）+ 模拟建仓系统
+- 删除孤儿组件文件 signal-list.tsx / major-levels.tsx（仅 scanner-view 引用，grep 确认无其他引用）；use-scanner.ts 的 useSignals/useLevels 保留（导出无害）
+- paper-panel.tsx：平仓流水改为折叠卡片——默认收起，标题行常显「条数 + 合计盈亏（红绿着色）+ 点开/收起 + 旋转箭头」；展开后流水每行改为 button，点击行打开对应币 K 线弹窗（onSelectSymbol 已有链路）；空仓文案去掉「大级别支撑」措辞
+- enhanced-view.tsx EventChip：第二行右侧新增触发时间 fmtHM(firstAt)（HH:MM），tooltip 同步追加「· 触发 HH:MM」；三池（P1/P2/冷却）标签统一生效
+- format.ts 新增 fmtHM()（zh-CN hour12:false hour/minute 2-digit）
+- 验证：tsc/eslint 对改动文件零错误（全仓 tsc 历史遗留报错与本次无关）；浏览器实证——模拟盘页签顶部即异动监控、平仓流水「1 合计 -1.76 U 点开」→ 展开行点击打开 SKL K 线弹窗 ✓；升级版页签 BLUR「-1.06% 证×3 01:53 单」、XRP/FET/PUMP 时间均显示 ✓；桌面+移动端截图正常（scripts/task37-enhanced-*.png、scripts/paper-flow-open.png）
+- 全程未重启 server（dev 热重载自动生效）
+
+Stage Summary:
+- 模拟盘页签精简为「异动监控 + 模拟建仓系统」；平仓流水折叠化（默认收起不占空间，合计盈亏常显，行可点开 K 线）
+- 异动事件池全部代币标签右上角常显触发时间（HH:MM），与已结束池时间格式一致

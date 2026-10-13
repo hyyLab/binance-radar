@@ -46,6 +46,12 @@ export function fmtTime(iso: string | number): string {
   return d.toLocaleTimeString('zh-CN', { hour12: false });
 }
 
+/** 紧凑时分（HH:MM）：事件标签 / 小空间标注触发时间用 */
+export function fmtHM(iso: string | number): string {
+  const d = typeof iso === 'number' ? new Date(iso) : new Date(iso);
+  return d.toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' });
+}
+
 export function fmtAgo(ts: number | null | undefined): string {
   if (!ts) return '—';
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));

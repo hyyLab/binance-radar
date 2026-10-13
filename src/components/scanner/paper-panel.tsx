@@ -33,7 +33,7 @@ import { useCloseAllPositions, useClosePosition, useDeposit, useResetAccount } f
 import { fmtPrice, fmtQty, fmtTime } from '@/lib/format';
 import type { PaperAccountResponse, PaperPositionDTO, PaperTradeDTO } from '@/lib/market/types';
 import { cn } from '@/lib/utils';
-import { Bot, History, Layers, Plus, RotateCcw, Wallet } from 'lucide-react';
+import { Bot, ChevronDown, History, Layers, Plus, RotateCcw, Wallet } from 'lucide-react';
 
 function pnlCls(v: number) {
   if (v > 0) return 'text-up';
@@ -83,7 +83,7 @@ function PositionsTable({
   if (positions.length === 0) {
     return (
       <div className="px-4 py-10 text-center text-sm text-muted-foreground">
-        暂无持仓 · 点击上方信号或大级别支撑的「买入做多 / 卖出做空」一键建仓
+        暂无持仓 · 点击上方异动信号的「买入做多 / 卖出做空」或「手动开仓」一键建仓
       </div>
     );
   }
@@ -175,7 +175,13 @@ function PositionsTable({
   );
 }
 
-function HistoryList({ history }: { history: PaperTradeDTO[] }) {
+function HistoryList({
+  history,
+  onSelectSymbol,
+}: {
+  history: PaperTradeDTO[];
+  onSelectSymbol: (s: string) => void;
+}) {
   const rows = history.filter((h) => h.action !== 'OPEN_LONG' && h.action !== 'OPEN_SHORT');
   if (rows.length === 0) {
     return (
@@ -187,9 +193,11 @@ function HistoryList({ history }: { history: PaperTradeDTO[] }) {
   return (
     <div className="custom-scroll max-h-56 overflow-y-auto">
       {rows.map((h) => (
-        <div
+        <button
           key={h.id}
-          className="flex items-center gap-2.5 border-b border-border/40 px-3 py-2 text-xs last:border-0"
+          onClick={() => onSelectSymbol(h.symbol)}
+          title="点击查看该币 K 线"
+          className="flex w-full items-center gap-2.5 border-b border-border/40 px-3 py-2 text-left text-xs transition-colors last:border-0 hover:bg-secondary/40"
         >
           <span className="w-14 shrink-0 tabular-nums text-muted-foreground">
             {fmtTime(h.createdAt)}
@@ -217,7 +225,7 @@ function HistoryList({ history }: { history: PaperTradeDTO[] }) {
             {h.pnl >= 0 ? '+' : ''}
             {h.pnl.toFixed(2)} U
           </span>
-        </div>
+        </button>
       ))}
     </div>
   );
@@ -244,11 +252,14 @@ export function PaperPanel({
   const [closeAllOpen, setCloseAllOpen] = useState(false);
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
+  const [histOpen, setHistOpen] = useState(false); // 平仓流水默认收起，点击标题展开
 
   const acc = data?.account;
   const positions = data?.positions ?? [];
   const history = data?.history ?? [];
   const totalUpnl = positions.reduce((s, p) => s + p.unrealizedPnl, 0);
+  const closedRows = history.filter((h) => h.action !== 'OPEN_LONG' && h.action !== 'OPEN_SHORT');
+  const realizedSum = closedRows.reduce((s, h) => s + h.pnl, 0);
 
   const depositVal = Number(depositAmount);
   const depositValid = Number.isFinite(depositVal) && depositVal >= 10 && depositVal <= 1_000_000;
@@ -478,17 +489,36 @@ export function PaperPanel({
         </CardContent>
       </Card>
 
-      {/* 流水 */}
+      {/* 流水：默认收起，点标题展开；合计盈亏常显在标题行 */}
       <Card className="border-border/70 bg-card">
-        <CardHeader className="pb-2">
-          <CardTitle className="flex items-center gap-2 text-sm font-bold">
-            <History className="h-4 w-4 text-muted-foreground" />
-            平仓流水
-          </CardTitle>
-        </CardHeader>
-        <CardContent className="p-0">
-          <HistoryList history={history} />
-        </CardContent>
+        <button
+          onClick={() => setHistOpen((o) => !o)}
+          aria-expanded={histOpen}
+          className="flex w-full items-center gap-2 px-6 py-4 pb-3 text-left transition-colors hover:text-gold"
+        >
+          <History className="h-4 w-4 text-muted-foreground" />
+          <span className="text-sm font-bold">平仓流水</span>
+          <span className="rounded-full bg-secondary px-1.5 text-[10px] tabular-nums text-muted-foreground">
+            {closedRows.length}
+          </span>
+          {closedRows.length > 0 && (
+            <span className={cn('text-xs font-semibold tabular-nums', pnlCls(realizedSum))}>
+              合计 {realizedSum >= 0 ? '+' : ''}
+              {realizedSum.toFixed(2)} U
+            </span>
+          )}
+          <span className="ml-auto flex items-center gap-1 text-[11px] text-muted-foreground">
+            {histOpen ? '收起' : '点开'}
+            <ChevronDown
+              className={cn('h-3.5 w-3.5 transition-transform', histOpen && 'rotate-180')}
+            />
+          </span>
+        </button>
+        {histOpen && (
+          <CardContent className="p-0">
+            <HistoryList history={history} onSelectSymbol={onSelectSymbol} />
+          </CardContent>
+        )}
       </Card>
     </div>
   );

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useEnhancedAnomalies } from '@/hooks/use-enhanced';
-import { fmtAgo, fmtPrice, fmtTime } from '@/lib/format';
+import { fmtAgo, fmtHM, fmtPrice, fmtTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { TradeModal, type TradeIntent } from '@/components/scanner/trade-modal';
 import { CoinDialog } from '@/components/market/coin-dialog';
@@ -263,7 +263,7 @@ function EventChip({
           : 'border-border/60 bg-background/40 hover:border-gold/40',
         flashing && 'animate-pulse ring-2 ring-gold/70 shadow-[0_0_12px_-2px] shadow-gold/50',
       )}
-      title={`${ev.base} ${ev.priority}${ev.peakPriority === 'P1' && ev.priority !== 'P1' ? '（曾P1）' : ''} ${ev.level}`}
+      title={`${ev.base} ${ev.priority}${ev.peakPriority === 'P1' && ev.priority !== 'P1' ? '（曾P1）' : ''} ${ev.level} · 触发 ${fmtHM(ev.firstAt)}`}
     >
       <div className="flex items-center gap-1.5">
         <span className="font-mono text-xs font-bold">{ev.base}</span>
@@ -280,7 +280,8 @@ function EventChip({
           {chg == null ? (ev.volumeMultiple != null ? `${ev.volumeMultiple.toFixed(1)}×量` : '—') : `${chg > 0 ? '+' : ''}${chg.toFixed(2)}%`}
         </span>
         <span>证×{new Set(ev.evidence.map((e) => e.kind)).size}</span>
-        <span className="ml-auto font-semibold text-foreground/70">
+        <span className="ml-auto">{fmtHM(ev.firstAt)}</span>
+        <span className="font-semibold text-foreground/70">
           {CONFIRM_SHORT[ev.direction.confirm] ?? '待'}
         </span>
       </div>
