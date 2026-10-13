@@ -291,3 +291,18 @@ Work Log:
 
 Stage Summary:
 - 事件池三池标签时间样式定稿：「X分前」紧凑相对时间（自动刷新），悬停可见绝对触发时间
+
+---
+Task ID: 40
+Agent: Super Z (main)
+Task: 两项调整——事件标签时间改为纯秒数（去「刚刚」/不显分钟）+ 已结束池只归档 MAJOR·曾达P1 事件
+
+Work Log:
+- format.ts fmtAgoShort：改为纯秒数累计输出「{s}秒前」（原 刚刚/X分前/X时前 换挡制删除）；事件最长 30min→最长显示「1800秒前」，tabular-nums 10px 下宽度可控
+- enhanced-view.tsx：新增 endedShown = ended.filter(level==='MAJOR' && peakPriority==='P1')，已结束池渲染/计数/desc 全部切换到过滤后列表；desc 改「仅 MAJOR·曾达P1 · 保留最近 N 条」；空态文案「暂无 · 仅归档 MAJOR 且曾进入 P1 紧急池的事件」；服务端 ended 缓冲（400 条）保持全量记录不动，仅前端展示过滤
+- 验证：eslint 零错误；桌面截图——P2 池 NEAR 537秒前/TAO 387秒前/W 23秒前，已结束池 21 条全为「大」档（MUB/SKL/W 假突破、NVDAB/SKHYB/SOXLB/KORUB 有效突破等），MINOR「小」档全部过滤；移动端 390px 秒数单行无折行
+- 全程未重启 server
+
+Stage Summary:
+- 事件池标签时间定稿为纯秒数格式（自动跳动，精确感知新鲜度）
+- 已结束池语义收窄为「重要事件归档」：仅 MAJOR 且曾进入 P1 紧急池的事件入库展示，MINOR/普通 P3 结束事件仅引擎内部记录

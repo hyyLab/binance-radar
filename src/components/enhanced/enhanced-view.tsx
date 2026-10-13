@@ -357,6 +357,11 @@ export function EnhancedView() {
 
   const active = useMemo(() => data?.events.active ?? [], [data]);
   const ended = useMemo(() => data?.events.ended ?? [], [data]);
+  // 已结束池只归档重要事件：MAJOR 档且曾进入 P1 紧急池（其余结束事件仅引擎内部记录）
+  const endedShown = useMemo(
+    () => ended.filter((e) => e.level === 'MAJOR' && e.peakPriority === 'P1'),
+    [ended],
+  );
   const stats = data?.stats;
 
   // --- 变化高亮：对每个事件维护签名，签名变化 → 亮 8 秒（换池/升级/新证据/方向变化都会改签名） ---
@@ -444,7 +449,6 @@ export function EnhancedView() {
               暂无异动事件 · 引擎正在按升级规则监控（急拉急跌 / 有效突破 / 异常放量三类证据独立检测、相互印证）
             </div>
           )}
-
           {!isLoading && !isError && (
             <div className="grid grid-cols-1 gap-2.5 lg:grid-cols-2">
               {/* P1 紧急池 */}
@@ -519,18 +523,20 @@ export function EnhancedView() {
                 )}
               </Pool>
 
-              {/* 已结束池：紧凑行 + 保留最近 N 条（滚动） */}
+              {/* 已结束池：仅 MAJOR·曾达P1 + 紧凑行 + 保留最近 N 条（滚动） */}
               <Pool
                 title="已结束 · 最近优先"
-                desc={`保留最近 ${ended.length} 条（最多 80）`}
-                count={ended.length}
+                desc={`仅 MAJOR·曾达P1 · 保留最近 ${endedShown.length} 条（最多 80）`}
+                count={endedShown.length}
                 cls="border-border/40"
               >
-                {ended.length === 0 ? (
-                  <div className="px-1 py-1.5 text-center text-[11px] text-muted-foreground">暂无</div>
+                {endedShown.length === 0 ? (
+                  <div className="px-1 py-1.5 text-center text-[11px] text-muted-foreground">
+                    暂无 · 仅归档 MAJOR 且曾进入 P1 紧急池的事件
+                  </div>
                 ) : (
                   <div className="custom-scroll max-h-44 space-y-0.5 overflow-y-auto">
-                    {ended.slice(0, 80).map((ev) => (
+                    {endedShown.slice(0, 80).map((ev) => (
                       <button
                         key={ev.id}
                         onClick={() => setSelectedEventId(ev.id)}

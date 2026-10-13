@@ -61,13 +61,11 @@ export function fmtAgo(ts: number | null | undefined): string {
   return `${Math.floor(s / 3600)} 小时前`;
 }
 
-/** 紧凑相对时间（事件标签等小空间用，无空格防折行）：刚刚 / 29分前 / 3时前 */
+/** 紧凑相对时间（事件标签用）：纯秒数累计，如 45秒前 / 1740秒前（不显示刚刚/分钟） */
 export function fmtAgoShort(ts: number | null | undefined): string {
   if (!ts) return '—';
   const s = Math.max(0, Math.floor((Date.now() - ts) / 1000));
-  if (s < 60) return '刚刚';
-  if (s < 3600) return `${Math.floor(s / 60)}分前`;
-  return `${Math.floor(s / 3600)}时前`;
+  return `${s}秒前`;
 }
 
 export function pctClass(v: number | null | undefined): string {
