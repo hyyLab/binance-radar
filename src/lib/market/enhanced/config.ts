@@ -103,7 +103,7 @@ export const STORE = {
   maxTracked: 220, // K 线跟踪标的数上限（请求预算护栏）
   bootBackfillCap: 120, // 冷启动立即回填的标的数（按成交额降序）
   bootConcurrency: 2, // 冷启动回填并发（防突发）
-  bootGapMs: 200, // 回填批次间隔
+  bootGapMs: 1500, // 回填批次间隔（Task 50：fapi 对本 IP 实测有比 2400 更严的隐性限制，1500ms 压峰值权重至 ~400/min）
   rotateMs: 5 * 60_000, // 单标的基线轮换周期
   rotatePerTick: 6, // 每个轮换 tick 处理的标的数（1 req/标的）
   rotationSlots: 25, // 轮换分片数（5min = 25×12s）

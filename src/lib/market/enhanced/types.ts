@@ -71,6 +71,8 @@ export interface EnhancedStats {
   outboundRequests: number;
   lastRotateAt: number;
   dataAnomalies: number;
+  /** 合约多源健康（Task 50：币安/Bybit/Gate 供价状态） */
+  sources?: import('../types').FuturesSourceHealth[];
 }
 
 export type Priority = 'P1' | 'P2' | 'P3';

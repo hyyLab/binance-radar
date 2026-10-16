@@ -70,7 +70,9 @@ export default function Page() {
       {/* 页脚 */}
       <footer className={cn('mt-auto border-t border-border/70')}>
         <div className="mx-auto flex w-full max-w-7xl flex-col items-center justify-between gap-1 px-3 py-4 text-xs text-muted-foreground sm:flex-row sm:px-6">
-          <span>数据来源：币安公开行情接口（每 5 秒采集）· 异动与模拟盘数据本地持久化</span>
+          <span>
+            数据来源：币安现货 · 合约多源（币安U本位 / Bybit / Gate，币安优先，每 5 秒采集）· 异动与模拟盘数据本地持久化
+          </span>
           <span>行情数据仅供参考，模拟盘无真实资金 · 交易有风险，入市需谨慎</span>
         </div>
       </footer>

@@ -329,13 +329,41 @@ function StatsBar(props: {
   bootTotal: number;
   active: number;
   outbound: number;
+  sources: Array<{
+    source: string;
+    label: string;
+    ok: boolean;
+    suspended: boolean;
+    symbols: number;
+    lastError: string;
+  }>;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/70 bg-card px-4 py-3 text-xs text-muted-foreground">
       <span className="flex items-center gap-1.5 font-semibold text-foreground">
         <Radar className="h-4 w-4 text-gold" />
-        升级版异动引擎
+        升级版异动引擎 · USDT-M 合约
       </span>
+      {/* 多源供价状态：币安 > Bybit > Gate，源挂掉自动降级 */}
+      {props.sources.length > 0 && (
+        <span className="flex items-center gap-2.5">
+          {props.sources.map((s) => (
+            <span
+              key={s.source}
+              className="inline-flex items-center gap-1"
+              title={`${s.label} · ${s.ok ? '供价中' : s.suspended ? '异常挂起，60s 后重试' : '连接中'} · 供价 ${s.symbols} 个品种${s.lastError ? ` · ${s.lastError}` : ''}`}
+            >
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  s.ok ? 'bg-up' : s.suspended ? 'bg-down' : 'animate-pulse bg-muted-foreground/60',
+                )}
+              />
+              {s.label}
+            </span>
+          ))}
+        </span>
+      )}
       <span className="tabular-nums">
         监控 <span className="font-semibold text-foreground">{props.tracked}</span> 个 · 基线就绪{' '}
         <span className="font-semibold text-foreground">{props.baselineReady}</span>
@@ -348,7 +376,7 @@ function StatsBar(props: {
       <span className="tabular-nums">活跃事件 {props.active}</span>
       <span className="tabular-nums">引擎出站 {props.outbound} req（独立计数）</span>
       <span className="hidden lg:inline">
-        滚动 24h 基线由已收盘 1m K 线计算 · 自适应阈值 · 多重证据聚合 · 方向可输出「不明」
+        币安 U 本位永续 · 多源异动（币安/Bybit/Gate）单源供价 · 滚动 24h 基线 · 自适应阈值 · 多重证据聚合
       </span>
     </div>
   );
@@ -431,6 +459,7 @@ export function EnhancedView() {
             bootTotal={stats.bootBackfillTotal}
             active={stats.activeEvents}
             outbound={stats.outboundRequests}
+            sources={stats.sources ?? []}
           />
         )}
 
@@ -622,8 +651,8 @@ export function EnhancedView() {
         <PositionsPanel onSelectSymbol={setSelectedSymbol} onManualTrade={openManual} />
       </div>
 
-      <TradeModal key={tradeKey} intent={tradeIntent} onClose={() => setTradeIntent(null)} />
-      <CoinDialog symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} />
+      <TradeModal key={tradeKey} intent={tradeIntent} onClose={() => setTradeIntent(null)} market="futures" />
+      <CoinDialog symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} market="futures" />
     </>
   );
 }

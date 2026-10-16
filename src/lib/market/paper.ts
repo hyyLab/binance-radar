@@ -5,6 +5,7 @@
 
 import { db } from '@/lib/db';
 import { collector } from './collector';
+import { activeFuturesCollector } from './futures-collector';
 import {
   PAPER_INITIAL_CAPITAL,
   PAPER_MAX_LEVERAGE,
@@ -44,9 +45,24 @@ function activeCollector(): typeof collector {
   return g.__binanceRadarCollectorActive ?? collector;
 }
 
+// Task 50：合约供价源同样经稳定别名动态解析（futures-collector 未来 bump key 时
+// 旧实例不至读僵尸）。
+function liveFuturesCollector(): ReturnType<typeof activeFuturesCollector> {
+  const g = globalThis as typeof globalThis & {
+    __binanceRadarFuturesActive?: ReturnType<typeof activeFuturesCollector>;
+  };
+  return g.__binanceRadarFuturesActive ?? activeFuturesCollector();
+}
+
 export class PaperError extends Error {}
 
 export class PaperEngine {
+  /** 拉起合约多源采集器（幂等 fire-and-forget）：模拟盘是默认页签，
+   *  用户可能不进异动交易页，但持仓计价/强平检查需要合约行情常驻 */
+  private kickFeeds(): void {
+    void activeFuturesCollector().ensureStarted();
+  }
+
   private async getAccount() {
     let acc = await db.paperAccount.findUnique({ where: { name: ACCOUNT_NAME } });
     if (!acc) {
@@ -63,9 +79,13 @@ export class PaperEngine {
     return acc.id;
   }
 
+  /** 标记价：合约多源行情优先（异动交易页签与开仓入口都在合约），
+   *  现货 collector 兑底（Task 49 前遗留的现货符号持仓仍可正常计价/平仓） */
   private markPrice(symbol: string): number {
-    const row = activeCollector().getTickers().find((t) => t.symbol === symbol);
-    return row ? row.price : 0;
+    const fut = liveFuturesCollector().getTickers().find((t) => t.symbol === symbol);
+    if (fut) return fut.price;
+    const spot = activeCollector().getTickers().find((t) => t.symbol === symbol);
+    return spot ? spot.price : 0;
   }
 
   /** 强平检查：标记价触及强平价 → 自动清算（每次查询/交易前执行） */
@@ -105,6 +125,7 @@ export class PaperEngine {
     history: PaperTradeDTO[];
     ts: number;
   }> {
+    this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
 
@@ -221,6 +242,7 @@ export class PaperEngine {
     leverage: number;
     margin: number;
   }): Promise<PaperPositionDTO> {
+    this.kickFeeds();
     const symbol = input.symbol.toUpperCase();
     const price = this.markPrice(symbol);
     if (price <= 0) throw new PaperError('未知交易对或行情未就绪');
@@ -381,6 +403,7 @@ export class PaperEngine {
   }
 
   async close(positionId: string): Promise<{ pnl: number; symbol: string; side: string; price: number }> {
+    this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
 
@@ -455,6 +478,7 @@ export class PaperEngine {
     totalPnl: number;
     results: { symbol: string; side: string; pnl: number }[];
   }> {
+    this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
 
@@ -495,10 +519,11 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  // v6: open() 的单仓上限比例放开为 1（几乎全仓，Task 49）。类方法闭包绑定创建时模块图的
-  // maxOpenableMargin——不 bump key 旧实例会继续按旧比例（0.5）拒绝开仓（本次 API 实测踩坑实证）。
-  // 本引擎无内存状态（全走 DB），重建安全。
-  __binanceRadarPaper_v6?: PaperEngine;
+  // v7（Task 50）：markPrice 切换为「合约多源优先 + 现货兑底」——不 bump key 旧实例
+  // 会继续只读现货 collector，合约独有品种（1000SHIBUSDT 等）开仓会误报「未知交易对」。
+  // 类方法闭包绑定创建时模块图的取价函数，改取价链路必须 bump key；本引擎无内存
+  // 状态（全走 DB），重建安全。
+  __binanceRadarPaper_v7?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v6 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v7 ??= new PaperEngine());

@@ -474,3 +474,26 @@ Stage Summary:
 - 「最大可开」回到几乎全仓口径：单仓最高 = 余额预留开仓手续费后全额（与初版一致），PAPER_MAX_MARGIN_RATIO=1 保留为未来调节旋钮（改一个数字前后端+文案自动跟随）
 - 强平价公式连续两次改动（Task 48 收紧/Task 49 放开）零触碰，回归护栏单测持续锁死 Task 47 定稿值
 - 单例坑再实证：改引擎类方法引用的任何依赖都必须 bump key，前端正常≠服务端生效（两端热重载机制不同），API 实测不可省
+
+---
+Task ID: 50
+Agent: Super Z (main)
+Task: 异动交易页签扫描标的从现货切换到 USDT-M 合约——多源发现异动（币安/Bybit/Gate）+ 单源供价，品种白名单 = 币安 U 本位永续（用户定版）
+
+Work Log:
+- 用户定版三条规则：①异动多源（Gate/Bybit 行情大差不差、异动方向一致，作冗余容灾）②价格单源（防拼源假异动）③品种只做币安包含的（模拟盘规则本体是币安 USDT-M）
+- 探测三所合约 API 可达性与字段（scripts/probe-futures-sources.ts）：币安 fapi 525 永续（ticker/price 含交割带下划线需滤）、Bybit linear 798（instruments 分页 2 页、tickers 自带 24h 统计、备用域名 bytick 可用）、Gate 1040（BTC_USDT 下划线命名、无 1000 前缀、原始单位）；fapi1/2 是 302 不可用、api.gate.com 死
+- 新建 futures-feeds.ts：三所适配器统一归一化（Gate BTC_USDT→BTCUSDT；K 线统一升序/毫秒/qv 计价额；Bybit kline 倒序反转、interval '1m'→'1'；Gate t 秒→毫秒、sum→qv）；fetchInstruments/fetchPrices/fetch24h/fetchKlines(startMs/endMs 双向翻页)
+- 新建 futures-collector.ts：品种白名单=币安 instruments（PERPETUAL+USDT+TRADING）；每源独立价格史（75min 窗口同现货工艺）+24h 差分 vol1m；rebuildMerged 按优先级选「未挂起+15s 新鲜」的源供价（绝不混源）；源失败 failStreak≥4 挂 60s，418/429 直接挂 180s；启动回填 Top120 播种 chg1m（只写实际供 K 线的源，保持单源不变式）；单例 __binanceRadarFutures_v1 + 稳定别名 Active（Task 44 规则）
+- enhanced 引擎切合约：klines.ts KlineStore 换 fetchKlinesFor + market='futures' 标签（热重置携带守卫防现货/合约 K 线混用）；engine.ts 删现货 exchangeInfo、tickSizeOf 走 collector、boot 先拉起合约采集器、单例 bump v2（v1 现货实例停表不携带仓库）；EnhancedStats.sources 三源健康
+- paper.ts markPrice：合约 feed 优先 + 现货兜底（遗留现货持仓仍可计价平仓），kickFeeds 在 snapshot/open/close/closeAll 拉起合约采集器（模拟盘是默认页签也保活），单例 bump v7（改取价链路必须 bump 的既训）
+- API：新增 /api/enhanced/tickers（合约行情快照）；/api/market/klines 加 market=futures（合约多源 K 线，现货默认不变）；前端 useFuturesTickers + useKlines market 参；TradeModal/CoinDialog 加 market prop（enhanced 页传 futures，弹窗显示「行情源 XX」实际供价源）；enhanced-view 状态条「USDT-M 合约」+ 三源健康灯；页脚文案更新
+- 踩坑与修复：①冷启动回填突发触发币安 fapi HTTP 418 短封禁（实测该 IP 对 fapi 有比 2400/min 更严的隐性限制，稳态仅 161/min 也被间歇封）→ 三层防护：bootGapMs 200→1500（峰值权重压至 ~400/min）、collector 回填节流 300ms×2 并发、418/429 直接挂 180s + klineSourceOrder 跳过挂起源（封禁期 K 线自动走 Bybit/Gate 不撞墙）→ 复测 100s 零错误
+- API 实测：/api/enhanced/tickers 522 品种全币安供价（1000SHIBUSDT 等合约独有品种在列、USDCUSDT 已剔除）；引擎 120/120 回填、基线就绪、事件池产出（BTW/TIA/ZEC/1000RATS 等）；418 封禁窗口内 BTW 曾自动由 Bybit 供价并显示「行情源 Bybit」，解封后自动回币安——降级→恢复闭环实证；开仓 1000SHIBUSDT（现货无此符号，证明 markPrice 已切合约）→ 强平价=entry×0.9/0.995（IMR10%+低档MMR0.5% 钳制正确）→ 平仓对账：10.009284−0.02 双边费=9.989284 自洽；账户系用户真实使用中（充值5000/余额0.009），测试以最小充值 10U 进行未动历史数据
+- 桌面 1440 + 移动 390 截图（scripts/task50-futures-*.png）；eslint 全绿；server 未重启
+
+Stage Summary:
+- 异动交易页签全面合约化：扫描/事件/K线/开仓/强平全部跑在 USDT-M 永续上，品种范围=币安白名单（522 个，稳定币对与代币化股票已剔除）
+- 多源异动+单源供价落地：币安>Bybit>Gate 优先级、源级容灾自动降级恢复、同符号短窗涨跌只算单一来源（拼源假异动根除）、UI 透明展示实际供价源与三源健康
+- 限频治理成型：冷启动权重错峰 + 418/429 长挂起 + 封禁期取数自动绕行，三层防护后实测零错误
+- 现货链路（模拟盘页签异动监控、现货 K 线图）零改动回归通过

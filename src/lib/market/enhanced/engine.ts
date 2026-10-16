@@ -1,11 +1,11 @@
-// ---------- 升级版异动交易 · 引擎单例 ----------
+// ---------- 升级版异动交易 · 引擎单例（Task 50 起扫描 USDT-M 合约） ----------
 // 编排：行情有效性检查（§2.2）→ 三检测器（独立）→ 事件聚合器（§七）。
-// 数据源：collector 的 2s 全市场内存快照（零额外请求）+ 本引擎的 1m K 线仓库
+// 数据源（Task 50 定版）：合约多源聚合行情（futures-collector：币安 > Bybit > Gate，
+// 品种白名单 = 币安 U 本位永续）+ 本引擎的 1m 合约 K 线仓库
 //（滚动 24h 基线 / 自适应阈值 / 放量中位数基准，稳态 ~10 req/min）。
 // 单例驻留 globalThis，HMR 不重复启动；只在 /api/enhanced/* 被访问时启动。
 
-import { bFetch } from '../binance';
-import { collector } from '../collector';
+import { activeFuturesCollector } from '../futures-collector';
 import { isExcludedBase } from '../excluded';
 import { AGG, STORE, VALIDITY, VOLUME, tierOf } from './config';
 import { KlineStore } from './klines';
@@ -30,12 +30,6 @@ interface SuspectState {
   firstPrice: number;
   dir: 'UP' | 'DOWN';
   logged: boolean;
-}
-
-interface ExchangeInfoEntry {
-  status: string;
-  baseAsset: string;
-  tickSize: number;
 }
 
 export class EnhancedEngine {
@@ -63,7 +57,6 @@ export class EnhancedEngine {
     this.started = false;
   }
 
-  private tickSizeMap = new Map<string, ExchangeInfoEntry>();
   private suspects = new Map<string, SuspectState>();
   private baselineNoteAt = new Map<string, number>(); // BASELINE_INSUFFICIENT 节流
   private expansionQueue: string[] = [];
@@ -86,11 +79,11 @@ export class EnhancedEngine {
   }
 
   private async boot(): Promise<void> {
-    // 1) 交易对校验（§2.1）：状态 + 精度，每小时刷新
-    void this.refreshExchangeInfo();
-    // 2) 等 collector 就绪（tickers 有数据），再建监控清单
+    // 0) 启动合约多源采集器（幂等）：币安白名单 + 三源价格/24h 就绪后才有监控清单
+    void activeFuturesCollector().ensureStarted();
+    // 1) 等 collector 就绪（tickers 有数据），再建监控清单
     setTimeout(() => void this.buildWatchlistAndBackfill(), STORE.collectReadyWaitMs);
-    // 3) 定时器：2s 检测 / 30s 放量 / 12s 轮换槽 / 5min 清单 / 30s 结束判定
+    // 2) 定时器：2s 检测 / 30s 放量 / 12s 轮换槽 / 5min 清单 / 30s 结束判定
     this.timers.push(setInterval(() => this.tick(), TICK_MS));
     this.timers.push(setInterval(() => this.volumeTick(), VOLUME_MS));
     this.timers.push(setInterval(() => void this.rotateSlot(), ROTATE_SLOT_MS));
@@ -98,39 +91,13 @@ export class EnhancedEngine {
     this.timers.push(setInterval(() => this.agg.sweep(Date.now()), SWEEP_MS));
   }
 
-  private async refreshExchangeInfo(): Promise<void> {
-    try {
-      const info = await bFetch<{
-        symbols: {
-          symbol: string;
-          status: string;
-          baseAsset: string;
-          filters: { filterType: string; tickSize?: string }[];
-        }[];
-      }>('/api/v3/exchangeInfo', { permissions: 'SPOT' });
-      this.tickSizeMap.clear();
-      for (const s of info.symbols) {
-        const pf = s.filters.find((f) => f.filterType === 'PRICE_FILTER');
-        this.tickSizeMap.set(s.symbol, {
-          status: s.status,
-          baseAsset: s.baseAsset,
-          tickSize: pf?.tickSize ? Number(pf.tickSize) : 0,
-        });
-      }
-    } catch {
-      // 校验信息不可用时降级：tickSize 按价格估算，状态视为通过（检测仍有其余有效性检查）
-    }
-    setTimeout(() => void this.refreshExchangeInfo(), STORE.exchangeInfoRefreshMs);
-  }
-
   // ============ 监控清单（§2.1/§六） ============
+  // 标的宇宙 = futures-collector 聚合行情（品种白名单：币安 U 本位永续，
+  // 且已剔除稳定币对/代币化股票；只有可交易品种会出现在 tickers 里）
 
   private candidateUniverse(): { symbol: string; qv: number }[] {
     const out: { symbol: string; qv: number }[] = [];
-    for (const t of collector.getTickers()) {
-      if (isExcludedBase(t.base)) continue; // 代币化股票/贵金属
-      const info = this.tickSizeMap.get(t.symbol);
-      if (info && info.status !== 'TRADING') continue; // 未通过交易对校验
+    for (const t of activeFuturesCollector().getTickers()) {
       if (t.price <= 0) continue;
       out.push({ symbol: t.symbol, qv: t.quoteVolume24h });
     }
@@ -138,7 +105,7 @@ export class EnhancedEngine {
   }
 
   private async buildWatchlistAndBackfill(): Promise<void> {
-    if (collector.getTickers().length === 0) {
+    if (activeFuturesCollector().getTickers().length === 0) {
       // collector 未就绪，稍后重试
       setTimeout(() => void this.buildWatchlistAndBackfill(), 10_000);
       return;
@@ -268,12 +235,10 @@ export class EnhancedEngine {
 
   private validSnaps(now: number): TickSnap[] {
     const out: TickSnap[] = [];
-    for (const t of collector.getTickers()) {
-      if (isExcludedBase(t.base)) continue;
-      const info = this.tickSizeMap.get(t.symbol);
-      if (info && info.status !== 'TRADING') continue;
+    for (const t of activeFuturesCollector().getTickers()) {
+      if (isExcludedBase(t.base)) continue; // 防御性保留（collector 白名单已剔除）
       if (!(t.price > 0)) continue;
-      // 时间戳有效性：collector 2s 节奏下超过 10s 视为延迟
+      // 时间戳有效性：供价源 5s 轮询节奏下超过 10s 视为延迟
       if (now - t.updatedAt > VALIDITY.maxTickAgeMs) continue;
       out.push({
         symbol: t.symbol,
@@ -376,7 +341,6 @@ export class EnhancedEngine {
     // 此前直接 undefined 导致 265 个达标币只有 220 个被检测）
     const tracked = this.store.has(snap.symbol);
     const s = tracked ? this.store.get(snap.symbol)! : null;
-    const info = this.tickSizeMap.get(snap.symbol);
     return {
       symbol: snap.symbol,
       tier: tierOf(snap.quoteVolume24h),
@@ -385,8 +349,8 @@ export class EnhancedEngine {
       medAbs5m: s ? this.store.medAbsReturn5m(snap.symbol, _now) : null,
       medQv1m: null,
       dataCoverage: s ? this.store.coverage(s, _now) : 0,
-      tickSize: info?.tickSize || snap.price * 0.0001,
-      tradingOk: info ? info.status === 'TRADING' : true,
+      tickSize: activeFuturesCollector().tickSizeOf(snap.symbol) || snap.price * 0.0001,
+      tradingOk: true, // 白名单即已通过交易对校验（合约清单只收 TRADING 永续）
     };
   }
 
@@ -433,7 +397,7 @@ export class EnhancedEngine {
     const now = Date.now();
     const counts = this.agg.counts();
     const tierCounts = { HIGH: 0, MID: 0, LOW: 0 };
-    for (const t of collector.getTickers()) {
+    for (const t of activeFuturesCollector().getTickers()) {
       const tier = tierOf(t.quoteVolume24h);
       if (tier !== 'NONE' && !isExcludedBase(t.base)) tierCounts[tier]++;
     }
@@ -452,6 +416,7 @@ export class EnhancedEngine {
       outboundRequests: this.store.outbound,
       lastRotateAt: this.lastRotateAt,
       dataAnomalies: this.dataAnomalies,
+      sources: activeFuturesCollector().getSourcesHealth(),
     };
   }
 }
@@ -463,34 +428,53 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v2（Task 50）：扫描标的从现货切换到 USDT-M 合约。旧 v1 实例持有现货 collector
+// 绑定与现货 K 线仓库，必须停表重建；其现货 K 线仓库不带 futures 市场标签，不携带。
 
-const g = globalThis as typeof globalThis & { __binanceRadarEnhanced?: EnhancedEngine };
+const g = globalThis as typeof globalThis & {
+  __binanceRadarEnhanced?: EnhancedEngine; // v1（现货，遗留）
+  __binanceRadarEnhanced_v2?: EnhancedEngine; // v2（合约）
+};
+
+function stopLegacyEngine(old: EnhancedEngine | undefined): void {
+  if (!old) return;
+  if (typeof old.stop === 'function') {
+    old.stop();
+    return;
+  }
+  // 旧原型实例（无 stop 方法）：运行时字段可直接访问，手动清定时器防双实例出站
+  const legacy = old as unknown as {
+    timers?: ReturnType<typeof setInterval>[];
+    bootBackfillAborted?: boolean;
+  };
+  if (legacy.timers?.length) {
+    for (const t of legacy.timers) clearInterval(t);
+    legacy.timers = [];
+  }
+  if ('bootBackfillAborted' in legacy) legacy.bootBackfillAborted = true;
+}
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  return (g.__binanceRadarEnhanced ??= new EnhancedEngine());
+  const existing = g.__binanceRadarEnhanced_v2;
+  if (existing) return existing;
+  // v1 现货实例停表（K 线仓库不携带：现货K线与合约K线不可混用）
+  stopLegacyEngine(g.__binanceRadarEnhanced);
+  const fresh = new EnhancedEngine();
+  g.__binanceRadarEnhanced_v2 = fresh;
+  return fresh;
 }
 
-/** 热重置：停掉旧实例定时器，携带 K 线仓库创建新实例（应用新代码，不再重复回填） */
+/** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced;
-  if (old) {
-    if (typeof old.stop === 'function') {
-      old.stop();
-    } else {
-      // 旧原型实例（无 stop 方法）：运行时字段可直接访问，手动清定时器防双实例出站
-      const legacy = old as unknown as {
-        timers?: ReturnType<typeof setInterval>[];
-        bootBackfillAborted?: boolean;
-      };
-      if (legacy.timers?.length) {
-        for (const t of legacy.timers) clearInterval(t);
-        legacy.timers = [];
-      }
-      if ('bootBackfillAborted' in legacy) legacy.bootBackfillAborted = true;
-    }
-  }
-  const fresh = new EnhancedEngine(old?.store);
-  g.__binanceRadarEnhanced = fresh;
+  const old = g.__binanceRadarEnhanced_v2 ?? g.__binanceRadarEnhanced;
+  stopLegacyEngine(old);
+  // K 线仓库按市场标签携带：仅当旧仓库也是合约数据时复用（防现货/合约K线混用）
+  const carry =
+    old?.store && (old.store as { market?: string }).market === 'futures'
+      ? old.store
+      : undefined;
+  const fresh = new EnhancedEngine(carry);
+  g.__binanceRadarEnhanced_v2 = fresh;
   return fresh;
 }
