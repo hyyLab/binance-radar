@@ -55,6 +55,7 @@ export interface FuturesSourceHealth {
   last24hOkAt: number;
   symbols: number; // 该源当前供价的符号数（含对挂起源的临时降级代供）
   homeSymbols: number; // 分片归属该源的符号数（Task 51：币安 Top125，其余两所平分）
+  klineReqs: number; // 本实例生命周期内该源实际承接的 K 线请求数（分配观测）
   lastError: string;
 }
 

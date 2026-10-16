@@ -337,6 +337,7 @@ function StatsBar(props: {
     suspended: boolean;
     symbols: number;
     homeSymbols: number;
+    klineReqs: number;
     lastError: string;
   }>;
 }) {
@@ -353,7 +354,7 @@ function StatsBar(props: {
             <span
               key={s.source}
               className="inline-flex items-center gap-1"
-              title={`${s.label} · ${s.ok ? '供价中' : s.suspended ? '异常挂起，稍后自动重试' : '连接中'} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个${s.lastError ? ` · ${s.lastError}` : ''}`}
+              title={`${s.label} · ${s.ok ? '供价中' : s.suspended ? '异常挂起，稍后自动重试' : '连接中'} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个 · K 线已承接 ${s.klineReqs} req${s.lastError ? ` · ${s.lastError}` : ''}`}
             >
               <span
                 className={cn(

@@ -7,6 +7,7 @@
 
 import { activeFuturesCollector } from '../futures-collector';
 import { isExcludedBase } from '../excluded';
+import type { FuturesSourceName } from '../futures-feeds';
 import { AGG, STORE, VALIDITY, VOLUME, tierOf } from './config';
 import { KlineStore } from './klines';
 import { BreakoutTracker, detectSpike, detectVolume, type TickSnap } from './detectors';
@@ -110,12 +111,35 @@ export class EnhancedEngine {
       setTimeout(() => void this.buildWatchlistAndBackfill(), 10_000);
       return;
     }
+    if (!activeFuturesCollector().isSharded()) {
+      // 分片未就绪（等待首次 24h 统计）：按归属均摊回填前先等分配完成
+      setTimeout(() => void this.buildWatchlistAndBackfill(), 10_000);
+      return;
+    }
     this.rebuildWatchlist();
     if (this.baselineNoteAt.size > 800) this.baselineNoteAt.clear(); // 节流表防膨胀
-    // 冷启动回填：按成交额降序，前 bootBackfillCap 个立即回填（并发 2 + 间隔，防突发）
-    const list = this.candidateUniverse()
-      .filter((c) => c.qv >= 5_000_000 && !this.store.has(c.symbol))
-      .slice(0, STORE.bootBackfillCap);
+    // 冷启动回填（Task 51）：按归属源轮流排序——Bybit/Gate 优先就绪，币安只背它分片那份
+    //（且被令牌桶二次限速），不再出现「前 125 名全打币安」的突发
+    const uni = this.candidateUniverse().filter(
+      (c) => c.qv >= 5_000_000 && !this.store.has(c.symbol),
+    );
+    const byHome: Record<FuturesSourceName, { symbol: string; qv: number }[]> = {
+      binance: [],
+      bybit: [],
+      gate: [],
+    };
+    for (const c of uni) {
+      byHome[activeFuturesCollector().shardOf(c.symbol) ?? 'binance'].push(c);
+    }
+    const interleaved: { symbol: string; qv: number }[] = [];
+    const rounds = Math.max(byHome.binance.length, byHome.bybit.length, byHome.gate.length);
+    for (let i = 0; i < rounds; i++) {
+      for (const h of ['bybit', 'gate', 'binance'] as const) {
+        const c = byHome[h][i];
+        if (c) interleaved.push(c);
+      }
+    }
+    const list = interleaved.slice(0, STORE.bootBackfillCap);
     this.backfillTotal = list.length;
     this.backfillDone = 0;
     void this.runBootBackfill(list);
@@ -428,13 +452,28 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
-// v2（Task 50）：扫描标的从现货切换到 USDT-M 合约。旧 v1 实例持有现货 collector
-// 绑定与现货 K 线仓库，必须停表重建；其现货 K 线仓库不带 futures 市场标签，不携带。
+// v3（Task 51）：冷启动回填按归属分片均摊 + 分片就绪门控。旧实例停表、
+// 携带其 futures 市场 K 线仓库（不重复回填）。
 
 const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced?: EnhancedEngine; // v1（现货，遗留）
-  __binanceRadarEnhanced_v2?: EnhancedEngine; // v2（合约）
+  __binanceRadarEnhanced_v2?: EnhancedEngine; // v2（合约，回填按 qv 排序期）
+  __binanceRadarEnhanced_v3?: EnhancedEngine;
 };
+
+function pickLegacyEngine(g: typeof globalThis & {
+  __binanceRadarEnhanced?: EnhancedEngine;
+  __binanceRadarEnhanced_v2?: EnhancedEngine;
+}): EnhancedEngine | undefined {
+  return g.__binanceRadarEnhanced_v2 ?? g.__binanceRadarEnhanced;
+}
+
+function carryStoreOf(old: EnhancedEngine | undefined): KlineStore | undefined {
+  // K 线仓库按市场标签携带：仅当旧仓库也是合约数据时复用（防现货/合约K线混用）
+  return old?.store && (old.store as { market?: string }).market === 'futures'
+    ? old.store
+    : undefined;
+}
 
 function stopLegacyEngine(old: EnhancedEngine | undefined): void {
   if (!old) return;
@@ -456,25 +495,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v2;
+  const existing = g.__binanceRadarEnhanced_v3;
   if (existing) return existing;
-  // v1 现货实例停表（K 线仓库不携带：现货K线与合约K线不可混用）
-  stopLegacyEngine(g.__binanceRadarEnhanced);
-  const fresh = new EnhancedEngine();
-  g.__binanceRadarEnhanced_v2 = fresh;
+  const legacy = pickLegacyEngine(g);
+  if (legacy) stopLegacyEngine(legacy);
+  const fresh = new EnhancedEngine(carryStoreOf(legacy));
+  g.__binanceRadarEnhanced_v3 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v2 ?? g.__binanceRadarEnhanced;
+  const old = g.__binanceRadarEnhanced_v3 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
-  // K 线仓库按市场标签携带：仅当旧仓库也是合约数据时复用（防现货/合约K线混用）
-  const carry =
-    old?.store && (old.store as { market?: string }).market === 'futures'
-      ? old.store
-      : undefined;
-  const fresh = new EnhancedEngine(carry);
-  g.__binanceRadarEnhanced_v2 = fresh;
+  const fresh = new EnhancedEngine(carryStoreOf(old));
+  g.__binanceRadarEnhanced_v3 = fresh;
   return fresh;
 }

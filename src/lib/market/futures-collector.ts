@@ -73,6 +73,7 @@ interface SourceState {
   failStreak: number;
   suspendUntil: number;
   lastError: string;
+  klineReqs: number; // 该源实际承接的 K 线请求数（分片分配观测）
   priceHist: Map<string, PricePoint[]>;
   stats24: Map<string, Stats24Row>;
   lastVolSnap: Map<string, { at: number; qv24: number }>;
@@ -149,6 +150,7 @@ export class FuturesCollector {
       failStreak: 0,
       suspendUntil: 0,
       lastError: '',
+      klineReqs: 0,
       priceHist: new Map(),
       stats24: new Map(),
       lastVolSnap: new Map(),
@@ -508,6 +510,11 @@ export class FuturesCollector {
     return this.shards.get(symbol) ?? null;
   }
 
+  /** 分片是否已就绪（引擎冷启动回填按归属均摊前需等待） */
+  isSharded(): boolean {
+    return this.shards.size > 0;
+  }
+
   /** tickSize（按优先级取第一个有清单的源） */
   tickSizeOf(symbol: string): number {
     for (const s of FUTURES_SOURCE_PRIORITY) {
@@ -534,6 +541,7 @@ export class FuturesCollector {
         last24hOkAt: st.last24hAt,
         symbols,
         homeSymbols,
+        klineReqs: st.klineReqs,
         lastError: st.lastError,
       };
     });
@@ -541,15 +549,18 @@ export class FuturesCollector {
 
   // ============ K 线（异动引擎基线 + 图表共用；按符号同源取数） ============
 
-  /** K 线取数顺序：归属源（分片）优先，随后按优先级补位（仅限有该符号清单的源）。
+  /** K 线取数顺序：归属源（分片）优先；兜底补位时非币安源优先，币安永远最后——
+   *  （Task 51：K 线不全走币安，币安只背它分片那份 + 两所同时不可用时的末位兑底）。
    *  挂起中的源直接跳过——币安 418 封禁期间 K 线自动改走 Bybit/Gate，不在墙上硬撞 */
   private klineSourceOrder(symbol: string): FuturesSourceName[] {
     const now = Date.now();
     const order: FuturesSourceName[] = [];
     const home = this.homeOf(symbol);
     if (now >= this.sources[home].suspendUntil) order.push(home);
-    for (const s of FUTURES_SOURCE_PRIORITY) {
-      if (order.includes(s)) continue;
+    const others = FUTURES_SOURCE_PRIORITY.filter((s) => s !== home).sort(
+      (a, b) => (a === 'binance' ? 1 : 0) - (b === 'binance' ? 1 : 0),
+    );
+    for (const s of others) {
       if (now < this.sources[s].suspendUntil) continue;
       if (!this.sources[s].instruments.has(symbol)) continue;
       order.push(s);
@@ -566,6 +577,7 @@ export class FuturesCollector {
     for (const s of this.klineSourceOrder(symbol)) {
       const ins = this.sources[s].instruments.get(symbol);
       if (!ins) continue;
+      this.sources[s].klineReqs++; // 分片分配观测：实际承接的 K 线请求计数
       try {
         const candles = await fetchKlines(s, ins.native, interval, opts);
         if (candles.length > 0) return { source: s, candles };
@@ -647,11 +659,12 @@ export class FuturesCollector {
 }
 
 // ---------- 全局单例（HMR 安全，同 Task 44/collector 规则） ----------
-// v2（Task 51）：分片上线——币安只供价 Top125（其余 Bybit/Gate 平分）+ 币安令牌桶 +
-// 每源差异化 24hr 间隔（币安 60s）。v1（全量币安供价）已因 fapi 频繁 418 退役。
+// v3（Task 51 续）：K 线兜底顺序改「非币安优先，币安末位」+ 每源 klineReqs 计数 +
+// isSharded 门控。v2（分片首版）与 v1（全量币安供价）已退役，切换时停表并交接状态。
 const g = globalThis as typeof globalThis & {
   __binanceRadarFutures_v1?: FuturesCollector; // v1：全量币安供价（Task 50，已退役）
-  __binanceRadarFutures_v2?: FuturesCollector;
+  __binanceRadarFutures_v2?: FuturesCollector; // v2：分片首版（K 线兜底仍偏币安，已退役）
+  __binanceRadarFutures_v3?: FuturesCollector;
   __binanceRadarFuturesActive?: FuturesCollector;
 };
 
@@ -668,14 +681,15 @@ function clearFuturesTimers(c: unknown): void {
 }
 
 export const futuresCollector: FuturesCollector = (() => {
-  const existing = g.__binanceRadarFutures_v2;
+  const existing = g.__binanceRadarFutures_v3;
   if (existing) {
     g.__binanceRadarFuturesActive = existing; // 每次图评估都刷新稳定别名
     return existing;
   }
-  if (g.__binanceRadarFutures_v1) clearFuturesTimers(g.__binanceRadarFutures_v1); // v1 遗留停表
-  const fresh = new FuturesCollector();
-  g.__binanceRadarFutures_v2 = fresh;
+  const legacy = g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
+  if (legacy) clearFuturesTimers(legacy); // 遗留实例停表
+  const fresh = new FuturesCollector(legacy); // 状态交接（清单/价格史/统计/分片）
+  g.__binanceRadarFutures_v3 = fresh;
   g.__binanceRadarFuturesActive = fresh;
   return fresh;
 })();
