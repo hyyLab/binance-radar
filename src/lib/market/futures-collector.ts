@@ -30,7 +30,6 @@ import type { FuturesSourceHealth, TickerSnapshot } from './types';
 
 // ---------- 常量 ----------
 const PRICE_INTERVAL_MS = 5_000;
-const TF_INTERVAL_MS = 30_000;
 const INSTRUMENT_REFRESH_MS = 60 * 60_000; // 合约清单每小时刷新
 const MIN_QV_DISPLAY = 100_000; // 展示门槛：24h 成交额 ≥ 10 万 USDT
 const TOP_BACKFILL = 120;
@@ -38,6 +37,21 @@ const SUSPEND_MS = 60_000; // 源连续失败挂起时长
 const RATE_LIMIT_SUSPEND_MS = 180_000; // 418/429 限频封禁挂起时长（封禁期内不撞墙，行情自动降级下一源）
 const FAIL_STREAK_LIMIT = 4; // 连续失败次数阈值（≈20s 全失败即挂起）
 const PRICE_FRESH_MS = 15_000; // 供价源数据新鲜度要求
+
+// ============ 分片配额（Task 51 用户定版） ============
+// 品种白名单 = 币安 U 本位永续；币安只供价 Top125（模拟盘规则本体 + 最高频交易标的），
+// 其余 ~400 个由 Bybit/Gate 平分（行情大差不差、异动方向一致，价格精度不重要）。
+// 币安 fapi 对本 IP 实测极易触发 418，分片 + 令牌桶把币安出站压到安全水位。
+const BINANCE_SHARD_SIZE = 125;
+const OTHER_SHARD_QUOTA = 200;
+
+/** 24hr 统计轮询间隔：币安 60s（压权重，vol 差分 dt≈1min 仍在有效窗口），Bybit/Gate 30s */
+const STATS_INTERVAL_MS: Record<FuturesSourceName, number> = {
+  binance: 60_000,
+  bybit: 30_000,
+  gate: 30_000,
+};
+const STATS_RETRY_MS = 15_000; // 统计轮询失败快速重试
 
 // ---------- 内部结构 ----------
 interface PricePoint {
@@ -55,6 +69,7 @@ interface SourceState {
   instrumentsAt: number;
   lastPriceAt: number;
   last24hAt: number;
+  nextStatsAt: number; // 下次 24hr 轮询到期时间（每源差异化间隔）
   failStreak: number;
   suspendUntil: number;
   lastError: string;
@@ -86,17 +101,43 @@ function chgSince(hist: PricePoint[], target: number, price: number): number | n
 }
 
 export class FuturesCollector {
-  private sources: Record<FuturesSourceName, SourceState> = {
-    binance: FuturesCollector.freshSource(),
-    bybit: FuturesCollector.freshSource(),
-    gate: FuturesCollector.freshSource(),
-  };
+  private sources: Record<FuturesSourceName, SourceState>;
   private merged = new Map<string, MergedRow>();
+  /** 每符号的「归属源」分片（Task 51）：币安 Top125，其余 Bybit/Gate 平分；
+   *  供价与 K 线主源都跟归属走，源挂掉时临时降级到其它源 */
+  private shards = new Map<string, FuturesSourceName>();
+  private shardsAt = 0;
   private started = false;
   private starting: Promise<void> | null = null;
   priceTimer: ReturnType<typeof setInterval> | null = null;
   tfTimer: ReturnType<typeof setInterval> | null = null;
   meta = { startedAt: 0 };
+
+  /** 旧实例状态交接（bump key 时）：继承三源清单/价格史/统计/量能基线，
+   *  避免币安封禁期重建后白名单丢失导致行情全停，也避免重复回填 */
+  constructor(carry?: FuturesCollector) {
+    this.sources = {
+      binance: FuturesCollector.freshSource(),
+      bybit: FuturesCollector.freshSource(),
+      gate: FuturesCollector.freshSource(),
+    };
+    if (carry) {
+      for (const s of FUTURES_SOURCE_PRIORITY) {
+        const old = carry.sources[s];
+        const fresh = this.sources[s];
+        fresh.instruments = old.instruments;
+        fresh.instrumentsAt = old.instrumentsAt;
+        fresh.lastPriceAt = old.lastPriceAt;
+        fresh.last24hAt = old.last24hAt;
+        fresh.priceHist = old.priceHist;
+        fresh.stats24 = old.stats24;
+        fresh.lastVolSnap = old.lastVolSnap;
+        fresh.volSamples = old.volSamples;
+      }
+      this.shards = carry.shards ?? new Map<string, FuturesSourceName>(); // v1 遗留实例无分片字段
+      this.shardsAt = carry.shardsAt ?? 0;
+    }
+  }
 
   private static freshSource(): SourceState {
     return {
@@ -104,6 +145,7 @@ export class FuturesCollector {
       instrumentsAt: 0,
       lastPriceAt: 0,
       last24hAt: 0,
+      nextStatsAt: 0,
       failStreak: 0,
       suspendUntil: 0,
       lastError: '',
@@ -128,14 +170,14 @@ export class FuturesCollector {
   }
 
   private async boot(): Promise<void> {
-    // 1) 首拉合约清单（币安白名单就绪才能过滤行情）
+    // 1) 首拉合约清单（继承自旧实例的清单立即可用；缺失的源正常拉取）
     await Promise.allSettled(FUTURES_SOURCE_PRIORITY.map((s) => this.refreshInstruments(s)));
-    // 2) 首拉价格 + 24h（第一批数据就绪后 merged 才非空）
+    // 2) 首拉价格 + 24h（继承数据已就绪时本轮只做增量刷新）
     await Promise.allSettled([this.pollAllPrices(), this.pollAllStats()]);
-    // 3) 定时器：5s 价格 / 30s 24h 统计（清单刷新由 refreshInstruments 自链式调度）
+    // 3) 定时器：5s 价格 / 10s 统计到期检查（币安 24hr 实际 60s，Bybit/Gate 30s）
     this.priceTimer = setInterval(() => void this.pollAllPrices(), PRICE_INTERVAL_MS);
-    this.tfTimer = setInterval(() => void this.pollAllStats(), TF_INTERVAL_MS);
-    // 4) 启动回填 Top120（chg1m/chg5m 即刻可用）
+    this.tfTimer = setInterval(() => void this.pollAllStats(), 10_000);
+    // 4) 启动回填 Top（chg1m/chg5m 即刻可用；已有充足价格史的标的自动跳过）
     void this.backfillTop();
   }
 
@@ -225,6 +267,8 @@ export class FuturesCollector {
       FUTURES_SOURCE_PRIORITY.map(async (s) => {
         const st = this.sources[s];
         if (now < st.suspendUntil || st.instruments.size === 0) return;
+        if (now < st.nextStatsAt) return; // 每源差异化间隔（币安 60s，其余 30s）
+        st.nextStatsAt = now + STATS_INTERVAL_MS[s];
         try {
           const rows = await fetch24h(s, st.instruments);
           this.ingestStats(s, rows, Date.now());
@@ -232,6 +276,7 @@ export class FuturesCollector {
           st.suspendUntil = 0;
           st.lastError = '';
         } catch (e) {
+          st.nextStatsAt = now + STATS_RETRY_MS; // 失败快速重试
           this.noteFailure(s, e);
         }
       }),
@@ -287,11 +332,82 @@ export class FuturesCollector {
     }
   }
 
-  // ============ 聚合：按优先级选源（单源供价不变式） ============
+  // ============ 分片：按成交额把品种分配给三源（boot 后首次统计就绪时分配一次） ============
 
-  /** 为符号选择供价源：优先级顺序内第一个「未挂起 + 价格史新鲜」的源 */
-  private selectSource(symbol: string, now: number): FuturesSourceName | null {
+  /** 排序权重：优先币安自身 24h 成交额（供价基准一致），不可用时退其它源（口径差异不影响排序大局） */
+  private rankKey(symbol: string): number {
     for (const s of FUTURES_SOURCE_PRIORITY) {
+      const st = this.sources[s].stats24.get(symbol);
+      if (st && st.qv24 > 0) return st.qv24;
+    }
+    return 0;
+  }
+
+  private assignShards(): void {
+    if (this.shards.size > 0) return; // 运行期不重排：避免 K 线序列跨源拼接
+    // 等统计就绪（任意源有 24h 成交额即可排序；币安被封时 Bybit/Gate 统计照常流入）
+    const hasStats = FUTURES_SOURCE_PRIORITY.some(
+      (s) => this.sources[s].stats24.size > 0,
+    );
+    if (!hasStats || this.sources.binance.instruments.size === 0) return;
+
+    const whitelist = this.sources.binance.instruments;
+    const sorted = [...whitelist.keys()]
+      .filter((sym) => !isExcludedBase(whitelist.get(sym)!.base))
+      .sort((a, b) => this.rankKey(b) - this.rankKey(a));
+
+    let otherToggle = 0; // bybit/gate 交替发牌 → 两所成交额质量大体对半
+    const quota: Record<FuturesSourceName, number> = {
+      binance: BINANCE_SHARD_SIZE,
+      bybit: OTHER_SHARD_QUOTA,
+      gate: OTHER_SHARD_QUOTA,
+    };
+    for (const sym of sorted) {
+      // 币安配额内（Top125）：按优先级+配额选归属
+      let home: FuturesSourceName | null = null;
+      for (const s of FUTURES_SOURCE_PRIORITY) {
+        if (quota[s] <= 0 || !this.sources[s].instruments.has(sym)) continue;
+        home = s;
+        quota[s]--;
+        break;
+      }
+      // 配额用尽 → 双所覆盖则交替发牌；单所覆盖归该所；两所都不覆盖（新上币等）回币安
+      if (!home) {
+        const covered = FUTURES_SOURCE_PRIORITY.filter(
+          (s) => s !== 'binance' && this.sources[s].instruments.has(sym),
+        );
+        if (covered.length === 2) {
+          home = covered[otherToggle % 2];
+          otherToggle++;
+        } else if (covered.length === 1) {
+          home = covered[0];
+        } else {
+          home = 'binance'; // 极少数（如刚上线币安的新品种）：币安兜底，K 线成本可忽略
+        }
+      }
+      this.shards.set(sym, home);
+    }
+    this.shardsAt = Date.now();
+  }
+
+  /** 归属源（未分片时按优先级首个覆盖源兑底） */
+  private homeOf(symbol: string): FuturesSourceName {
+    const home = this.shards.get(symbol);
+    if (home) return home;
+    for (const s of FUTURES_SOURCE_PRIORITY) {
+      if (this.sources[s].instruments.has(symbol)) return s;
+    }
+    return 'binance';
+  }
+
+  /** 为符号选择供价源：归属源优先，其余按优先级补位（须「未挂起 + 价格史新鲜」） */
+  private selectSource(symbol: string, now: number): FuturesSourceName | null {
+    const home = this.homeOf(symbol);
+    const order = [
+      home,
+      ...FUTURES_SOURCE_PRIORITY.filter((s) => s !== home),
+    ];
+    for (const s of order) {
       const st = this.sources[s];
       if (now < st.suspendUntil) continue;
       if (now - st.lastPriceAt > PRICE_FRESH_MS) continue;
@@ -306,6 +422,7 @@ export class FuturesCollector {
 
   /** 重建聚合行情：白名单 = 币安 U 本位永续（只做币安包含的品种） */
   private rebuildMerged(): void {
+    this.assignShards(); // 首次统计就绪时分配（幂等）
     const now = Date.now();
     const whitelist = this.sources.binance.instruments;
     for (const [symbol, ins] of whitelist) {
@@ -324,6 +441,13 @@ export class FuturesCollector {
       const price = lastPt.p;
       const prevPt = hist.length >= 2 ? hist[hist.length - 2] : null;
       const s24 = st.stats24.get(symbol);
+      // 24h 成交额跨源取最大：统一门槛/分层口径（Gate/Bybit 口径成交额系统性低于币安，
+      // 按供价源口径会误杀尾部标的）。vol1m/量比保持供价源内部口径（与 K 线基线同源自洽）。
+      let qv24 = s24?.qv24 ?? 0;
+      for (const src of FUTURES_SOURCE_PRIORITY) {
+        const cand = this.sources[src].stats24.get(symbol);
+        if (cand && cand.qv24 > qv24) qv24 = cand.qv24;
+      }
       const vs = st.volSamples.get(symbol) ?? [];
       let vol1m = 0;
       let volAvg20m = 0;
@@ -343,7 +467,7 @@ export class FuturesCollector {
         high24h: s24?.high24 || price,
         low24h: s24?.low24 || price,
         change24h: s24?.chg24 ?? 0,
-        quoteVolume24h: s24?.qv24 ?? 0,
+        quoteVolume24h: qv24,
         chg1m: chgSince(hist, now - 60_000, price),
         chg5m: chgSince(hist, now - 5 * 60_000, price),
         chg15m: chgSince(hist, now - 15 * 60_000, price),
@@ -379,6 +503,11 @@ export class FuturesCollector {
     return this.merged.get(symbol)?.source ?? null;
   }
 
+  /** 归属分片（对外查询：测试/诊断用） */
+  shardOf(symbol: string): FuturesSourceName | null {
+    return this.shards.get(symbol) ?? null;
+  }
+
   /** tickSize（按优先级取第一个有清单的源） */
   tickSizeOf(symbol: string): number {
     for (const s of FUTURES_SOURCE_PRIORITY) {
@@ -394,6 +523,8 @@ export class FuturesCollector {
       const st = this.sources[source];
       let symbols = 0;
       for (const row of this.merged.values()) if (row.source === source) symbols++;
+      let homeSymbols = 0;
+      for (const home of this.shards.values()) if (home === source) homeSymbols++;
       return {
         source,
         label: SOURCE_LABEL[source],
@@ -402,6 +533,7 @@ export class FuturesCollector {
         lastPriceOkAt: st.lastPriceAt,
         last24hOkAt: st.last24hAt,
         symbols,
+        homeSymbols,
         lastError: st.lastError,
       };
     });
@@ -409,13 +541,13 @@ export class FuturesCollector {
 
   // ============ K 线（异动引擎基线 + 图表共用；按符号同源取数） ============
 
-  /** K 线取数顺序：当前供价源优先，随后按优先级补位（仅限有该符号清单的源）。
+  /** K 线取数顺序：归属源（分片）优先，随后按优先级补位（仅限有该符号清单的源）。
    *  挂起中的源直接跳过——币安 418 封禁期间 K 线自动改走 Bybit/Gate，不在墙上硬撞 */
   private klineSourceOrder(symbol: string): FuturesSourceName[] {
     const now = Date.now();
     const order: FuturesSourceName[] = [];
-    const sel = this.sourceOf(symbol);
-    if (sel && now >= this.sources[sel].suspendUntil) order.push(sel);
+    const home = this.homeOf(symbol);
+    if (now >= this.sources[home].suspendUntil) order.push(home);
     for (const s of FUTURES_SOURCE_PRIORITY) {
       if (order.includes(s)) continue;
       if (now < this.sources[s].suspendUntil) continue;
@@ -458,10 +590,16 @@ export class FuturesCollector {
     try {
       for (let i = 0; i < 30 && this.merged.size === 0; i++) await sleep(1000);
       if (this.merged.size === 0) return;
+      // 已有 ≥20 个价格点的标的跳过（bump key 交接/HMR 后不重复回填）
       const top = [...this.merged.values()]
-        .filter((r) => r.quoteVolume24h >= 1_000_000)
+        .filter((r) => {
+          if (r.quoteVolume24h < 1_000_000) return false;
+          const hist = this.sources[r.source]?.priceHist.get(r.symbol);
+          return !hist || hist.length < 20;
+        })
         .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
         .slice(0, TOP_BACKFILL);
+      if (top.length === 0) return;
       const now = Date.now();
       let cursor = 0;
       const worker = async () => {
@@ -509,8 +647,11 @@ export class FuturesCollector {
 }
 
 // ---------- 全局单例（HMR 安全，同 Task 44/collector 规则） ----------
+// v2（Task 51）：分片上线——币安只供价 Top125（其余 Bybit/Gate 平分）+ 币安令牌桶 +
+// 每源差异化 24hr 间隔（币安 60s）。v1（全量币安供价）已因 fapi 频繁 418 退役。
 const g = globalThis as typeof globalThis & {
-  __binanceRadarFutures_v1?: FuturesCollector;
+  __binanceRadarFutures_v1?: FuturesCollector; // v1：全量币安供价（Task 50，已退役）
+  __binanceRadarFutures_v2?: FuturesCollector;
   __binanceRadarFuturesActive?: FuturesCollector;
 };
 
@@ -527,13 +668,14 @@ function clearFuturesTimers(c: unknown): void {
 }
 
 export const futuresCollector: FuturesCollector = (() => {
-  const existing = g.__binanceRadarFutures_v1;
+  const existing = g.__binanceRadarFutures_v2;
   if (existing) {
     g.__binanceRadarFuturesActive = existing; // 每次图评估都刷新稳定别名
     return existing;
   }
+  if (g.__binanceRadarFutures_v1) clearFuturesTimers(g.__binanceRadarFutures_v1); // v1 遗留停表
   const fresh = new FuturesCollector();
-  g.__binanceRadarFutures_v1 = fresh;
+  g.__binanceRadarFutures_v2 = fresh;
   g.__binanceRadarFuturesActive = fresh;
   return fresh;
 })();

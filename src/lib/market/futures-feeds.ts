@@ -41,6 +41,49 @@ export class FuturesFetchError extends Error {
   }
 }
 
+// ============ 币安 fapi 全局权重令牌桶（Task 51 限流治理） ============
+// 事前限速：所有 fapi 出站请求共享一个令牌桶（容量 80，8/s 补充 ≈ 480 权重/分钟），
+// 请求前按「端点估算权重」扣令牌，不足则等待——轮询（~64/min）+ K 线轮换（~60/min）
+// + 冷启动回填全部被压在 480/min 硬帽内，从机制上杜绝再触发 429→418 IP 封禁。
+const BINANCE_BUCKET_CAPACITY = 80; // 突发容量（≥ 单次 24hr 全量轮询的权重 40×2）
+const BINANCE_REFILL_PER_SEC = 8; // ≈ 480 权重/分钟（对实测敏感的 IP 留足余量）
+let binanceTokens = BINANCE_BUCKET_CAPACITY;
+let binanceLastRefill = Date.now();
+
+async function takeBinanceTokens(cost: number): Promise<void> {
+  for (;;) {
+    const now = Date.now();
+    binanceTokens = Math.min(
+      BINANCE_BUCKET_CAPACITY,
+      binanceTokens + ((now - binanceLastRefill) / 1000) * BINANCE_REFILL_PER_SEC,
+    );
+    binanceLastRefill = now;
+    if (binanceTokens >= cost) {
+      binanceTokens -= cost;
+      return;
+    }
+    await new Promise((r) => setTimeout(r, 250)); // 令牌不足，稍候再取
+  }
+}
+
+/** 币安 fapi 各端点权重估算（官方文档口径） */
+function estimateBinanceWeight(
+  path: string,
+  params?: Record<string, string | number | undefined>,
+): number {
+  if (path === '/fapi/v1/ticker/price') return params?.symbol ? 1 : 2;
+  if (path === '/fapi/v1/ticker/24hr') return params?.symbol ? 1 : 40;
+  if (path === '/fapi/v1/exchangeInfo') return 10;
+  if (path === '/fapi/v1/klines') {
+    const limit = Number(params?.limit ?? 500);
+    if (limit < 100) return 1;
+    if (limit < 500) return 2;
+    if (limit <= 1000) return 5;
+    return 10;
+  }
+  return 5; // 未知端点保守估计
+}
+
 /** 各源独立的多域名容灾请求（粘性记忆可用域名） */
 async function sFetch<T>(
   source: FuturesSourceName,
@@ -58,6 +101,8 @@ async function sFetch<T>(
     : '';
   const bases = BASES[source];
   let lastErr: unknown = null;
+  // 币安出站先过全局令牌桶（按端点权重扣减）；Bybit/Gate 限制宽松不设桶
+  if (source === 'binance') await takeBinanceTokens(estimateBinanceWeight(path, params));
   for (let i = 0; i < bases.length; i++) {
     const idx = (sticky[source] + i) % bases.length;
     try {

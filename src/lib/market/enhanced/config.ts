@@ -101,7 +101,7 @@ export const AGG = {
 export const STORE = {
   keepHours: 26, // 保留 26h（>24h 基线 + 余量）
   maxTracked: 220, // K 线跟踪标的数上限（请求预算护栏）
-  bootBackfillCap: 120, // 冷启动立即回填的标的数（按成交额降序）
+  bootBackfillCap: 125, // 冷启动立即回填的标的数（Task 51：恰好=币安分片 125，回填走归属源，币安权重受令牌桶约束）
   bootConcurrency: 2, // 冷启动回填并发（防突发）
   bootGapMs: 1500, // 回填批次间隔（Task 50：fapi 对本 IP 实测有比 2400 更严的隐性限制，1500ms 压峰值权重至 ~400/min）
   rotateMs: 5 * 60_000, // 单标的基线轮换周期
