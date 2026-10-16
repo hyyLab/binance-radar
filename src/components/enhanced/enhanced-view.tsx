@@ -8,6 +8,7 @@ import { cn } from '@/lib/utils';
 import { TradeModal, type TradeIntent } from '@/components/scanner/trade-modal';
 import { CoinDialog } from '@/components/market/coin-dialog';
 import { PaperPanel } from '@/components/scanner/paper-panel';
+import { TrendPanel } from '@/components/enhanced/trend-panel';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Activity,
@@ -651,6 +652,9 @@ export function EnhancedView() {
             </div>
           )
         )}
+
+        {/* 趋势跟踪（Universal Trend Engine 集成）：候选池/阶段/方向/评分/冲突展示 */}
+        <TrendPanel onSelectSymbol={setSelectedSymbol} />
 
         {/* 模拟建仓系统（原模拟盘页签并入）：账户总览 + 持仓 + 平仓流水 + 充值/重置 */}
         <PaperPanel

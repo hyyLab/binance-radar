@@ -52,3 +52,8 @@ prompt
 server.log
 # Skills directory
 /skills/
+# 趋势跟踪测试库（repo 测试运行时产物）
+db/trend-watch-test.db
+
+# UTE 临时构建克隆（vendor 产物已就位，同步流程见 vendor/universal-trend-engine/VENDOR.md）
+.tmp-ute/

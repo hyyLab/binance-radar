@@ -73,6 +73,16 @@ export interface EnhancedStats {
   dataAnomalies: number;
   /** 合约多源健康（Task 50：币安/Bybit/Gate 供价状态） */
   sources?: import('../types').FuturesSourceHealth[];
+  /** 趋势跟踪摘要（Task 53：Universal Trend Engine 集成，服务未启动时缺省） */
+  trendWatch?: {
+    on: boolean;
+    poolSize: number;
+    maxPoolSize: number;
+    confirmed: number;
+    candidate: number;
+    klineReqs: number;
+    dbErrors: number;
+  };
 }
 
 export type Priority = 'P1' | 'P2' | 'P3';

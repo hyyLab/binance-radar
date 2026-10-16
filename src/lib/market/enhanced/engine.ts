@@ -8,6 +8,8 @@
 import { activeFuturesCollector } from '../futures-collector';
 import { isExcludedBase } from '../excluded';
 import type { FuturesSourceName } from '../futures-feeds';
+import { TrendWatchService } from '../trend-watch/service';
+import { prismaTrendWatchRepo } from '../trend-watch/repo';
 import { AGG, STORE, VALIDITY, VOLUME, tierOf } from './config';
 import { KlineStore } from './klines';
 import { BreakoutTracker, detectSpike, detectVolume, type TickSnap } from './detectors';
@@ -35,6 +37,8 @@ interface SuspectState {
 
 export class EnhancedEngine {
   store: KlineStore;
+  /** 趋势跟踪（Universal Trend Engine 集成）：生命周期随引擎，单例由引擎单例保证 */
+  readonly trendWatch: TrendWatchService;
   private breakout = new BreakoutTracker();
   private agg = new Aggregator();
   private logs: DetectionLogEntry[] = [];
@@ -48,6 +52,15 @@ export class EnhancedEngine {
   /** 可接管旧实例的 K 线仓库（热重置时避免重复回填出站请求） */
   constructor(carriedStore?: KlineStore) {
     this.store = carriedStore ?? new KlineStore();
+    // 趋势服务：数据源与异动事件都从本引擎动态取（箭头函数延迟绑定）；
+    // 持久化走 Prisma repo——重建后从 DB 恢复候选池与确认历史，不依赖实例交接
+    this.trendWatch = new TrendWatchService({
+      fetchKlines: (symbol, limit) =>
+        activeFuturesCollector().fetchKlinesFor(symbol, '1m', { limit }),
+      getTickers: () => activeFuturesCollector().getTickers(),
+      getEvents: (now) => this.events(now),
+      repo: prismaTrendWatchRepo,
+    });
   }
 
   /** 停止本实例全部定时器与回填（热重置用，防双实例重复出站） */
@@ -55,6 +68,7 @@ export class EnhancedEngine {
     this.bootBackfillAborted = true;
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+    this.trendWatch.stop(); // 趋势扫描同步停表（DB 恢复机制保证新实例不丢状态）
     this.started = false;
   }
 
@@ -82,6 +96,8 @@ export class EnhancedEngine {
   private async boot(): Promise<void> {
     // 0) 启动合约多源采集器（幂等）：币安白名单 + 三源价格/24h 就绪后才有监控清单
     void activeFuturesCollector().ensureStarted();
+    // 0.5) 启动趋势跟踪服务（幂等；从 DB 恢复候选池与确认历史，绑定本引擎事件流）
+    void this.trendWatch.ensureStarted();
     // 1) 等 collector 就绪（tickers 有数据），再建监控清单
     setTimeout(() => void this.buildWatchlistAndBackfill(), STORE.collectReadyWaitMs);
     // 2) 定时器：2s 检测 / 30s 放量 / 12s 轮换槽 / 5min 清单 / 30s 结束判定
@@ -425,6 +441,7 @@ export class EnhancedEngine {
       const tier = tierOf(t.quoteVolume24h);
       if (tier !== 'NONE' && !isExcludedBase(t.base)) tierCounts[tier]++;
     }
+    const tw = this.trendWatch.snapshot(now).stats;
     return {
       ts: now,
       startedAt: this.startedAt,
@@ -441,6 +458,15 @@ export class EnhancedEngine {
       lastRotateAt: this.lastRotateAt,
       dataAnomalies: this.dataAnomalies,
       sources: activeFuturesCollector().getSourcesHealth(),
+      trendWatch: {
+        on: tw.startedAt > 0,
+        poolSize: tw.poolSize,
+        maxPoolSize: tw.maxPoolSize,
+        confirmed: tw.confirmed,
+        candidate: tw.candidate,
+        klineReqs: tw.klineReqs,
+        dbErrors: tw.dbErrors,
+      },
     };
   }
 }
@@ -452,20 +478,24 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
-// v3（Task 51）：冷启动回填按归属分片均摊 + 分片就绪门控。旧实例停表、
-// 携带其 futures 市场 K 线仓库（不重复回填）。
+// v4（Task 53）：集成 TrendWatchService（Universal Trend Engine 趋势跟踪）。
+// 旧实例 stop() 会同步停掉其趋势扫描；新实例的趋势服务从 DB 恢复候选池与确认历史，
+// K 线仓库照旧按市场标签携带（不重复回填）。
+// v3（Task 51）/v2/v1 已退役。
 
 const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced?: EnhancedEngine; // v1（现货，遗留）
   __binanceRadarEnhanced_v2?: EnhancedEngine; // v2（合约，回填按 qv 排序期）
-  __binanceRadarEnhanced_v3?: EnhancedEngine;
+  __binanceRadarEnhanced_v3?: EnhancedEngine; // v3（分片均摊回填）
+  __binanceRadarEnhanced_v4?: EnhancedEngine;
 };
 
 function pickLegacyEngine(g: typeof globalThis & {
   __binanceRadarEnhanced?: EnhancedEngine;
   __binanceRadarEnhanced_v2?: EnhancedEngine;
+  __binanceRadarEnhanced_v3?: EnhancedEngine;
 }): EnhancedEngine | undefined {
-  return g.__binanceRadarEnhanced_v2 ?? g.__binanceRadarEnhanced;
+  return g.__binanceRadarEnhanced_v3 ?? g.__binanceRadarEnhanced_v2 ?? g.__binanceRadarEnhanced;
 }
 
 function carryStoreOf(old: EnhancedEngine | undefined): KlineStore | undefined {
@@ -495,20 +525,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v3;
+  const existing = g.__binanceRadarEnhanced_v4;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v3 = fresh;
+  g.__binanceRadarEnhanced_v4 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v3 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v4 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v3 = fresh;
+  g.__binanceRadarEnhanced_v4 = fresh;
   return fresh;
 }

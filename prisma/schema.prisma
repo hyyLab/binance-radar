@@ -90,3 +90,33 @@ model HotPoolEntry {
   @@unique([date, symbol])
   @@index([date, rank])
 }
+
+// ---------- 趋势跟踪（TrendWatchService，Universal Trend Engine 集成） ----------
+// 只在入池/状态变化/新 K 线/生命周期变化时写入（不每轮扫描无条件落库）。
+// 重启后 loadActive() 恢复候选池与每个标的的 UTE 趋势确认历史（trendStateJson）。
+
+model TrendWatchSymbol {
+  id             String   @id @default(cuid())
+  symbol         String // 交易对，如 BTCUSDT
+  market         String   @default("futures") // 市场标识
+  interval       String   @default("1m") // K 线周期标识
+  // —— 候选池生命周期 ——
+  status         String   @default("WATCHING") // WATCHING=在池 | RETIRED=已退池
+  addedAt        DateTime // 入池时间
+  lastAnomalyAt  DateTime? // 最近一次异动时间（候选依据的事件时间）
+  expiresAt      DateTime? // 候选过期时间（超过且趋势 idle → 退池）
+  // —— Universal Trend Engine 状态 ——
+  trendStateJson String   @default("{}") // UTE TrendState 完整 JSON（恢复确认历史用）
+  lastSignalJson String? // 最近一次完整趋势信号 JSON（含 assessment 评分依据）
+  lastPhase      String   @default("idle") // idle | candidate | confirmed
+  lastDirection  String   @default("flat") // up | down | flat
+  lastScore      Float    @default(0)
+  // —— K 线状态 ——
+  lastBarTime    DateTime? // 最近已参与评估的已收盘 1m K 线开盘时间
+  lastKlineAt    DateTime? // 最近一次 K 线刷新时间
+  updatedAt      DateTime @updatedAt
+
+  @@unique([symbol, market, interval])
+  @@index([status])
+  @@index([lastPhase])
+}
