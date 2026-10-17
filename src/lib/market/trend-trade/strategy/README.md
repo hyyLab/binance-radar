@@ -10,8 +10,8 @@ strategy/
 ├── registry.ts          # 注册表：唯一接入入口 + 已注册算法清单（文件头注释）
 ├── short-swing.ts       # 短周期套利 v1（默认算法，Task 66 顺势化）：确认+评分/ER 门槛+5m 背景分级
 │                        #   +脉冲末端不追+确认新鲜窗+冲高落袋；同周期只做第一波（R2 关闭）
-└── universal-trend.ts   # 通用趋势引擎 v1（Task 66 复盘定版）：确认+震荡后方向选择证据才入场；
-                         #   三层离场=硬止损 1% 价格+移动止盈（峰值 15% 回撤 8% 落袋）+走弱 2 根先走
+├── universal-trend.ts   # 通用趋势引擎 v1（Task 66 复盘定版）：方向选择确认 + 硬止损/移动止盈
+└── major-p1-breakout.ts # 重大异动突破 v1：2s 直接消费 MAJOR P1 事件，不依赖趋势池/UTE
 ```
 
 ## 当前算法对比（选型用）
@@ -26,6 +26,13 @@ strategy/
 | 走弱离场 | END_PENDING 一根证据即走 | END_PENDING 证据 ≥2 根才走（修复「稍微回调就止损」） |
 | 再入场 | 同周期 1 轮（默认，只做第一波） | 同周期 ≤2 轮、需新收盘 K 线 |
 
+### 第三算法：major-p1-breakout-v1
+
+- 仅处理 active + MAJOR + P1 异动，不依赖 20 个标的的 TrendWatch 候选池。
+- 专用 2 秒循环；CONFIRMED 突破顺势入场，FALSE 突破只有重新越过基准线并超过确认距离才反向；方向性 SPIKE / 待确认突破可小保证金试探。
+- 默认标的价格硬止损 1.8%；顺向价格运动达到 2.0% 启动移动止盈，峰值回撤 1.0% 平仓；10 分钟仍无足够顺向扩张则退出。
+- 同一事件无固定分钟冷却，但每次平仓后必须出现新事件证据，单事件默认最多 8 轮；执行层仍限制同币同时只能有一笔 OPEN 仓位。
+
 ## 新增算法三步
 
 > ⚡ 速成版（含最小代码骨架、参数进控制台的 3 条铁规则、验证命令）见 `docs/strategy-quickstart.md`。
@@ -39,7 +46,7 @@ strategy/
 
 ## 纪律
 
-- 方向与评分唯一来源是 UnifiedTrendSignal（vendor universal-trend-engine 的输出），
-  算法**绝不自建第二套方向/评分逻辑**。
+- short-swing / universal-trend 的方向与评分唯一来源是 UnifiedTrendSignal（vendor universal-trend-engine 的输出）。
+- major-p1-breakout-v1 是事件驱动例外：它只判断 MAJOR P1 异动事件与突破结构，不从趋势池接收交易标的；不能把 UTE 趋势确认当成它的入场前提。
 - 轮次状态用 `states` map + `bindPersistence` 落库（TrendStrategyState），重启/切换不丢轮次语义。
 - 纯模拟；策略绝不接触真实下单（只作用于独立模拟账户 trend-auto-v1）。
