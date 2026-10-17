@@ -373,3 +373,21 @@ Stage Summary:
 - 「一直红」= IP 确被币安 418 封禁（累犯升级至 24h），但功能零影响（多源分片设计兑现）；状态条悬停现可直读解封时刻
 - 封禁纪律重构完成：币安说的解封时间就是唯一真值——挂满封禁期、封禁期零出站、偶发成功不提前解锁、instruments 同样停手、重建继承封禁状态
 - 外因（共享出口 IP 邻居流量）已用数据坐实；建议如解封后仍频繁连坐，考虑独立 EIP
+
+---
+Task ID: 61
+Agent: Super Z (main)
+Task: 通用算法接口文档——让用户看清「算法怎么写、怎么接进趋势自动交易系统」（零代码实施，纯文档）
+
+Work Log:
+- 通读现有策略插件体系确认接口真容：strategy/types.ts（TrendStrategy 全 11 成员 + Entry/Exit Verdict + MarketCtx/PositionCtx）、strategy/registry.ts（STRATEGY_FACTORIES/createStrategy 兜底/listStrategies）、strategy/short-swing.ts（生产参考实现）、auto-trader.ts（tick 十步时序/守卫链/executeOpen 资金幂等/manageExits 四级退出/轮次键 {cycleId}#R{round}）、console-params.ts（PARAM_DEFS 白名单 + lenient 装配丢键语义 + 严格校验 400）、repo.ts 三行结构、trend-watch/signal.ts（UnifiedTrendSignal/TrendPhaseV2）与 indicators.ts（VolatilityFeatures/HtfAssessment）、enhanced/engine.ts（单例 v15 装配与 bump 纪律）
+- 关键接线事实核实：setStrategy 先 closeAllManual 清场再热装配；策略 evaluateEntry 只在「CONFIRMED_* + dataFresh + 无持仓/待入场 + 容量冷却通过」时被问；meta.mfe/mae/firstEndSignAt/entryBarTime 可被策略离场复用；PARAM_DEFS 键全局命名空间（新策略参数须前缀防撞 + 不注册即装配期静默丢弃）
+- 写 docs/strategy-interface.md（805 行，8 章）：总览与职责边界 → 接口逐方法契约 → 数据契约（信号/特征/ctx/裁决/meta 复用）→ 基础设施硬规则（守卫链/二次确认/退出优先级/轮次）→ 完整教学示例 pullback-v1（可编译、PB_ 前缀参数、峰值回撤离场复用 MFE）→ 接入上线四步（实现/注册/控制台参数/bump v15→v16 四处）→ 运行期管理与审计三查 FAQ → 红线 8 条 + 上线自测 checklist
+- 机械化一致性校验（scripts/check-doc-identifiers*.sh）：178 个文档 token ↔ 源码全词匹配，关键标识符（evaluateEntry/StrategyEntryVerdict/SPIKE_TAKE/REVERSE_CONFIRMED/waitBarConfirm/firstEndSignAt/__binanceRadarEnhanced_v15 等）doc↔code 零漂移；修正 TrendPhase→TrendPhaseV2 等 3 处
+- 按 pdf 技能 Report 线生产可读版：palette.cascade(--intent cold) 钢蓝色系 → ReportLab 正文（NotoSerifSC/SarasaMonoSC 白名单字体 + install_font_fallback + TocDocTemplate/multiBuild 自动目录 + 代码块 Sarasa 行级可跨页 + 表格全 Paragraph 化 repeatRows=1）→ 封面 Template 01（poster_validate + cover_validate 双过，修 hero 嵌套 span 伪重叠）→ pypdf 归一化 A4 合并 24 页
+- 质检闭环：code.sanitize/meta.brand/pages.clean(无空白页)/font.check(0 缺字)/toc.check(pass)/pdf_qa——修复页面尺寸不一致（normalize 阈值 2pt→0.1pt）与 Helvetica 潜入（bulletFontName 默认值陷阱）后 FAIL→WARN；残余 12 条 CJK 窄列标点警告（ReportLab CJK 断行器限制，可接受）与封面左锚边距不对称（Template 01 规范设计）
+
+Stage Summary:
+- 交付：docs/strategy-interface.md（仓库长期维护）+ download/趋势自动交易-算法接口文档.pdf（24 页可读版）+ 封面 HTML 源码
+- 零代码实施：本任务未改任何 src/ 文件、未 bump 引擎单例（文档不改运行时行为），server 3000 全程未动
+- 后续按图施工即可：新算法 = 实现 TrendStrategy（照 §5 示例）→ registry 一行 → 可选 PARAM_DEFS → bump v15→v16；用户已可用该文档评审接口设计并决定下一个算法

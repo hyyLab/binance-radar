@@ -1,0 +1,97 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;700&family=Noto+Sans+SC:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+  @page { size: 794px 1123px; margin: 0; }
+  :root {
+    /* cascade palette (--intent cold --mode minimal) —— 与正文同一色族 */
+    --c-bg: #f5f5f6;
+    --c-accent: #3090c0;
+    --c-text: #1d1f20;
+    --c-muted: #7a8084;
+    --c-mid: #465861;
+    --c-surface: #ecedee;
+  }
+  html, body {
+    margin: 0; padding: 0;
+    width: 794px; height: 1123px;
+    background: var(--c-bg);
+    font-family: 'Noto Sans SC', 'Noto Sans CJK SC', 'Inter', sans-serif;
+    color: var(--c-text);
+  }
+  @media screen {
+    html { height: auto; display: flex; justify-content: center; min-height: 100vh; background: var(--c-bg); }
+    body { transform-origin: top center; scale: min(1, calc(100vw / 794), calc(100vh / 1123)); margin: 0 auto; box-shadow: 0 0 48px rgba(0,0,0,0.12); }
+  }
+  .cover { position: relative; width: 794px; height: 1123px; border: none; outline: none; box-shadow: none; }
+
+  /* Layer 1 · 背景网格（主色 2% 透明度，50px 间隔；仅本层允许 overflow:hidden） */
+  .layer1 { position: absolute; inset: 0; overflow: hidden; z-index: 1; }
+  .grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(to right, rgba(70,88,97,0.05) 0.5px, transparent 0.5px),
+      linear-gradient(to bottom, rgba(70,88,97,0.05) 0.5px, transparent 0.5px);
+    background-size: 50px 50px;
+  }
+
+  /* Layer 2 · 结构：左侧超粗锚定竖线（0.12W，宽 8px，0.1H→0.9H） */
+  .layer2 { position: absolute; inset: 0; z-index: 2; }
+  .vline { position: absolute; left: 95px; top: 112px; bottom: 112px; width: 8px; background: var(--c-accent); }
+
+  /* Layer 3 · 内容（左缘 = 锚线 + 2U ≈ 178px；绝对锚点栅格） */
+  .layer3 { position: absolute; inset: 0; z-index: 3; }
+  .kicker {
+    position: absolute; left: 178px; top: 168px;
+    font-family: 'Inter', 'Noto Sans SC', sans-serif;
+    font-size: 16px; font-weight: 500; letter-spacing: 3px;
+    text-transform: uppercase; color: var(--c-muted); opacity: 0.85;
+  }
+  .hero1 {
+    position: absolute; left: 178px; top: 320px; max-width: 544px;
+    font-size: 48px; font-weight: 900; line-height: 1.18;
+    color: var(--c-text); letter-spacing: 1px;
+  }
+  .hero2 {
+    position: absolute; left: 178px; top: 386px; max-width: 544px;
+    font-size: 48px; font-weight: 900; line-height: 1.18;
+    color: var(--c-mid); letter-spacing: 1px;
+  }
+  .summary {
+    position: absolute; left: 178px; top: 566px; max-width: 476px;
+    font-size: 17px; font-weight: 400; line-height: 1.62;
+    color: var(--c-text); opacity: 0.85;
+  }
+  .meta {
+    position: absolute; left: 178px; top: 826px;
+    font-size: 15px; line-height: 1.8; color: var(--c-muted);
+  }
+  .meta .mono { font-family: 'Inter', 'Noto Sans SC', monospace; font-size: 13.5px; }
+  .footer {
+    position: absolute; left: 178px; top: 1010px;
+    font-family: 'Inter', 'Noto Sans SC', sans-serif;
+    font-size: 12px; font-weight: 500; letter-spacing: 3px;
+    text-transform: uppercase; color: var(--c-muted); opacity: 0.7;
+  }
+</style>
+</head>
+<body>
+  <div class="cover">
+    <div class="layer1"><div class="grid"></div></div>
+    <div class="layer2"><div class="vline"></div></div>
+    <div class="layer3">
+      <div class="kicker">STRATEGY INTERFACE SPEC · V1</div>
+      <div class="hero1">趋势自动交易</div>
+      <div class="hero2">算法（策略）接口文档</div>
+      <div class="summary">把「怎么选标的、怎么定方向、何时开仓、何时离场」做成可插拔的策略插件——异动选币、资金风控、幂等与审计由 AutoPaperTrader 统一提供，新算法只需实现 TrendStrategy 接口并在注册表登记一行，UI 下拉即见。</div>
+      <div class="meta">
+        适用代码&nbsp;&nbsp;<span class="mono">src/lib/market/trend-trade/</span>（enhanced v15 时代）<br>
+        文档版本&nbsp;&nbsp;v1 · 2026-10-17 · hyyLab
+      </div>
+      <div class="footer">hyyLab · binance-radar · pure paper trading</div>
+    </div>
+  </div>
+</body>
+</html>
