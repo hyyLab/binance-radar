@@ -94,6 +94,8 @@ export interface TrendStrategy {
 
   /** 可选事件入口：直接接收 EnhancedEngine 活跃异动事件，不使用趋势池。 */
   evaluateAnomalyEntry?(event: EnhancedEventDTO, ctx: StrategyMarketCtx, priorCandles?: Candle1m[]): StrategyAnomalyEntryVerdict;
+  /** 可选事件观察钩子：持仓期间更新最新事件状态，用于及时识别突破从有效转为 FALSE。 */
+  observeAnomalyEvent?(event: EnhancedEventDTO): void;
 
   /** 离场评估（该 symbol 有 OPEN 持仓时调用；基础设施离场规则在此之前已处理） */
   evaluateExit(input: {
