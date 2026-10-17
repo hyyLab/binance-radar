@@ -450,9 +450,10 @@ export class AutoPaperTrader {
       // ③ 退出管理（暂停模式也执行：趋势结束/反向确认/策略离场照常执行）
       const signals = this.deps.getSignals();
       // 更新事件的实时突破状态，让持仓在异动从有效变为 FALSE 时不必等趋势池/UTE。
-      if (this.isEventDrivenStrategy() && this.deps.getEvents && this.strategy.observeAnomalyEvent) {
+      const observeAnomalyEvent = this.strategy.observeAnomalyEvent;
+      if (this.isEventDrivenStrategy() && this.deps.getEvents && observeAnomalyEvent) {
         const events = this.deps.getEvents(now);
-        for (const event of [...events.active, ...events.ended]) this.strategy.observeAnomalyEvent(event);
+        for (const event of [...events.active, ...events.ended]) observeAnomalyEvent.call(this.strategy, event);
       }
       const bySymbol = new Map(signals.map((s) => [s.symbol, s]));
       await this.manageExits(bySymbol);
