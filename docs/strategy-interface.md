@@ -1,8 +1,8 @@
 # 趋势自动交易 · 算法（策略）接口文档
 
-> **文档版本** v1（2026-10-17） · 适用代码：`src/lib/market/trend-trade/`（enhanced 引擎单例 v16 / paper v9 / paperAuto v2 时代）
+> **文档版本** v1（2026-10-18 修订） · 适用代码：`src/lib/market/trend-trade/`（enhanced 引擎单例 v20 时代）
 > **读者**：要往「趋势自动模拟交易」里加新算法的人（主要是我们自己）
-> **一句话**：新算法 = 实现一个 `TrendStrategy` 接口 + 在注册表登记一行 + bump 引擎单例 key，UI 下拉自动出现，资金/风控/幂等/审计全部不用管。
+> **一句话**：新算法 = 实现 `TrendStrategy` + 注册 + bump 引擎单例 key。普通趋势策略消费 `UnifiedTrendSignal`；事件驱动策略可实现可选的 `evaluateAnomalyEntry(event, ctx)`，直接消费 MAJOR P1 事件，仍复用模拟账户的资金、风控、幂等与审计层。
 > **⚡ 只要速成**：看 `docs/strategy-quickstart.md`（一页版：加算法 3 步 + 参数进控制台 3 条铁规则）。
 
 ---
@@ -21,7 +21,7 @@
 
 **三句话理解体系**：
 
-1. **选币不归算法管**。哪些币值得看，由异动候选池（TrendWatchService）决定；算法拿到的是池内品种的「统一趋势信号」。
+1. **普通趋势策略的选币不归算法管**。short-swing / universal-trend 使用 TrendWatchService 的候选池与统一趋势信号；事件驱动策略可实现 `evaluateAnomalyEntry`，直接接收 EnhancedEngine 的活动异动事件，不依赖趋势池。
 2. **资金与风控不归算法管**。保证金怎么算、最多几仓、重复开仓怎么防、强平怎么巡检、审计怎么落库，全部由 AutoPaperTrader（基础设施）统一提供。
 3. **算法只回答两个问题**：这个币**现在想不想开仓、往哪个方向**（`evaluateEntry`）；这笔持仓**现在要不要离场**（`evaluateExit`）。答案不同，策略就不同——这就是全部个性所在。
 
@@ -38,7 +38,7 @@
 TrendWatchService（异动候选池 + 1m/5m/15m 趋势状态机）
         │  统一趋势信号 UnifiedTrendSignal（唯一趋势来源，不重复计算）
         ▼
-AutoPaperTrader（基础设施，SCAN_MS = 10s 主循环）
+AutoPaperTrader（普通策略 10s；声明 `scanIntervalMs` 的策略可使用专用周期，如 MAJOR P1 算法 2s）
         │  ①强平巡检 ②MFE/MAE 采集 ③退出管理 ③b observe 喂价 ④权益峰值
         │  ⑤开仓管理（待入场复核 → 新信号扫描）
         ▼
