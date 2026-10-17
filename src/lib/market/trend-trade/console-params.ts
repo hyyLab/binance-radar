@@ -14,7 +14,8 @@
 // - 未在 DEFS 中的键一律拒绝（防止拼错键名造成「看起来生效了」的错觉）。
 
 import { TREND_TRADE } from './config';
-import { SHORT_SWING, type ShortSwingParams } from './strategy/short-swing';
+import { SHORT_SWING } from './strategy/short-swing';
+import { MAJOR_P1_BREAKOUT } from './strategy/major-p1-breakout';
 
 /** 解析 DB strategyParamsJson（{ [strategyId]: 覆盖项 }；损坏/格式不对返回空 map——参数回退代码默认） */
 export function parseStrategyParamsMap(
@@ -89,6 +90,120 @@ export const PARAM_DEFS: ParamDef[] = [
     desc: '模式 B 的 ER 要求（比模式 A 严）：震荡中选向，对「起步结构干净度」要求更高，防止把震荡噪声当成方向。',
     effect: '调低 → 更早入场但易接假突破；调高 → 模式 B 接近只在干净突破时才开',
   },
+  // ===== MAJOR P1 重大异动突破交易 =====
+  {
+    key: 'MP1_PLATFORM_LOOKBACK_BARS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构识别 · 平台突破',
+    label: '平台回看K线数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_LOOKBACK_BARS,
+    min: 12, max: 48, step: 1, unit: '根',
+    desc: '使用 MAJOR P1 出现前已收盘的 1m K 线判断是否存在窄幅平台。',
+    effect: '调大 → 平台判断看得更久、更稳定但响应慢；调小 → 更敏感，也更容易把短暂停顿当平台',
+  },
+  {
+    key: 'MP1_PLATFORM_MAX_RANGE_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构识别 · 平台突破',
+    label: '平台最大振幅', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_MAX_RANGE_PCT,
+    min: 2, max: 15, step: 0.5, unit: '%',
+    desc: '回看区间最高价到最低价的百分比振幅上限，低于该阈值才可能归类为平台。',
+    effect: '调大 → 更多高波动区间被归为平台；调小 → 只接受更紧凑的盘整结构',
+  },
+  {
+    key: 'MP1_PLATFORM_MAX_DRIFT_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构识别 · 平台突破',
+    label: '平台首尾净位移上限', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_MAX_DRIFT_PCT,
+    min: 1, max: 10, step: 0.5, unit: '%',
+    desc: '回看窗口首尾收盘价净位移上限，用来避免把已经明显单边运行的行情误判为平台。',
+    effect: '调大 → 更容易把趋势中继视为平台；调小 → 平台定义更严格',
+  },
+  {
+    key: 'MP1_PLATFORM_BREAKOUT_CLEARANCE_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构识别 · 平台突破',
+    label: '有效越界幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_BREAKOUT_CLEARANCE_PCT,
+    min: 0.1, max: 2, step: 0.05, unit: '%',
+    desc: '当前价格至少超出平台高/低边界该比例，才按有效平台突破方向入场。',
+    effect: '调大 → 少追入边界附近的噪声突破；调小 → 更早入场，但假突破可能增多',
+  },
+  {
+    key: 'MP1_MAX_CHASE_FROM_EVENT_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '入场风控 · 重大异动',
+    label: '加速型最大追入幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_MAX_CHASE_FROM_EVENT_PCT,
+    min: 1, max: 12, step: 0.5, unit: '%',
+    desc: '非平台型加速行情相对异动触发价的最大顺向延伸幅度，超过则不追。',
+    effect: '调大 → 接受更成熟的加速行情；调小 → 更少追入已走远的脉冲',
+  },
+  {
+    key: 'MP1_HARD_STOP_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '逆向硬止损', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_HARD_STOP_PCT,
+    min: 0.5, max: 5, step: 0.1, unit: '% 价格',
+    desc: '以入场价为基准的紧急硬止损；平台结构止损可以更早触发，但任何持仓都受此硬限制。',
+    effect: '调大 → 容忍更大逆向波动、单笔亏损可能更深；调小 → 更早截断亏损，也更容易被噪声打掉',
+  },
+  {
+    key: 'MP1_FALSE_BREAK_RETURN_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '平台失效回落幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_FALSE_BREAK_RETURN_PCT,
+    min: 0.3, max: 3, step: 0.1, unit: '%',
+    desc: '入场后价格重新越过平台边界并深入平台达到该比例，才确认本次平台突破失效。',
+    effect: '调大 → 更能容忍回踩，但假突破退出更慢；调小 → 更快退出失败突破，也可能退出正常回踩',
+  },
+  {
+    key: 'MP1_FALSE_BREAK_REVERSAL_CONFIRM_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '假突破反向确认幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_FALSE_BREAK_REVERSAL_CONFIRM_PCT,
+    min: 0.5, max: 4, step: 0.1, unit: '%',
+    desc: '平台突破失效后，价格进一步沿反方向运动到达该幅度，才允许反向开仓。',
+    effect: '调大 → 反向交易更谨慎；调小 → 更快反手，但容易把普通回踩当反转',
+  },
+  {
+    key: 'MP1_BREAKEVEN_ARM_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '保本保护启动', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_BREAKEVEN_ARM_PCT,
+    min: 0.5, max: 5, step: 0.1, unit: '% 价格',
+    desc: '持仓期间顺向价格峰值达到该幅度后，若价格回落至保本保护线则退出；正常小回撤不会单独触发。',
+    effect: '调大 → 更晚保护已取得浮盈；调小 → 更早进入保护阶段',
+  },
+  {
+    key: 'MP1_BREAKEVEN_OFFSET_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '保本退出线', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_BREAKEVEN_OFFSET_PCT,
+    min: 0, max: 1, step: 0.05, unit: '% 价格',
+    desc: '保本保护启动后，回落到入场价顺向偏移该比例时退出。该值是价格目标，不保证覆盖所有实际成本。',
+    effect: '调大 → 留给回撤的空间更多、已实现利润更少；调小 → 更快保护利润',
+  },
+  {
+    key: 'MP1_TRAIL_START_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '移动止盈启动', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_TRAIL_START_PCT,
+    min: 0.8, max: 8, step: 0.1, unit: '% 价格',
+    desc: '有利价格峰值达到该比例后启动移动止盈，避免固定止盈过早限制平台突破延伸。',
+    effect: '调大 → 给大行情更多空间但利润回吐可能更多；调小 → 更早开始锁定利润',
+  },
+  {
+    key: 'MP1_TRAIL_DISTANCE_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '移动止盈回撤距离', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_TRAIL_DISTANCE_PCT,
+    min: 0.5, max: 4, step: 0.1, unit: '% 价格',
+    desc: '从持仓以来的有利价格峰值回撤达到该幅度时，触发移动止盈。',
+    effect: '调大 → 容忍更大回撤、退出更晚；调小 → 更紧地锁定浮盈',
+  },
+  {
+    key: 'MP1_TAKE_PROFIT_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '离场风控 · 止盈止损',
+    label: '固定止盈目标', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_TAKE_PROFIT_PCT,
+    min: 1, max: 15, step: 0.5, unit: '% 价格',
+    desc: '顺向价格变动达到该比例时直接止盈；移动止盈可能在达到该目标之前先退出。',
+    effect: '调大 → 持有更长以争取大行情；调小 → 更早兑现利润',
+  },
+  {
+    key: 'MP1_REENTRY_EXTENSION_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '再次入场 · 独立新机会',
+    label: '再次入场顺向延伸', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_REENTRY_EXTENSION_PCT,
+    min: 0.3, max: 5, step: 0.1, unit: '% 价格',
+    desc: '同一 P1 事件上次交易退出后，价格必须从上次入场价继续沿交易方向延伸达到该比例，才允许同向再次开仓。',
+    effect: '调大 → 更少重复交易、仅参与更强的新延伸；调小 → 更积极重复参与，也更容易磨损',
+  },
+  {
+    key: 'MP1_ACCELERATION_MARGIN_SCALE', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '仓位预算 · 风险缩放',
+    label: '加速型保证金系数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_ACCELERATION_MARGIN_SCALE,
+    min: 0.1, max: 1, step: 0.05,
+    desc: '非平台型加速入场使用的保证金预算系数。0.5 表示在共享资金规则计算的基础上使用一半保证金。',
+    effect: '调大 → 加速型持仓更大；调小 → 降低追入加速末端时的风险暴露',
+  },
+  {
+    key: 'MP1_FALSE_BREAK_MARGIN_SCALE', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '仓位预算 · 风险缩放',
+    label: '假突破反向保证金系数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_FALSE_BREAK_MARGIN_SCALE,
+    min: 0.1, max: 1, step: 0.05,
+    desc: '确认假突破并反向入场时使用的保证金预算系数。',
+    effect: '调大 → 反向仓位更大；调小 → 更谨慎地参与反向确认',
+  },
+
   // ===== C · 入场时机（滞后调节） =====
   {
     key: 'waitBarConfirm', scope: 'infra', group: '入场时机（滞后调节）',
@@ -184,7 +299,7 @@ export interface RuntimeParamValue {
   effect?: string;
 }
 
-/** 代码默认值（strategy 域 = SHORT_SWING；infra 域 = TREND_TRADE 常量） */
+/** 代码默认值（strategy 域由各算法常量给出；infra 域 = TREND_TRADE 常量） */
 function codeDefault(d: ParamDef): number | boolean {
   return d.default;
 }
@@ -265,8 +380,8 @@ export function sanitizeRuntimeParamsLenient(
  * 绝不静默丢弃——用户调参是明确意图，错配必须可见。
  */
 export interface SanitizedRuntimeParams {
-  /** 策略域覆盖项（干净、仅含合法键——存什么用什么） */
-  strategyParams: ShortSwingParams;
+  /** 当前算法的策略域覆盖项；具体键由 strategyId 白名单决定。 */
+  strategyParams: Record<string, unknown>;
   waitBarConfirm?: number;
   cooldownMs?: number;
   /** 每仓保证金比例（Task 58；TrendAutoConfig.marginRatio 列，NOT NULL DEFAULT 0.2） */
