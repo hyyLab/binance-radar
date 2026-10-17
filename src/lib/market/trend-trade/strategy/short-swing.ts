@@ -26,7 +26,7 @@
 // ⑧ 顺势而为，不做回调低吸（用户定版 2026-10-17 复盘）：“短周期套利思路的原理应该是
 //    顺势而为……应该在某一个方向走强的时候去顺势，而不是在这个方向走强之后的回调去
 //    做低吸。如果大趋势没有继续运行反而走了一个短期的小趋势就会止损，这很显然有问题。”
-//    → 四处落地：
+//    → 四处落地（a/c 两项后被 Task 68 ⑨ 部分放开，见下）：
 //    a) MAX_ROUNDS_PER_CYCLE 2→1：同周期只做方向刚走强的第一波；走弱离场后该周期不再
 //       进。旧版 R2 再入场本质 = 「走强之后的回调后入场」（回调结束反弹重新确认时进），
 //       大趋势没继续反而走短期小趋势时必然止损——正是用户指出的行为；Task 65 统计
@@ -38,8 +38,16 @@
 //       的第一时间顺势单，不做确认已走老之后的违和追入（容量等待恢复等场景）。
 //    d) SPIKE_MOVE_PCT 0.6→0.4：复盘 7 笔浮盈卡在 0.3~0.6% 价格区间（合计 -14.82U）
 //       够不到旧落袋线被走弱离场割掉；0.4% = 20x 下 8% 保证金收益，够得着。
-//    保留不变：冲高套利 SPIKE_TAKE（利润来源，+68.52U/31 笔）、走弱先走（其止损语义
-//    在「只做第一波」后 = 本周期终点，不再是回调后再进的中转站）。
+// ⑨ 再入场解禁（用户定版 2026-10-18）："我并没有强制说只做刚走强的第一顺势单，只是
+//    这样的单子具有更高的胜率而已。"
+//    → MAX_ROUNDS_PER_CYCLE 1→2（放开 ⑧-a）：第一顺势单按时间顺序天然先做（胜率偏好
+//      的自然体现，无需硬禁后续单）；R2 的触发事件本身就是「重新走强」（走弱离场后回
+//      CONFIRMED + 出现新收盘 K 线），不是回调低吸的代名词；追入保护（⑧-b）全轮次生效。
+//    → ENTRY_FRESH_MS 仅约束首轮 R1（放开 ⑧-c 的全轮次约束）：首轮偏好「刚走强」的高
+//      胜率单（确认已走老的追入拒绝）；R2 的新鲜度由「重新走强」事件自身定义（新收盘
+//      K 线），不受周期年龄约束——否则确认超 3 分钟后 R2 永远进不去，再入场形同虚设。
+//    保留不变：冲高套利 SPIKE_TAKE（利润来源，+68.52U/31 笔）、走弱先走、SPIKE 落袋线
+//    0.4%、追入保护 1.2%。
 //
 // 红线：纯模拟；阈值为初始工程参数、未经历史回放校准，不构成盈利能力声明；
 // 强平/ENDED 周期匹配/反向确认/二次确认/冷却等基础设施规则不受本策略影响。
@@ -69,17 +77,20 @@ export const SHORT_SWING = {
   NEUTRAL_MIN_ER: 0.45,
   /** 是否允许 1m 方向与 5m 背景相反的逆势单（用户思路：短周期套利不做逆势 → false） */
   ALLOW_HTF_OPPOSED: false,
-  /** 同一趋势周期最大开仓轮次（用户定版 2026-10-17 复盘：1 = 只做方向刚走强的第一波；
-   *  R2 再入场 = 「走强之后的回调后入场」，大趋势不继续时必然止损，默认关闭） */
-  MAX_ROUNDS_PER_CYCLE: 1,
+  /** 同一趋势周期最大开仓轮次（用户定版 2026-10-18：2 = 第一顺势单按时间顺序天然先做
+   *  （胜率更高），走弱离场后「重新走强」（回确认 + 新收盘 K 线）允许 #R2 再入场——
+   *  不强制只做第一波；追入保护对全部轮次生效。调 1 = 只做第一波（Task 66 曾用）） */
+  MAX_ROUNDS_PER_CYCLE: 2,
   /** 同周期再入场最小间隔（上次平仓 → 下次评估开仓，防同一根 K 线内反复进出；
    *  仅 MAX_ROUNDS_PER_CYCLE ≥ 2 时有意义） */
   REENTRY_MIN_GAP_MS: 60_000,
   /** 入场追入保护（%）：确认瞬间短窗（SPIKE_WINDOW_MS）内价格已顺该方向运动 ≥ 该值 →
    *  拒绝入场——方向确实走强但已到脉冲末端，追入即接脉冲顶。0 = 关闭 */
   ENTRY_CHASE_PCT: 1.2,
-  /** 确认新鲜窗（ms）：仅允许周期确认时刻距 now ≤ 该值的入场——只做「方向刚走强」的
-   *  第一时间顺势单，不做确认已走老之后的追入（容量等待恢复等场景的追高防护）。0 = 关闭 */
+  /** 确认新鲜窗（ms，Task 68 定版：仅约束首轮 R1）：首轮只做「周期确认时刻距 now
+   *  ≤ 该值」的方向刚走强顺势单（首轮偏好高胜率的「刚走强」单，确认已走老不追）；
+   *  R2 再入场的新鲜度由「重新走强」事件自身定义（回确认 + 新收盘 K 线），不受周期
+   *  年龄约束——否则确认超 3 分钟后 R2 永远进不去。0 = 关闭 */
   ENTRY_FRESH_MS: 180_000,
   /** 冲高检测窗口（ms）：该窗口内标记价顺向运动幅度作为「正在冲高/下杀」判据 */
   SPIKE_WINDOW_MS: 90_000,
@@ -125,8 +136,8 @@ export class ShortSwingStrategy implements TrendStrategy {
   readonly id = 'short-swing-v1';
   readonly name = '短周期套利';
   readonly description =
-    '异动选币不问方向；1m 确认即定多空，只做方向刚走强的第一时间顺势单（5m 同向=波段 / 5m 震荡=选向稍严；5m 反向不做）；' +
-    '脉冲末端不追、确认走老不追；冲高/下杀及时落袋；走弱先走、同周期只做第一波不再进';
+    '异动选币不问方向；1m 确认即定多空，顺势入场（5m 同向=波段 / 5m 震荡=选向稍严；5m 反向不做）；' +
+    '首轮只做方向刚走强的新鲜单、脉冲末端不追；冲高/下杀及时落袋；走弱先走、同周期走强可再入场（≤2 轮）';
 
   /** 可调参数（构造器覆盖；生产默认值） */
   readonly params: typeof SHORT_SWING;
@@ -196,21 +207,7 @@ export class ShortSwingStrategy implements TrendStrategy {
     }
     const side: 'LONG' | 'SHORT' = signal.phase === 'CONFIRMED_UP' ? 'LONG' : 'SHORT';
 
-    // ⑧-c 确认新鲜窗：只做「方向刚走强」的第一时间顺势单（确认已走老再进 = 追已走完
-    //      一段的行情，正是复盘指出的追涨/追空；trendStartedAt 缺失时防御性放行不挡单）
-    if (
-      this.params.ENTRY_FRESH_MS > 0 &&
-      signal.trendStartedAt != null &&
-      ctx.now - signal.trendStartedAt > this.params.ENTRY_FRESH_MS
-    ) {
-      const ageMin = ((ctx.now - signal.trendStartedAt) / 60_000).toFixed(1);
-      return {
-        want: false, side: null, modeTag: 'STALE_CONFIRM',
-        reason: `确认已走老（${ageMin} 分钟前确认，超出新鲜窗 ${Math.round(this.params.ENTRY_FRESH_MS / 60_000)} 分钟），只做方向刚走强的第一时间顺势单`,
-      };
-    }
-
-    // ⑤ 轮次约束：同周期走强再入场有上限（新周期自动从 1 开始）
+    // ⑤ 轮次约束：同周期走强再入场有上限（新周期自动从 1 开始；防同周期反复磨损）
     const st = this.states.get(sym);
     const sameCycle = st != null && st.cycleId === signal.trendCycleId;
     const nextRound = this.nextRound(sym, signal.trendCycleId ?? '');
@@ -226,6 +223,24 @@ export class ShortSwingStrategy implements TrendStrategy {
     // 同周期再入场要求出现「上次开仓之后的新已收盘 K 线」（走强的证据，不是旧信号的回声）
     if (sameCycle && st?.lastEntryBar != null && signal.lastBarTime != null && signal.lastBarTime <= st.lastEntryBar) {
       return { want: false, side: null, modeTag: '-', reason: '同周期再入场等待新收盘 K 线（无新证据）' };
+    }
+
+    // ⑨-c 确认新鲜窗（Task 68：仅约束首轮 R1）：首轮只做「方向刚走强」的第一时间顺势单
+    //      （首轮偏好高胜率单，确认已走老再进 = 追已走完一段的行情，正是复盘指出的追涨/
+    //      追空；trendStartedAt 缺失时防御性放行不挡单）。R2 再入场不受本窗约束——它的
+    //      触发事件本身就是「重新走强」（回确认 + 新收盘 K 线，见 ⑤ 的新 K 线门槛），
+    //      新鲜度由自身事件定义，不受周期年龄约束
+    if (
+      nextRound === 1 &&
+      this.params.ENTRY_FRESH_MS > 0 &&
+      signal.trendStartedAt != null &&
+      ctx.now - signal.trendStartedAt > this.params.ENTRY_FRESH_MS
+    ) {
+      const ageMin = ((ctx.now - signal.trendStartedAt) / 60_000).toFixed(1);
+      return {
+        want: false, side: null, modeTag: 'STALE_CONFIRM',
+        reason: `确认已走老（${ageMin} 分钟前确认，超出新鲜窗 ${Math.round(this.params.ENTRY_FRESH_MS / 60_000)} 分钟），首轮只做方向刚走强的第一时间顺势单`,
+      };
     }
 
     // ②③ 5m 背景方向分级（15m 仅快照留档，不设门槛——主要做短周期）

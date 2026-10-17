@@ -431,8 +431,8 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
       engine,
       // 默认策略思路（走弱先走）；REENTRY_MIN_GAP_MS=0：真实时钟不可快进，60s 间隔已由
       // 策略单元测试 S7b 覆盖，这里聚焦轮次化决策键与再入场全链路。
-      // Task 66：MAX_ROUNDS_PER_CYCLE 默认改 1（只做第一波）——本用例测 R2 机制需显式开 2 轮
-      new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0, MAX_ROUNDS_PER_CYCLE: 2 }),
+      // Task 68：MAX_ROUNDS_PER_CYCLE 默认 2（不强制只做第一波）——R2 全链路按默认参数验证
+      new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0 }),
     ); // 默认策略：走弱先走
     await trader.ensureStarted();
     await openViaPending(signals, trader);
@@ -475,11 +475,15 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
     expect(m2?.entryRound).toBe(2); // 第二轮
   });
 
-  test('T4c 默认轮次=1（Task 66 顺势化）：同周期走弱离场后不再进（有新 K 线也不建待入场）', async () => {
+  test('T4c 轮次用尽（注入 MAX_ROUNDS_PER_CYCLE=1）：同周期走弱离场后不再进（有新 K 线也不建待入场）', async () => {
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
     const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:843' })];
-    const trader = makeTrader(signals, engine, new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0 }));
+    const trader = makeTrader(
+      signals,
+      engine,
+      new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0, MAX_ROUNDS_PER_CYCLE: 1 }), // 注入 1 轮验证用尽路径
+    );
     await trader.ensureStarted();
     await openViaPending(signals, trader);
     expect((await openPositions()).length).toBe(1);
@@ -495,7 +499,7 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
     };
     await trader.tick();
     expect((await openPositions()).length).toBe(0);
-    // 走强回确认 + 新 K 线 + 冷却已过——但默认 MAX_ROUNDS_PER_CYCLE=1 → 不再进（R2 被顺势定版关闭）
+    // 走强回确认 + 新 K 线 + 冷却已过——但轮次已用尽（注入 MAX_ROUNDS_PER_CYCLE=1）→ 不再进
     await backdateLastClose('BTCUSDT', 6);
     signals[0] = {
       ...keepSig(signals[0]!),

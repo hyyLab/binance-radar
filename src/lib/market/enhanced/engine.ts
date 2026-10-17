@@ -496,6 +496,13 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v20（Task 68）：两算法二轮定版——①通用趋势引擎长周期化（用户「持仓时间太短，它是长周期
+//   模型」）：WEAKNESS_EXIT_EARLY 默认 false（走弱迹象不离场，持有到 ENDED/反向）、硬止损
+//   1.0→1.5%（住进生命周期容忍带 0.875% 之外）、移动止盈 15/8→30/20（1.5% 价格启动保护 /
+//   1.0% 回吐落袋，净锁利 ≥10% 保证金）；②短周期套利再入场解禁（用户「没强制只做第一
+//   顺势单，只是它胜率更高」）：MAX_ROUNDS_PER_CYCLE 1→2、确认新鲜窗仅约束首轮 R1（R2 的
+//   新鲜度由「重新走强」事件自身定义）。strategyParamsJson 当前为空（代码默认即生效值）。
+//   改行为必 bump key。
 // v19（Task 67）：仓位划分按配置舱位数——用户复盘「选两舱但 1 仓占 95 成保证金」判定
 //   Task 65 动态槽位（95%÷(当前持仓数+1)，首仓永远吃满、后舱无仓可开）不对。
 //   effectiveMarginRatio(cap, maxPositions) = min(cap, 95%÷配置舱位数)：1 舱单仓满配 95%、
@@ -589,6 +596,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v17?: EnhancedEngine; // v17（Task 65）：每仓保证金动态槽位配额（单仓满配）
   __binanceRadarEnhanced_v18?: EnhancedEngine; // v18（Task 66）：两算法复盘定版（顺势化 + 方向选择确认制 + 三层离场）
   __binanceRadarEnhanced_v19?: EnhancedEngine; // v19（Task 67）：仓位划分按配置舱位数（1 舱满配 95%、N 舱各 95%/N）
+  __binanceRadarEnhanced_v20?: EnhancedEngine; // v20（Task 68）：UTE 长周期化 + short-swing 再入场解禁
 };
 
 function pickLegacyEngine(
@@ -611,9 +619,13 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v16?: EnhancedEngine;
     __binanceRadarEnhanced_v17?: EnhancedEngine;
     __binanceRadarEnhanced_v18?: EnhancedEngine;
+    __binanceRadarEnhanced_v19?: EnhancedEngine;
+    __binanceRadarEnhanced_v20?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v20 ??
+    g.__binanceRadarEnhanced_v19 ??
     g.__binanceRadarEnhanced_v18 ??
     g.__binanceRadarEnhanced_v17 ??
     g.__binanceRadarEnhanced_v16 ??
@@ -662,20 +674,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v19;
+  const existing = g.__binanceRadarEnhanced_v20;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v19 = fresh;
+  g.__binanceRadarEnhanced_v20 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v19 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v20 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v19 = fresh;
+  g.__binanceRadarEnhanced_v20 = fresh;
   return fresh;
 }

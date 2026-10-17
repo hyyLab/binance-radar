@@ -6,10 +6,11 @@
 // S4 相位未确认 → 方向不确定不开
 // S5 冲高套利：浮盈 + 短窗顺向快速运动 → SPIKE_TAKE；浮盈为负/幅度不足/持仓过短不触发
 // S6 走弱先走：END_PENDING 同周期 exit（WEAKNESS_EARLY）；异周期不误平；参数可关
-// S7 轮次：同周期再入场需新收盘 K 线 + 上限（默认 1 = 只做第一波，Task 66 顺势化）+ 新周期重置
+// S7 轮次：同周期再入场需新收盘 K 线 + 上限（注入 2 验证机制）+ 新周期重置（Task 68 默认 2）
 // S8 状态导出/导入（重启恢复轮次语义）
 // S10 入场追入保护（Task 66）：确认瞬间短窗已顺向冲高过多 → 拒绝（脉冲末端不追）
-// S11 确认新鲜窗（Task 66）：确认已走老 → 拒绝（只做方向刚走强的第一时间顺势单）
+// S11 确认新鲜窗（Task 68 仅约束首轮 R1）：确认已走老的首轮 → 拒绝
+// S12 新鲜窗仅约束首轮（Task 68）：同周期 R2 再入场不受确认年龄限制
 
 import { describe, expect, test } from 'bun:test';
 import { ShortSwingStrategy, SHORT_SWING } from '@/lib/market/trend-trade/strategy/short-swing';
@@ -320,8 +321,8 @@ describe('ShortSwingStrategy（短周期套利 v1）', () => {
     expect(s2.nextRound('OK', 'X:L:1')).toBe(2);
   });
 
-  test('S7c 默认轮次=1（Task 66 顺势化）：同周期走弱离场后不再进（有新 K 线也不进）', () => {
-    const s = new ShortSwingStrategy(); // 默认 MAX_ROUNDS_PER_CYCLE=1
+  test('S7c 默认轮次=2（Task 68 再入场解禁）：走弱离场后走强回确认 + 新 K 线 → #R2 再入场', () => {
+    const s = new ShortSwingStrategy(); // 默认 MAX_ROUNDS_PER_CYCLE=2
     const cyc = 'BTCUSDT:L:100';
     const v1 = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', cycleId: cyc }), ctx());
     expect(v1.want).toBe(true);
@@ -331,8 +332,8 @@ describe('ShortSwingStrategy（短周期套利 v1）', () => {
       sig({ phase: 'CONFIRMED_UP', cycleId: cyc, lastBarTime: 5000 }), // 有新收盘 K 线
       ctx(),
     );
-    expect(v2.want).toBe(false);
-    expect(v2.reason).toContain('轮次已用尽');
+    expect(v2.want).toBe(true); // 用户 2026-10-18：不强制只做第一顺势单（第一单胜率更高，按时间顺序天然先做）
+    expect(v2.reason).toContain('#R2');
   });
 
   test('S10 入场追入保护（Task 66）：确认瞬间短窗已顺向冲高 ≥1.2% → 拒绝（脉冲末端不追）', () => {
@@ -372,7 +373,7 @@ describe('ShortSwingStrategy（短周期套利 v1）', () => {
     expect(v.modeTag).toBe('TREND_ALIGNED');
   });
 
-  test('S11 确认新鲜窗（Task 66）：确认已走老 → 拒绝（只做方向刚走强的第一时间顺势单）', () => {
+  test('S11 确认新鲜窗（Task 68 仅约束首轮 R1）：首轮确认已走老 → 拒绝', () => {
     const s = new ShortSwingStrategy();
     // 确认发生在 6 分钟前 > ENTRY_FRESH_MS(180s)
     const v = s.evaluateEntry(
@@ -386,13 +387,31 @@ describe('ShortSwingStrategy（短周期套利 v1）', () => {
     expect(vFresh.want).toBe(true);
   });
 
-  test('S9 默认参数未校准声明：关键阈值与文档一致（Task 66 顺势化后）', () => {
+  test('S12 新鲜窗仅约束首轮（Task 68）：同周期 R2 再入场不受确认年龄限制', () => {
+    const s = new ShortSwingStrategy();
+    const cyc = 'BTCUSDT:L:100';
+    // 首轮开仓后走弱离场（时间回拨避开再入场间隔检查）
+    s.onOpen('BTCUSDT', cyc, 1000, Date.now());
+    s.onClose('BTCUSDT', cyc, 'WEAKNESS_EARLY', Date.now() - 120_000);
+    // 确认发生在 6 分钟前（> ENTRY_FRESH_MS 180s）——若新鲜窗约束 R2 将被 STALE_CONFIRM 拒绝
+    const v = s.evaluateEntry(
+      sig({
+        phase: 'CONFIRMED_UP', cycleId: cyc, lastBarTime: 5000, // 新收盘 K 线（重新走强证据）
+        startedAtMs: Date.now() - 360_000,
+      }),
+      ctx(),
+    );
+    expect(v.want).toBe(true); // R2 的新鲜度由「重新走强」事件自身定义，不受周期年龄约束
+    expect(v.reason).toContain('#R2');
+  });
+
+  test('S9 默认参数未校准声明：关键阈值与文档一致（Task 68 后）', () => {
     expect(SHORT_SWING.ENTRY_MIN_SCORE).toBe(45);
     expect(SHORT_SWING.NEUTRAL_MIN_SCORE).toBe(55);
-    expect(SHORT_SWING.MAX_ROUNDS_PER_CYCLE).toBe(1); // Task 66：只做第一波
+    expect(SHORT_SWING.MAX_ROUNDS_PER_CYCLE).toBe(2); // Task 68：不强制只做第一波（走弱后走强可 R2）
     expect(SHORT_SWING.SPIKE_MOVE_PCT).toBe(0.4); // Task 66：够得着的落袋线
     expect(SHORT_SWING.ENTRY_CHASE_PCT).toBe(1.2); // Task 66：脉冲末端不追
-    expect(SHORT_SWING.ENTRY_FRESH_MS).toBe(180_000); // Task 66：确认新鲜窗
+    expect(SHORT_SWING.ENTRY_FRESH_MS).toBe(180_000); // Task 68：确认新鲜窗仅约束首轮（R1）
     expect(SHORT_SWING.WEAKNESS_EXIT_EARLY).toBe(true);
   });
 });

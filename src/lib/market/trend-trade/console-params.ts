@@ -107,8 +107,8 @@ export const PARAM_DEFS: ParamDef[] = [
     key: 'ENTRY_FRESH_MS', scope: 'strategy', strategyId: 'short-swing-v1', group: '入场时机（滞后调节）',
     label: '确认新鲜窗', type: 'number', default: SHORT_SWING.ENTRY_FRESH_MS,
     min: 0, max: 600_000, step: 30_000, unit: 'ms',
-    desc: '只做「周期确认时刻距现在 ≤ 该时长」的入场——确认刚发生的第一时间顺势单。确认已走老（如容量等待后信号重新被评估到）不再追入，防追已走完一段的行情。0 = 关闭。',
-    effect: '调大 → 更晚的确认也接受（追高风险）；调小 → 只吃确认后最新鲜的一小段；0 = 不设防',
+    desc: '仅约束首轮（#R1）：首轮只做「周期确认时刻距现在 ≤ 该时长」的方向刚走强顺势单（首轮偏好高胜率单），确认已走老（如容量等待后信号重新被评估到）不再追入。再入场（#R2）的新鲜度由「重新走强」事件自身定义（回确认 + 新收盘 K 线），不受本窗约束。0 = 关闭。',
+    effect: '调大 → 更晚的首轮确认也接受（追高风险）；调小 → 只吃确认后最新鲜的一小段；0 = 不设防',
   },
   {
     key: 'REENTRY_MIN_GAP_MS', scope: 'strategy', strategyId: 'short-swing-v1', group: '入场时机（滞后调节）',
@@ -122,8 +122,8 @@ export const PARAM_DEFS: ParamDef[] = [
     key: 'MAX_ROUNDS_PER_CYCLE', scope: 'strategy', strategyId: 'short-swing-v1', group: '再入场与轮次',
     label: '同周期最大开仓轮次', type: 'number', default: SHORT_SWING.MAX_ROUNDS_PER_CYCLE,
     min: 1, max: 6, step: 1, unit: '轮',
-    desc: '同一趋势周期最多开仓几次（轮次键 #R1/#R2…）。Task 66 复盘定版默认 1：只做方向刚走强的第一波——R2 再入场本质是「走强之后的回调后入场」，大趋势不继续时必然止损（历史统计 R2 合计 -5.6U 无优势）。',
-    effect: '调大 → 回调后的再入场机会更多（磨损风险）；1（默认）→ 每个周期只做第一笔，走弱离场后该周期不再进',
+    desc: '同一趋势周期最多开仓几次（轮次键 #R1/#R2…）。默认 2（Task 68 用户定版：不强制只做第一波）：第一顺势单按时间顺序天然先做（胜率更高），走弱离场后「重新走强」（回确认 + 新收盘 K 线）允许 #R2 再入场，追入保护对全部轮次生效。',
+    effect: '调大 → 同周期再入场机会更多（磨损风险）；2（默认）→ 第一波 + 一次走强后再入；1 → 只做第一波，走弱离场后该周期不再进',
   },
   {
     key: 'WEAKNESS_EXIT_EARLY', scope: 'strategy', strategyId: 'short-swing-v1', group: '再入场与轮次',

@@ -5,11 +5,12 @@
 // U3 5m 背景反向照样入场（UTE 单一标的自足、不做背景过滤——与 short-swing 本质区别）
 // U4 评分下限可调（构造器覆盖生效；调高后挡弱证据）+ 默认参数快照防漂移
 // U5 轮次：同周期上限 2 / 再入场需新收盘 K 线 + 最小间隔 / 新周期重置
-// U6 走弱先走（Task 66 证据达标版）：END_PENDING 证据 ≥2 根才走；1 根 = 单根噪声不割；异周期不误平
+// U6 走弱先走（机制保留，注入 WEAKNESS_EXIT_EARLY=true 验证）：END_PENDING 证据 ≥2 根才走；1 根不割；异周期不误平
 // U7 无冲高落袋：浮盈未回撤不触发策略性离场（SPIKE_TAKE 是 short-swing 专属）
 // UE1 方向选择确认制（Task 66）：突破同向 / ER 单边延续放行；两者皆无 = 震荡内噪声确认拒绝
-// UE2 硬止损（Task 66）：价格逆行 ≥1.0% → STOP_LOSS；未达线不触发
-// UE3 移动止盈（Task 66）：峰值浮盈 ≥15% 激活后回撤 ≥8% → TRAIL_TAKE；未达线不触发
+// UE2 硬止损（Task 68 长周期定版 1.5%）：价格逆行 ≥1.5% → STOP_LOSS；未达线不触发
+// UE3 移动止盈（Task 68 长周期定版 30/20）：峰值浮盈 ≥30% 激活后回撤 ≥20% → TRAIL_TAKE；未达线不触发
+// UE4 长周期默认（Task 68）：WEAKNESS_EXIT_EARLY 默认 false——走弱不离场，持有到 ENDED/反向（U6b）
 // U8 状态导出/导入（重启恢复轮次语义）
 // CP1-4 console-params 按策略过滤（Task 62 机制：跨策略键拒绝/丢弃，infra 全局共享）
 
@@ -166,11 +167,11 @@ describe('通用趋势引擎 v1（universal-trend-v1）· 入场', () => {
     expect(UNIVERSAL_TREND.REQUIRE_DIRECTION_PICK).toBe(true); // 方向选择确认制
     expect(UNIVERSAL_TREND.ENTRY_MIN_ER).toBe(0.3);
     expect(UNIVERSAL_TREND.MAX_ROUNDS_PER_CYCLE).toBe(2);
-    expect(UNIVERSAL_TREND.STOP_LOSS_PCT).toBe(1.0);
-    expect(UNIVERSAL_TREND.TRAIL_ARM_PCT).toBe(15);
-    expect(UNIVERSAL_TREND.TRAIL_GIVEBACK_PCT).toBe(8);
-    expect(UNIVERSAL_TREND.WEAKNESS_MIN_EVIDENCE_BARS).toBe(2);
-    expect(UNIVERSAL_TREND.WEAKNESS_EXIT_EARLY).toBe(true);
+    expect(UNIVERSAL_TREND.STOP_LOSS_PCT).toBe(1.5); // Task 68：止损住在生命周期容忍带（0.875%）之外
+    expect(UNIVERSAL_TREND.TRAIL_ARM_PCT).toBe(30); // Task 68：1.5% 价格兑现过大段才启动保护
+    expect(UNIVERSAL_TREND.TRAIL_GIVEBACK_PCT).toBe(20); // Task 68：1% 价格回吐落袋 > 容忍带
+    expect(UNIVERSAL_TREND.WEAKNESS_MIN_EVIDENCE_BARS).toBe(2); // 保留（开关重开时生效）
+    expect(UNIVERSAL_TREND.WEAKNESS_EXIT_EARLY).toBe(false); // Task 68 长周期：走弱不离场
   });
 });
 
@@ -235,14 +236,14 @@ describe('通用趋势引擎 v1 · 轮次与再入场', () => {
 });
 
 describe('通用趋势引擎 v1 · 离场', () => {
-  test('U6 走弱先走（证据达标版）：END_PENDING 证据 ≥2 根才走；1 根噪声不割；异周期不误平', () => {
-    const s = new UniversalTrendStrategy();
+  test('U6 走弱先走（机制保留，注入开启）：END_PENDING 证据 ≥2 根才走；1 根噪声不割；异周期不误平', () => {
+    const s = new UniversalTrendStrategy({ WEAKNESS_EXIT_EARLY: true }); // Task 68 默认 false（长周期），注入开启验证机制
     const cycle = 'BTCUSDT:L:100';
     // 1 根证据（单根噪声/普通回调）→ 不走（Task 66：修复「稍微回调一点就止损」）
     const v1 = s.evaluateExit({
       meta: meta('BTCUSDT', cycle),
       pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG', openedAt: Date.now() - 120_000 },
-      mark: 99.5, // 逆行 0.5% < 止损线 1.0%：隔离走弱维度（止损有 UE2 专测）
+      mark: 99.5, // 逆行 0.5% < 止损线 1.5%：隔离走弱维度（止损有 UE2 专测）
       signal: sig({ phase: 'END_PENDING', cycleId: cycle, endEvidenceBars: 1 }),
       now: Date.now(),
     });
@@ -268,8 +269,8 @@ describe('通用趋势引擎 v1 · 离场', () => {
     expect(other.exit).toBe(false); // 异周期走弱与本持仓无关
   });
 
-  test('U6b WEAKNESS_EXIT_EARLY=false：纯持有版，END_PENDING 不离场（等基础设施 ENDED）', () => {
-    const s = new UniversalTrendStrategy({ WEAKNESS_EXIT_EARLY: false });
+  test('U6b 长周期默认（Task 68）：WEAKNESS_EXIT_EARLY=false——END_PENDING 不离场（持有到基础设施 ENDED/反向）', () => {
+    const s = new UniversalTrendStrategy(); // 默认即长周期版
     const cycle = 'BTCUSDT:L:100';
     const v = s.evaluateExit({
       meta: meta('BTCUSDT', cycle),
@@ -324,7 +325,7 @@ describe('通用趋势引擎 v1 · Task 66 复盘定版（方向选择确认制 
     expect(legacy.want).toBe(true);
   });
 
-  test('UE2 硬止损：价格逆行 ≥1.0%（价格口径）→ STOP_LOSS；未达线不触发', () => {
+  test('UE2 硬止损：价格逆行 ≥1.5%（Task 68 长周期定版，价格口径）→ STOP_LOSS；未达线不触发', () => {
     const s = new UniversalTrendStrategy();
     const cycle = 'BTCUSDT:L:100';
     const base = {
@@ -332,45 +333,45 @@ describe('通用趋势引擎 v1 · Task 66 复盘定版（方向选择确认制 
       pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG' as const, openedAt: Date.now() - 300_000 },
       signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
     };
-    // 逆行 1.2% ≥ 1.0% → 止损（20x 下 = 24% 保证金回撤即砍，不拖到强平）
-    const loss = s.evaluateExit({ ...base, mark: 98.8, now: Date.now() });
+    // 逆行 1.8% ≥ 1.5% → 止损（20x 下 = 36% 保证金回撤即砍，不拖到强平）
+    const loss = s.evaluateExit({ ...base, mark: 98.2, now: Date.now() });
     expect(loss.exit).toBe(true);
     expect(loss.reason).toBe('STOP_LOSS');
-    // 逆行 0.8% < 1.0%（常态 ATR 级回调）→ 不止损（容忍正常波动，不「稍微回调就割」）
-    const ok = s.evaluateExit({ ...base, mark: 99.2, now: Date.now() });
+    // 逆行 1.2% < 1.5%（介于生命周期容忍带 0.875% 与止损线之间）→ 不止损（给趋势呼吸空间）
+    const ok = s.evaluateExit({ ...base, mark: 98.8, now: Date.now() });
     expect(ok.exit).toBe(false);
-    // SHORT 对称：entry 100 逆行到 101.2（+1.2%）→ 止损
+    // SHORT 对称：entry 100 逆行到 101.8（+1.8%）→ 止损
     const shortLoss = s.evaluateExit({
       meta: meta('ETHUSDT', 'ETHUSDT:S:1', 'SHORT'),
       pos: { entryPrice: 100, qty: 4, margin: 20, side: 'SHORT', openedAt: Date.now() - 300_000 },
-      mark: 101.2, signal: null, now: Date.now(),
+      mark: 101.8, signal: null, now: Date.now(),
     });
     expect(shortLoss.exit).toBe(true);
     expect(shortLoss.reason).toBe('STOP_LOSS');
   });
 
-  test('UE3 移动止盈：峰值浮盈 ≥15% 激活后回撤 ≥8% → TRAIL_TAKE；未达线不触发', () => {
+  test('UE3 移动止盈：峰值浮盈 ≥30% 激活后回撤 ≥20% → TRAIL_TAKE；未达线不触发（Task 68 长周期 30/20）', () => {
     const s = new UniversalTrendStrategy();
     const cycle = 'BTCUSDT:L:100';
-    // DB 统计的持仓期峰值 MFE=25%（保证金口径）→ 已激活
-    const m = { ...meta('BTCUSDT', cycle), mfe: 25 } as unknown as TrendTradeMetaRow;
+    // 持仓期峰值 MFE=40%（保证金口径 = 2% 价格 @20x）→ 已激活
+    const m = { ...meta('BTCUSDT', cycle), mfe: 40 } as unknown as TrendTradeMetaRow;
     const pos = { entryPrice: 100, qty: 4, margin: 20, side: 'LONG' as const, openedAt: Date.now() - 600_000 };
-    // 当前浮盈 15%：回撤 25-15=10 ≥ 8 → 落袋（保住 ≥15% 利润）
+    // 当前浮盈 18%：回撤 40-18=22 ≥ 20 → 落袋（保住 ≥18% 利润）
     const take = s.evaluateExit({
-      meta: m, pos, mark: 100.75,
+      meta: m, pos, mark: 100.9,
       signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
       now: Date.now(),
     });
     expect(take.exit).toBe(true);
     expect(take.reason).toBe('TRAIL_TAKE');
-    // 当前浮盈 22%：回撤 3 < 8 → 继续拿（趋势模型的「确认在就拿大段」不被小回撤打扰）
+    // 当前浮盈 32%：回撤 8 < 20 → 继续拿（趋势内正常回调不打断长周期持仓）
     const hold = s.evaluateExit({
-      meta: m, pos, mark: 101.1,
+      meta: m, pos, mark: 101.6,
       signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
       now: Date.now(),
     });
     expect(hold.exit).toBe(false);
-    // 未激活：MFE 只有 10%（< 15% 激活线）→ 即便当前回撤大也不触发（没有利润可保护）
+    // 未激活：MFE 只有 10%（< 30% 激活线）→ 即便当前回撤大也不触发（没有利润可保护）
     const m2 = { ...meta('BTCUSDT', cycle), mfe: 10 } as unknown as TrendTradeMetaRow;
     const notArmed = s.evaluateExit({
       meta: m2, pos, mark: 100.2,
