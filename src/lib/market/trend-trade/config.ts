@@ -97,6 +97,8 @@ export type TrendExitReason =
   | 'WEAKNESS_EARLY' // Task 57 策略离场：短周期走弱（END_PENDING 同周期）先走，走强可再入场
   | 'TRAIL_TAKE' // Task 66 策略离场：移动止盈——峰值浮盈达标后回撤超限，锁定利润
   | 'STOP_LOSS' // Task 66 策略离场：硬止损——价格逆行超限（方向选择失败，防拖到强平）
+  | 'BREAKOUT_FAILED' // Task 68 重大异动：突破基准线结构失效后退出
+  | 'EVENT_TIMEOUT' // Task 68 重大异动：规定时间内没有顺向扩张，退出失去动能的交易
   | 'LIQUIDATED' // 强平（杠杆模拟执行结果，不伪装模型止损）
   | 'MANUAL'; // 人工平仓 / 全部平仓 / 换仓数量调整 / 切换算法清场
 
