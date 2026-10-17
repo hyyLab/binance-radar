@@ -130,6 +130,10 @@ export interface TrendTradeRow {
   symbol: string;
   base: string;
   side: 'LONG' | 'SHORT';
+  /** Task 63：开仓时使用的算法（registry id；历史旧行兜底 short-swing-v1） */
+  strategyId?: string;
+  /** Task 63：算法展示名（短周期套利 / 通用趋势引擎；历史明细「算法」列） */
+  strategyName?: string;
   openedAt: string;
   closedAt: string;
   holdMinutes: number | null;

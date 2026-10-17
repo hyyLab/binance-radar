@@ -264,8 +264,11 @@ function TradeRow({
       <span className="truncate text-muted-foreground">
         {fmtPrice(t.entryPrice)} → {t.exitPrice != null ? fmtPrice(t.exitPrice) : '—'}
       </span>
-      <span className="truncate text-muted-foreground">
-        费 {(t.openFee + t.closeFee).toFixed(3)} · 滑 {t.slippageEst.toFixed(3)}
+      <span
+        className="truncate text-muted-foreground"
+        title={`算法：${t.strategyName ?? t.strategyId ?? '—'}（费用/滑点不再逐行展示，累计口径见顶部统计卡）`}
+      >
+        {t.strategyName ?? t.strategyId ?? '—'}
       </span>
       <span className={cn('truncate font-semibold', exitLabel === '强平' ? 'text-down' : 'text-muted-foreground')}>
         {exitLabel}
@@ -286,7 +289,7 @@ function TradeHeader() {
       <span>币种</span>
       <span>方向</span>
       <span>开仓 → 平仓</span>
-      <span>费·滑</span>
+      <span>算法</span>
       <span>原因</span>
       <span className="text-right">净盈亏(含滑)</span>
     </div>
