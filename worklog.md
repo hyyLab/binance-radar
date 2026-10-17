@@ -488,3 +488,23 @@ Stage Summary:
 - 语义变化明示：短周期套利同周期只做第一波（走弱离场=周期终点，不再有回调后再进）；通用趋势引擎从「无止盈无止损纯走弱」变三层离场（新增 TRAIL_TAKE/STOP_LOSS 两种平仓原因，历史表可区分）；两算法的入场都收敛到「方向刚走强/刚选向」的第一时间顺势
 - 边界保留：基础设施 ENDED 周期匹配/反向确认/强平/冷却/二次确认全部不动；UTE 轮次上限 2 保留（走强回确认仍可 R2——用户批评的 R2 是短周期的回调再进场模式）；short-swing 未加硬止损（用户复盘未提，走弱/ENDED/强平兜底）
 - 未验证假设：全部阈值为复盘定版的工程初值未经回放校准（TRAIL 15/8、STOP 1.0%、CHASE 1.2%、FRESH 3min、方向选择 ER 0.3）；方向选择确认制对入场频率的压缩幅度待实盘观察；满配单仓 + 短周期无硬止损的强平风险与前版相同（QUSDT 单 MAE -84% 为旧版行为代价样本）
+
+---
+Task ID: 67
+Agent: Super Z (main)
+Task: 仓位划分按配置舱位数——用户复盘「选两舱但 1 仓占 95 成保证金」判定 Task 65 动态槽位不对，针对每种持仓情况做不同仓位划分
+
+Work Log:
+- 根因定位：Task 65 的 effectiveMarginRatio(cap, openCount) = min(cap, 95%÷(当前持仓数+1))——除数是开仓瞬间的实际持仓数而非配置舱位数，首仓（openCount=0）永远吃满 95%，第二仓开时余额只剩 ~5%。DB 实锤：SUSDT 首仓 margin=95.0（权益 95 成）、后续 BTWUSDT/ICNTUSDT 仅 11.15/11.17，与用户描述完全吻合
+- 修复定版：effectiveMarginRatio(cap, maxPositions) = min(cap, 95%÷配置舱位数)——划分只看「选了几舱」：1 舱单仓满配 95%（Task 65 前用户诉求保留），2 舱各 47.5%、3 舱各 31.7%、4 舱各 23.75%、8 舱各 11.875%……每舱配额固定可预期，先开仓不挤占后舱；maxPositions 异常（0/负/NaN）按 1 处理绝不放大
+- 涉及面：config.ts（函数重写+MARGIN_RATIO/MARGIN_SLOT_HEADROOM 注释）/ auto-trader.ts（sizing 调用点改传 cfg.maxPositions、开仓日志 95%/N仓、marginBasis、头注释、applyConfig/setRuntimeParams 注释与日志）/ console-params.ts marginRatio desc+effect / control 路由切舱位 note / overview 路由注释 / UI tooltip 两处——control 与 overview 路由本就传 maxPositions，旧语义下展示值与文案自相矛盾（展示 95%÷(N+1)、文案写 95%÷N），新语义下自动对齐，零代码改动即修复
+- 单例 bump v18→v19 六处（头注释条目/globalThis 声明/pickLegacyEngine 签名/链首补插 v18/getEnhancedEngine/resetEnhancedEngine）——链首补插修复 Task 66 后链头只到 v17 的隐患（不补则热重载后旧 v18 实例漏停双实例并存）
+- 测试重写：T17b 变用户场景回归（marginRatio=0.95 默认 + maxPositions=2 → 两仓各 ≈47.5，首仓 <48、总保证金 ∈(94,95) 满舱预算兑现）+ T29a 配额表换 (cap, maxPositions) 口径（含 0/负/2.7/NaN 防御）+ T2/T17/T34 注释同步（fixture cap 0.1/0.2 低于任何舱位线，断言值全不变）；100/100 全绿
+- 环境坑第三次实锤且升级：①T2 行中文字面量 Edit 匹配失败（不可见漂移）→ python 行号定位+ASCII 子串断言脚本完成剩余替换（scripts/task67_test_update.py，自底向上防位移）②MultiEdit 报「No replacement was performed」但前序编辑已落盘——原子性失效，报错后必须 grep 复核实际状态再决定补丁范围（本次 9 个编辑实际落了 4 个）
+- 线上验证（未重启 server）：热重载后 overview 返回 effMarginRatio=0.11875=95%÷8——旧函数在此场景必输出 95%÷9≈0.1056，新函数输出为决定性证据；v19 实例接管（startedAt 刷新、lastTick 3.3s 内、lastError=null）；存量 2 笔持仓不追溯，新开仓按舱位配额
+- tsc：ma7-ui.ts/collector.ts/aggregate.ts 3 个报错经 git stash 对照确认 HEAD 状态同样存在（存量，与本次无关）；本次 8 文件零新增类型错误
+
+Stage Summary:
+- 仓位划分语义定版：配额 = min(marginRatio 上限, 95%÷配置舱位数)，选 N 舱则每舱 95%/N、选 1 舱满配——「单仓开最大」与「多舱均分」两诉求同时成立，配额在开仓前即可预期（控制台切舱位 note 直接展示新配额）
+- 每舱配额固定后不再有「先到先得挤占」：Task 65 的滚动开大仓模式废弃，代价是仓位未满时资金利用率低于满配（选 2 舱只来 1 个信号时闲置 47.5%）——用户以「划分可预期」优先定版
+- v19 运行中；改动文件 8 个 + 测试更新脚本 1 个；Task 65 的 DB marginRatio=0.95 存量值在新语义下无需迁移

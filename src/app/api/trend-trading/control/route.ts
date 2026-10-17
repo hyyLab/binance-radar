@@ -117,7 +117,7 @@ export async function POST(req: Request) {
         // 先自动平仓原有持仓（先平后开：被平仓的旧趋势周期不会立即重开，新仓只来自新确认周期）
         const closed = await engine.autoTrader.closeAllManual();
         await trendTradeRepo.updateMaxPositions(TREND_TRADE.ACCOUNT_NAME, value);
-        // Task 58：展示新仓位数下的实际单仓比例（min(设定比例, 95%÷仓位数)）
+        // Task 67：展示新舱位数下的实际单仓比例（min(设定比例, 95%÷配置舱位数)）
         const setRatio = current?.marginRatio ?? TREND_TRADE.MARGIN_RATIO;
         const effPct = (effectiveMarginRatio(setRatio, value) * 100).toFixed(2).replace(/\.?0+$/, '');
         return NextResponse.json({
@@ -127,7 +127,7 @@ export async function POST(req: Request) {
           skipped: closed.skipped,
           note: `持仓数量已设为 ${value}；已自动平仓 ${closed.closed} 笔原持仓${
             closed.skipped > 0 ? `（${closed.skipped} 笔暂时未能平仓，将在下轮巡检重试）` : ''
-          }。每仓保证金 = 开仓时权益 × min(设定比例 ${(setRatio * 100).toFixed(0)}%， 95%÷${value}仓) = ${effPct}%权益（持仓数多时自动压缩保证满仓可开，Task 58）；余额不足仍跳过并记录`,
+          }。每仓保证金 = 开仓时权益 × min(设定比例 ${(setRatio * 100).toFixed(0)}%， 95%÷${value}舱) = ${effPct}%权益（按舱位数划分：1 舱满配 95%、N 舱各 95%/N，先开仓不挤占后舱，Task 67）；余额不足仍跳过并记录`,
         });
       }
       // Task 55：重置机器人账户——先按标记价正常平掉全部持仓，再清空持仓/流水/趋势
@@ -199,7 +199,7 @@ export async function POST(req: Request) {
         });
         return NextResponse.json({
           ok: true,
-          note: '参数已保存并即时生效（无需重启；轮次状态保留）。保证金比例实际生效 = min(设定值, 95%÷持仓数)。1m 趋势确认固定需 3 根已收盘 K 线，不在可调范围。',
+          note: '参数已保存并即时生效（无需重启；轮次状态保留）。保证金比例实际生效 = min(设定值, 95%÷配置舱位数)。1m 趋势确认固定需 3 根已收盘 K 线，不在可调范围。',
         });
       }
       // Task 57-c：恢复全部控制台参数为代码默认

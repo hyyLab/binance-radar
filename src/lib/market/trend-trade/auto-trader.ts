@@ -8,9 +8,9 @@
 //   保护/新鲜窗；通用趋势引擎：方向选择确认制）+ 二次确认
 //   （首次确认只建待入场记录，等下一根已收盘 K 线复核后开仓）+ 同币种冷却（默认 5 分钟，
 //   控制台可调，运行库当前为 0 = 用户关闭）；
-//   每仓保证金 = 开仓时账户权益 × min(marginRatio 上限, 95%÷(当前持仓数+1))（Task 65 动态槽位：
-//   单仓时用满 95% 配额开最大仓，并发越多单仓自动越小；Task 58 原版按目标仓数静态均分，
-//   单仓在场时资金利用率过低——用户定版改为随实际持仓数动态均分），杠杆固定 20x；
+//   每仓保证金 = 开仓时账户权益 × min(marginRatio 上限, 95%÷配置舱位数)（Task 67 舱位划分：
+//   选 1 舱单仓满配 95% 开最大仓，选 N 舱各 95%/N，先开仓不挤占后开舱；Task 65 动态版按
+//   (当前持仓数+1) 均分，首仓永远吃满 95%、后舱无仓可开——用户复盘废弃），杠杆固定 20x；
 //   保证金+手续费超出可用余额直接跳过并记录（不变相提高比例/杠杆）；
 //   同一趋势周期只允许一笔（决策键幂等），不允许加仓摊平
 // - 离场（Task 66 复盘定版）：基础设施硬规则不变——ENDED（连续 END_CONFIRM_BARS 根独立
@@ -257,7 +257,7 @@ export class AutoPaperTrader {
    * - strategyParams：当前策略的覆盖项（整体替换该 strategyId 的覆盖对象；传 {} = 全回默认）；
    *   非固定注入策略时重装配实例（轮次状态从 DB 恢复，语义不丢）。
    * - waitBarConfirm / cooldownMs / marginRatio：基础设施参数，auto-trader 每 tick 重读
-   *   配置，下一 tick 生效（marginRatio 实际比例 = min(设定值, 95%÷持仓数)，见 config.ts）。
+   *   配置，下一 tick 生效（marginRatio 实际比例 = min(设定值, 95%÷配置舱位数)，见 config.ts）。
    * 入参已在 control API 层严格校验（白名单 + 范围）。
    */
   async setRuntimeParams(patch: {
@@ -293,7 +293,7 @@ export class AutoPaperTrader {
     }
     // marginRatio 为基础设施列：每 tick 重读 cfg，下一 tick 生效（无需重装配）
     if (patch.marginRatio !== undefined) {
-      logDecision(`参数控制台：每仓保证金比例已更新为 ${patch.marginRatio}（下一 tick 生效；实际比例 = min(设定值, 95%÷持仓数)）`);
+      logDecision(`参数控制台：每仓保证金比例已更新为 ${patch.marginRatio}（下一 tick 生效；实际比例 = min(设定值, 95%÷配置舱位数)）`);
     }
   }
 
@@ -879,14 +879,14 @@ export class AutoPaperTrader {
     if (dup) {
       return { outcome: 'skipped', reason: '同币种已有持仓' };
     }
-    // ⑧ 仓位测算（Task 65 动态槽位配额：每仓保证金 = 权益 × min(设定上限, 95%÷(当前持仓数+1))——
-    //    单仓时自动用满 95% 配额开最大仓，并发越多单仓自动越小；超出可用余额直接跳过）。
-    //    费率唯一真值 = 引擎实例 feeRate（Task 59：自动账户 0.02%；测试注入引擎默认 TAKER_FEE，
-    //    口径随引擎走）
+    // ⑧ 仓位测算（Task 67 舱位划分：每仓保证金 = 权益 × min(设定上限, 95%÷配置舱位数)——
+    //    选 1 舱单仓满配 95%，选 N 舱各 95%/N，每舱配额固定、先开仓不挤占后开舱；
+    //    Task 65 动态版按 (当前持仓数+1) 均分，首仓永远吃满 95%、后舱只剩残羹（用户复盘废弃）。
+    //    超出可用余额直接跳过）。费率唯一真值 = 引擎实例 feeRate（Task 59：自动账户 0.02%；
+    //    测试注入引擎默认 TAKER_FEE，口径随引擎走）
     const feeRate = this.engine.feeRate;
     const feeFactor = 1 + cfg.leverage * feeRate;
-    const slot = eq.openCount + 1; // 本仓占用的槽位（1 = 首仓）
-    const effRatio = effectiveMarginRatio(cfg.marginRatio, eq.openCount);
+    const effRatio = effectiveMarginRatio(cfg.marginRatio, cfg.maxPositions);
     const effRatioPct = (effRatio * 100).toFixed(2).replace(/\.?0+$/, '');
     const targetMargin = floor2(eq.equity * effRatio);
     const fee = targetMargin * cfg.leverage * feeRate;
@@ -906,7 +906,7 @@ export class AutoPaperTrader {
       symbol: signal.symbol,
       action: 'OPEN',
       cycleId: posCycle,
-      detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg, verdict.modeTag, slot)),
+      detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg, verdict.modeTag)),
     });
     if (!claimed) {
       return { outcome: 'skipped', reason: '本趋势周期本轮次已决策过（幂等）' };
@@ -976,7 +976,7 @@ export class AutoPaperTrader {
       logDecision(
         `开仓（${via === 'pending' ? '二次确认通过' : '直接开仓·二次确认关闭'}）strategy=${this.strategy.id} mode=${verdict.modeTag} ` +
           `round=${pendingRoundOf(rKey)} symbol=${signal.symbol} side=${side} posCycle=${posCycle} ` +
-          `positionId=${pos.id} margin=${targetMargin}(${effRatioPct}%权益=min(${Math.round(cfg.marginRatio * 100)}%,95%/${slot}仓)) ` +
+          `positionId=${pos.id} margin=${targetMargin}(${effRatioPct}%权益=min(${Math.round(cfg.marginRatio * 100)}%,95%/${cfg.maxPositions}仓)) ` +
           `leverage=${cfg.leverage}x entryBar=${signal.lastBarTime}${waitedMs} ` +
           `score=${signal.score.toFixed(0)} er=${signal.features.efficiencyRatio.toFixed(2)} ` +
           `htf5m=${signal.htf5m.dir} htf15m=${signal.htf15m.dir}`,
@@ -1120,7 +1120,7 @@ export class AutoPaperTrader {
     }
   }
 
-  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow, modeTag: string, slot: number) {
+  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow, modeTag: string) {
     return {
       strategyId: this.strategy.id,
       modeTag,
@@ -1133,8 +1133,8 @@ export class AutoPaperTrader {
       lastBarTime: signal.lastBarTime,
       margin,
       leverage: cfg.leverage,
-      /** Task 58 建；Task 65 语义修订：sizing = 开仓时权益 × min(设定上限, 95%÷(当前持仓数+1))（保证金 + 手续费超出余额则跳过） */
-      marginBasis: `equity × min(${cfg.marginRatio}, ${TREND_TRADE.MARGIN_SLOT_HEADROOM}/${slot}) (skip if unaffordable)`,
+      /** Task 58 建；Task 67 语义定版：sizing = 开仓时权益 × min(设定上限, 95%÷配置舱位数)（保证金 + 手续费超出余额则跳过） */
+      marginBasis: `equity × min(${cfg.marginRatio}, ${TREND_TRADE.MARGIN_SLOT_HEADROOM}/${cfg.maxPositions}) (skip if unaffordable)`,
       entryEr: signal.features.efficiencyRatio,
       htf5mDir: signal.htf5m.dir,
       htf15mDir: signal.htf15m.dir,

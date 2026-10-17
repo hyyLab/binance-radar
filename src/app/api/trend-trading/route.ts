@@ -128,7 +128,7 @@ export async function GET() {
       cooldownMs: cfg?.cooldownMs ?? null,
       marginRatio: cfg?.marginRatio ?? null,
     });
-    // Task 58：当前仓位数下的实际单仓保证金比例（控制台/持仓下拉 tooltip 数据源）
+    // Task 67：当前配置舱位数下的实际单仓保证金比例（控制台/持仓下拉 tooltip 数据源）
     const effMarginRatio = effectiveMarginRatio(
       cfg?.marginRatio ?? TREND_TRADE.MARGIN_RATIO,
       cfg?.maxPositions ?? TREND_TRADE.MAX_POSITIONS,
@@ -151,7 +151,7 @@ export async function GET() {
           accountName: TREND_TRADE.ACCOUNT_NAME,
           initialCapital,
           marginRatio: cfg?.marginRatio ?? TREND_TRADE.MARGIN_RATIO,
-          // Task 58：min(设定比例, 95%÷持仓数)——满仓可开的实际单仓比例
+          // Task 67：min(设定比例, 95%÷配置舱位数)——1 舱满配 95%、N 舱各 95%/N 的实际单仓比例
           effMarginRatio,
           leverage: cfg?.leverage ?? TREND_TRADE.LEVERAGE,
           maxPositions: cfg?.maxPositions ?? TREND_TRADE.MAX_POSITIONS,
