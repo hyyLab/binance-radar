@@ -70,6 +70,7 @@ export class EnhancedEngine {
     this.autoTrader = new AutoPaperTrader({
       getSignals: () => this.trendWatch.latestSignals(),
       getEvents: (now) => this.events(now),
+      getClosedCandles: (symbol, lookbackMs, now) => this.store.closedCandles(symbol, lookbackMs, now),
       markPrice: (symbol) =>
         activeFuturesCollector().getTickers().find((t) => t.symbol === symbol)?.price ?? 0,
     });
