@@ -34,6 +34,7 @@
 import { db } from '@/lib/db';
 import { PaperError, PaperEngine, paperEngineFor } from '../paper';
 import type { EnhancedEventDTO } from '../enhanced/types';
+import type { Candle1m } from '../enhanced/klines';
 import type { UnifiedTrendSignal } from '../trend-watch/signal';
 import { TREND_WATCH } from '../trend-watch/config';
 import {
@@ -60,6 +61,8 @@ export interface AutoTraderDeps {
   getSignals(): UnifiedTrendSignal[];
   /** 可选的原始活动异动事件，供 MAJOR P1 事件驱动算法直接消费 */
   getEvents?(now: number): { active: EnhancedEventDTO[]; ended: EnhancedEventDTO[] };
+  /** 本地缓存的已收盘 K 线；用于识别异动前是否处于平台整理，不触发额外网络请求。 */
+  getClosedCandles?(symbol: string, lookbackMs: number, now: number): Candle1m[];
   /** 标记价（合约多源供价） */
   markPrice(symbol: string): number;
 }
@@ -791,7 +794,8 @@ export class AutoPaperTrader {
       if (!(mark > 0)) continue;
       const lastClose = await this.repo.lastCloseAt(event.symbol); // 提供上下文，但不应用固定冷却。
       const ctx = this.strategyCtx(Date.now(), mark, cfg, eq, openSymbols, lastClose);
-      const verdict = evaluate.call(this.strategy, event, ctx);
+      const priorCandles = this.deps.getClosedCandles?.(event.symbol, 30 * 60_000, Date.now()) ?? [];
+      const verdict = evaluate.call(this.strategy, event, ctx, priorCandles);
       if (!verdict.want || !verdict.side || !verdict.cycleId || verdict.evidenceAt == null) continue;
       const round = this.strategy.nextRound(event.symbol, verdict.cycleId);
       const rKey = roundKey(verdict.cycleId, round);
