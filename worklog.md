@@ -126,3 +126,22 @@ Stage Summary:
 - 交付：机器人充值（独立账户、不动手动盘）、可选持仓数量（1~8 仓，更换即清场均分重开）、持仓卡片点击看 K 线（持仓上下文叠加）
 - 行为变更：开仓 sizing 由「权益×20%」改为「可用余额÷剩余仓位数」（用户定版）；更换持仓数量=自动平仓+新口径（被平旧周期因幂等键不会立即重开，新仓只来自新确认周期）
 - 未验证假设：均分口径为工程实现（余额基准、预留手续费），未做历史回放对比；持仓数量选项 [1,2,3,4,5,6,8] 为界面约定非校准参数
+
+---
+Task ID: 55-2
+Agent: main
+Task: 趋势自动交易页四项改进——持仓更换/全部平仓改内部弹窗、模型判断有问题自行平仓、重置按钮（资金回 100U）、历史展示开仓+平仓时间
+
+Work Log:
+- 内部弹窗：trend-trade-view 持仓数量更换/全部平仓/新增重置全部改用 shadcn AlertDialog（confirm 状态机三分支），操作结果反馈由 window.alert 改 useToast（Toaster 已在 layout 挂载）；重置按钮红色危险样式、弹窗标注不可撤销
+- 自动平仓 v2（auto-trader.manageExits 重写，用户定版「模型判断有问题即自行平仓」）：① ENDED 任意周期归属（修复旧规则周期回收/ORPHAN 漏配→残留持仓永远等不到退出只能人工平）；② END_PENDING 同周期立即离场，不再等 END_CONFIRM_BARS=3 根（防插针确认根数保留给池内生命周期展示；结束证据明细留 exitSignalJson）；③ 反向确认放宽任意周期；跨周期中间态（异周期 END_PENDING/OBSERVING/CANDIDATE_*）不误平，由 ①/③ 数根 K 线内自然收敛
+- 重置：AutoPaperTrader.resetAccount = closeAllManual（正常平仓释放保证金/记 MANUAL 流水）→ 删该账户 PaperPosition/PaperTrade → 清空 TrendTradeMeta/TrendAutoDecision（仅趋势账户使用，无账户维度）→ balance=initialCapital(100)、totalDeposited=0（ROI 本金=initial+deposited 回 100）、peakEquity 归零（repo 新增 resetPeakEquity——updatePeakEquity 是 WHERE peakEquity< ? 峰值语义，写 0 不生效，测试 T20 抓出）；运行模式/持仓数量保持不变
+- 历史交易：TradeRow 增开仓时间列（8 列网格重排：开仓时间/平仓时间/币种/方向/开→平价/费·滑/原因/净盈亏），新增 TradeHeader 表头，fmtStamp（月-日 时:分:秒，title 完整时间+持仓分钟数）；排序下拉「按平仓时间」语义不变
+- 引擎单例 bump v7（auto-trader 行为变更必 bump：v6 旧实例在 globalThis 存活会使新退出规则热重载后不生效）；resetEnhancedEngine 同步改 v7
+- 测试：T18 END_PENDING 即离场（exitSignalJson 留证据）、T19 残留持仓 ENDED 异周期归属也离场、T20 重置（含充值后重置、positions/trades/meta/decisions 全清、balance=100/totalDeposited=0/peakEquity=0）；全量 42/42 绿；生产构建通过
+- 线上验证（agent-browser + curl，保护用户数据未在线上执行 reset/closeAll 确认）：三个弹窗均正常弹出/取消（截图 download/task55-{reset,closeall}-dialog.png、task55-history.png）；deposit 校验/setMaxPositions 同值 no-op 正常；live 证据——END_PENDING 中的 ARIA 持仓在引擎 v7 接管后 10s 内被「趋势结束」自动平仓（04:17:01），历史行双时间列渲染正确
+
+Stage Summary:
+- 交付：① 三个操作确认全部页内弹窗化（不再有浏览器原生弹窗）② 机器人自动离场规则强化——END_PENDING 报警即走 + ENDED 周期归属不再设限，用户无需再人工兜底 ③ 重置按钮一键回到 100U 起跑线（清仓清历史清审计，ROI 基准归零）④ 历史交易开仓/平仓双时间列
+- 行为变更注意：END_PENDING 即平仓比 Task 54 的 3 根确认更快离场，可能牺牲「结束迹象消失恢复确认」场景的持仓连续性（同周期重开被幂等键阻断）——这是用户明确要求的风险换向，阈值 END_CONFIRM_BARS 仍保留在 lifecycle 供池内展示
+- 未验证假设：重置后从零重跑的统计口径（胜率/回撤）未做长期观察；reset 未在线上执行（破坏性），仅测试库 T20 覆盖
