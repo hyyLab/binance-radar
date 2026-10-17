@@ -1,10 +1,11 @@
 // ---------- 趋势自动模拟交易 · 行为测试（bun test，独立测试库 + fake 注入） ----------
 // 覆盖任务 §七 12 项要求中可自动化验证的全部场景（页面展示用截图人工核验）：
-// 1) 手动账户隔离  2) 20%/20x 开仓  3) 未确认不开仓  4) 短暂反向不提前平仓
+// 1) 手动账户隔离  2) 余额÷仓位数均分开仓（持仓数量可选）+ 20x  3) 未确认不开仓  4) 短暂反向不提前平仓
 // 5) 趋势结束/反向确认正确离场  6) 同一趋势信号不重复开仓（含重启）
 // 7) 数据过期不开仓、不误判结束  8) 手续费/滑点/净盈亏口径
 // 9) 暂停后不开新仓但持仓仍受监控（含强平）  10) 重启恢复持仓关联（reconcile）
-// 11) 最大持仓数与保证金限制  12) 强平记录正确；附：先平后开独立性、人工平仓/全部平仓
+// 11) 最大持仓数与保证金限制  12) 强平记录正确；附：先平后开独立性、人工平仓/全部平仓、
+//     充值（Task 55）、持仓数量变更持久化（Task 55）
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
@@ -280,7 +281,7 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     expect(accounts[0]!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL); // 初始资金来自配置（可配）
   });
 
-  test('T2 开仓 sizing：目标保证金 = 权益 20%，杠杆固定 20x', async () => {
+  test('T2 开仓 sizing：每仓保证金 = 可用余额 ÷ 剩余仓位数（均分，预留手续费），杠杆 20x', async () => {
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
     const trader = makeTrader([sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })], engine);
@@ -288,9 +289,11 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     await trader.tick();
     const rows = await openPositions();
     expect(rows.length).toBe(1);
-    expect(rows[0]!.margin).toBeCloseTo(20, 2); // 100 × 20%
+    // 100 余额 ÷ 4 仓 ÷ (1 + 20x×taker0.05%) 预留开仓手续费 → floor2
+    const expectMargin = Math.floor((100 / 4 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
+    expect(rows[0]!.margin).toBeCloseTo(expectMargin, 2);
     expect(rows[0]!.leverage).toBe(20);
-    expect(rows[0]!.qty * rows[0]!.entryPrice).toBeCloseTo(400, 1); // 20 × 20x 名义
+    expect(rows[0]!.qty * rows[0]!.entryPrice).toBeCloseTo(expectMargin * 20, 1); // 保证金 × 20x 名义
   });
 
   test('T3 未确认不开仓：CANDIDATE/OBSERVING/数据过期一律不触发', async () => {
@@ -337,7 +340,8 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     const meta0 = await trendTradeRepo.getMeta(pos!.id);
     expect(meta0?.status).toBe('OPEN');
     const openSlip = meta0!.slippageEst;
-    expect(openSlip).toBeCloseTo(400 * (TREND_TRADE.SLIPPAGE_BPS / 10_000), 9); // 名义 × 2bp
+    const openNotional = pos!.margin * 20;
+    expect(openSlip).toBeCloseTo(openNotional * (TREND_TRADE.SLIPPAGE_BPS / 10_000), 9); // 名义 × 2bp
 
     // 价格变动后趋势确认结束（同一周期 id、新 K 线）
     engine.marks.set('BTCUSDT', 102);
@@ -361,7 +365,7 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     expect(meta!.netPnlWithSlip ?? 0).toBeCloseTo(expectedNet, 6);
     // 手续费双边：开仓费（名义×taker）+ 平仓费（平仓名义×taker）
     const feeSum = await client.paperTrade.aggregate({ _sum: { fee: true } });
-    expect(feeSum._sum.fee ?? 0).toBeCloseTo(400 * TAKER_FEE + 102 * pos!.qty * TAKER_FEE, 6);
+    expect(feeSum._sum.fee ?? 0).toBeCloseTo(openNotional * TAKER_FEE + 102 * pos!.qty * TAKER_FEE, 6);
   });
 
   test('T6 幂等：同一趋势周期不重复开仓；重启后（新实例）仍不重复', async () => {
@@ -547,5 +551,61 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     const decisions = await trendTradeRepo.recentDecisions(10);
     const skip = decisions.find((d) => d.action === 'SKIP');
     expect(skip).toBeDefined();
+  });
+
+  test('T16 充值（Task 55）：机器人账户 balance/totalDeposited 同步增加，与手动盘隔离', async () => {
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const trader = makeTrader([sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })], engine);
+    await trader.ensureStarted(); // boot 建户（INITIAL_CAPITAL）
+    // 充值走真实 PaperEngine.deposit（与手动盘同一实现、不同账户名）
+    const realEngine = new PaperEngine(TREND_TRADE.ACCOUNT_NAME);
+    const before = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+    expect(before!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL);
+    const r = await realEngine.deposit(50);
+    expect(r.balance).toBe(TREND_TRADE.INITIAL_CAPITAL + 50);
+    expect(r.totalDeposited).toBe(50);
+    // 手动盘 default 账户不受影响（本测试库从未创建）
+    expect(await client.paperAccount.findUnique({ where: { name: 'default' } })).toBeNull();
+    // 金额校验：低于下限拒绝
+    expect(realEngine.deposit(5)).rejects.toBeInstanceOf(PaperError);
+  });
+
+  test('T17 持仓数量可选（Task 55）：maxPositions 持久化 + 新口径均分开仓', async () => {
+    // 播种配置并把持仓数量改为 2（控制端更换时自动平仓由 closeAllManual 承担，见 T14）
+    await trendTradeRepo.seedConfig({
+      name: TREND_TRADE.ACCOUNT_NAME,
+      mode: 'RUNNING',
+      initialCapital: 100,
+      marginRatio: 0.2,
+      leverage: 20,
+      maxPositions: 4,
+      slippageBps: 2,
+      peakEquity: 0,
+    });
+    await trendTradeRepo.updateMaxPositions(TREND_TRADE.ACCOUNT_NAME, 2);
+    expect((await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME))!.maxPositions).toBe(2);
+
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    engine.marks.set('ETHUSDT', 50);
+    const trader = makeTrader(
+      [
+        sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:801' }),
+        sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_UP', cycleId: 'ETHUSDT:L:802' }),
+      ],
+      engine,
+    );
+    await trader.ensureStarted();
+    await trader.tick();
+    const rows = await openPositions();
+    expect(rows.length).toBe(2);
+    // 两仓均 ≈ 余额一半（首仓 100/2/1.01 = 49.50；次仓按剩余余额/1 仍 ≈ 49.50）
+    const expectMargin = Math.floor((100 / 2 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
+    for (const r of rows) expect(r.margin).toBeCloseTo(expectMargin, 1);
+    // 仓位数改小后不会超过新上限：第三笔同价新周期不应开仓
+    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+    const openNow = await client.paperPosition.findMany({ where: { accountId: acc!.id, status: 'OPEN' } });
+    expect(openNow.length).toBe(2);
   });
 });

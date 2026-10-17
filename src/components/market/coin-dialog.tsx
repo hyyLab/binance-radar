@@ -93,7 +93,7 @@ export function CoinDialog({
     return lines;
   }, [myPositions, extraPriceLines]);
 
-  // 历史交易 → 简洁 B/S 标记（B=买入 绿色▲，S=卖出 红色▼）
+  // 历史交易 → 简洁 B/S 标记（B=买入 绿色▲，S=卖出 红色▼）+ 外部附加标记（自动开仓时点等）
   const tradeMarkers = useMemo<ChartTradeMarker[]>(() => {
     const list = tradesResp?.data ?? [];
     const out: ChartTradeMarker[] = [];
@@ -111,8 +111,8 @@ export function CoinDialog({
           break;
       }
     }
-    return out;
-  }, [tradesResp]);
+    return [...out, ...(extraMarkers ?? [])];
+  }, [tradesResp, extraMarkers]);
 
   return (
     <Dialog open={!!symbol} onOpenChange={(open) => !open && onClose()}>

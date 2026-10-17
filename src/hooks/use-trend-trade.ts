@@ -167,6 +167,9 @@ export function useTrendTradeControl() {
         balance?: number;
         totalDeposited?: number;
         marginRatio?: number;
+        maxPositions?: number;
+        closed?: number;
+        skipped?: number;
       };
     },
     onSuccess: () => {

@@ -107,3 +107,22 @@ Stage Summary:
 - 红线遵守：全程未声称盈利能力；趋势确认≠买卖指令；强平如实统计；所有阈值为未校准工程参数
 - 未验证假设（待回放校准）：END_CONFIRM_BARS=3、END_IDLE_TOL_MUL=2.5、ER/一致性门槛、探针判准、15m 门控（v2h）——均标注在 config.ts
 - 数据缺口：回放仅 3 天×12 标的（Bybit/Gate 历史），未覆盖极端行情周与更多山寨；无法复现运行期分片供价差异
+
+---
+Task ID: 55
+Agent: main
+Task: 趋势自动交易页交互增强——机器人充值按钮 + 可选持仓数量（更换自动平仓）+ 持仓卡片点击看 K 线
+
+Work Log:
+- 需求澄清：用户先说「可选开仓数量」（已实现 marginRatio 方案），随后更正为「可选持仓数量」——每仓保证金由持仓数量决定平均分配，更换数量时自动平仓原有持仓；已按更正需求重做（移除 setMarginRatio，改为 setMaxPositions）
+- 后端：config.ts 增 MAX_POSITIONS_OPTIONS=[1,2,3,4,5,6,8]（MARGIN_RATIO 降级为遗留播种字段）；repo.ts 增 updateMaxPositions；control API 增 deposit（复用 PaperEngine.deposit，余额/totalDeposited 原子递增、ROI 本金同步、与手动盘同规则 10~100万）与 setMaxPositions（白名单校验→closeAllManual 自动平仓→持久化；同值 no-op）
+- auto-trader sizing 重写（用户定版）：每仓目标保证金 = 可用余额 ÷ 剩余仓位数 ÷ (1+杠杆×taker)（分子预留开仓手续费，否则最后一仓永远开不出；分母用剩余仓位数使每次开仓天然填满一个槽位）；openDetail 审计改记 positionSlots/marginBasis
+- 跨模块图坑：control 路由 catch instanceof PaperError 失效（引擎单例由其它路由图创建，类身份不同）——deposit 错误分支改按消息含「USDT」判校验类错误，curl 验证上下限文案正确返回
+- 前端 trend-trade-view：头部增「充值」按钮+弹窗（预设 100/500/1000/5000+自定义）、「持仓 N 仓」下拉（confirm 提示自动平仓后果）、头部文案改「每仓=可用余额÷剩余仓位数」+累计充值展示；PositionCard 整卡可点（平仓/K线按钮 stopPropagation）；接入 CoinDialog(market=futures) 并新增 extraPriceLines/extraMarkers——自动持仓成本线/强平线/开仓时点「开」标记叠加在 K 线上
+- 测试：T2/T5 改均分口径（动态 notional），新增 T16 充值（balance/totalDeposited 同步、手动盘隔离、下限拒绝）、T17 持仓数量持久化+均分开仓；全量 bun test 39/39 绿
+- 线上验证：页面 200；deposit 非法金额返回具体文案；setMaxPositions 同值 no-op；用户实际操作验证全链路——充值 +5000 到账、持仓数改 8 时旧 4 仓自动平仓（03:52:01 人工平仓流水）、新仓按 余额÷8÷1.01≈1018.74 均分重开；持仓卡片点击弹出 SIREN K 线，成本线/强平线/开标记正确
+
+Stage Summary:
+- 交付：机器人充值（独立账户、不动手动盘）、可选持仓数量（1~8 仓，更换即清场均分重开）、持仓卡片点击看 K 线（持仓上下文叠加）
+- 行为变更：开仓 sizing 由「权益×20%」改为「可用余额÷剩余仓位数」（用户定版）；更换持仓数量=自动平仓+新口径（被平旧周期因幂等键不会立即重开，新仓只来自新确认周期）
+- 未验证假设：均分口径为工程实现（余额基准、预留手续费），未做历史回放对比；持仓数量选项 [1,2,3,4,5,6,8] 为界面约定非校准参数

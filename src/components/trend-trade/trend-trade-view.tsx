@@ -1,10 +1,14 @@
 'use client';
 
-// ---------- 趋势自动模拟交易页（Task 54 §5） ----------
+// ---------- 趋势自动模拟交易页（Task 54 §5 + Task 55 交互增强） ----------
 // 与手动模拟盘完全隔离（独立账户 trend-auto-v1）：总览 + 当前持仓 + 历史明细 + 控制。
+// Task 55：① 机器人充值按钮（独立账户余额/ROI 本金同步增加，不计盈亏）
+//          ② 持仓数量可选（每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；
+//             更换数量时自动平仓原有持仓，新仓按新口径开）
+//          ③ 点击持仓卡片 → 打开该币种 K 线（叠加成本线/强平线/开仓时点标记）
 // ⚠️ 纯模拟交易；趋势评分为启发式证据分；趋势确认 ≠ 买卖指令；强平如实统计。
 
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import {
   Bot,
   ChevronDown,
@@ -12,6 +16,7 @@ import {
   History,
   Pause,
   Play,
+  Plus,
   Square,
   Wallet,
 } from 'lucide-react';
@@ -24,6 +29,17 @@ import {
   type TrendPositionRow,
   type TrendTradeRow,
 } from '@/hooks/use-trend-trade';
+import { CoinDialog } from '@/components/market/coin-dialog';
+import type { ChartPriceLine, ChartTradeMarker } from '@/components/market/kline-chart';
+import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import { Input } from '@/components/ui/input';
+
+/** 与服务端 TREND_TRADE.MAX_POSITIONS_OPTIONS 保持一致 */
+const POSITION_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
+/** 与手动盘充值预设一致 */
+const DEPOSIT_PRESETS = [100, 500, 1000, 5000];
+const MIN_DEPOSIT = 10;
+const MAX_DEPOSIT = 1_000_000;
 
 const EXIT_REASON_LABEL: Record<string, string> = {
   TREND_ENDED: '趋势结束',
@@ -66,20 +82,29 @@ function ModeBadge({ mode }: { mode: string }) {
   return <span className="rounded bg-secondary px-2 py-0.5 text-[11px] font-bold text-muted-foreground">已停止</span>;
 }
 
-// ============ 当前持仓卡片 ============
+// ============ 当前持仓卡片（Task 55：整卡可点 → 查看对应 K 线） ============
 
 function PositionCard({
   p,
   onClose,
+  onSelectSymbol,
   busy,
 }: {
   p: TrendPositionRow;
   onClose: (positionId: string) => void;
+  onSelectSymbol: (symbol: string) => void;
   busy: boolean;
 }) {
   const long = p.side === 'LONG';
   return (
-    <div className={cn('rounded-lg border bg-card p-2.5', long ? 'border-up/30' : 'border-down/30')}>
+    <div
+      className={cn(
+        'cursor-pointer rounded-lg border bg-card p-2.5 transition-colors hover:border-gold/50',
+        long ? 'border-up/30' : 'border-down/30',
+      )}
+      onClick={() => onSelectSymbol(p.symbol)}
+      title="点击查看该币种 K 线（含持仓成本线 / 强平线 / 开仓时点标记）"
+    >
       <div className="flex items-center gap-1.5">
         <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-bold', long ? 'bg-up/20 text-up' : 'bg-down/20 text-down')}>
           {long ? '做多' : '做空'} {p.leverage}x
@@ -87,9 +112,23 @@ function PositionCard({
         <span className="font-mono text-xs font-bold">{p.base}<span className="text-muted-foreground">/USDT</span></span>
         <span className="ml-auto font-mono text-xs tabular-nums">{fmtPrice(p.markPrice)}</span>
         <button
+          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-gold disabled:opacity-40"
+          disabled={busy}
+          onClick={(e) => {
+            e.stopPropagation();
+            onSelectSymbol(p.symbol);
+          }}
+          title="查看 K 线"
+        >
+          K线
+        </button>
+        <button
           className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-down disabled:opacity-40"
           disabled={busy}
-          onClick={() => onClose(p.positionId)}
+          onClick={(e) => {
+            e.stopPropagation();
+            onClose(p.positionId);
+          }}
         >
           平仓
         </button>
@@ -211,20 +250,44 @@ export function TrendTradeView() {
   const history = useTrendTradeHistory(filterSymbol, sort, order);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TradeDetail | null>(null);
+  // Task 55：充值弹窗 + K 线弹窗（点击持仓卡片）
+  const [depositOpen, setDepositOpen] = useState(false);
+  const [depositAmount, setDepositAmount] = useState('');
+  const [klineSymbol, setKlineSymbol] = useState<string | null>(null);
 
   const mode = data?.mode ?? 'RUNNING';
   const busy = control.isPending;
+  const maxPositions = data?.config.maxPositions ?? 4;
+  const totalDeposited = data?.account.totalDeposited ?? 0;
 
-  const act = (action: string, positionId?: string) =>
+  const depositVal = Number(depositAmount);
+  const depositValid = Number.isFinite(depositVal) && depositVal >= MIN_DEPOSIT && depositVal <= MAX_DEPOSIT;
+
+  const act = (
+    action: string,
+    positionId?: string,
+    value?: number,
+    amount?: number,
+    /** 配置变更类操作（换仓位数/充值）需要弹窗确认结果；常规操作由界面状态反馈 */
+    alertNote?: boolean,
+  ) =>
     control.mutate(
-      { action, positionId },
+      { action, positionId, value, amount },
       {
         onSuccess: (r) => {
           if (!r.ok && r.error) window.alert(r.error);
+          else if (alertNote && r.note) window.alert(r.note);
         },
         onError: (e) => window.alert(`操作失败：${e.message}`),
       },
     );
+
+  const submitDeposit = () => {
+    if (!depositValid) return;
+    act('deposit', undefined, undefined, depositVal, true);
+    setDepositOpen(false);
+    setDepositAmount('');
+  };
 
   const openDetail = async (positionId: string) => {
     if (detailId === positionId) {
@@ -243,6 +306,48 @@ export function TrendTradeView() {
     }
   };
 
+  // Task 55：K 线弹窗附加物——当前查看的自动持仓 → 成本线/强平线/开仓时点标记
+  const klinePosition = useMemo(
+    () => data?.positions.find((p) => p.symbol === klineSymbol) ?? null,
+    [data, klineSymbol],
+  );
+  const klinePriceLines = useMemo<ChartPriceLine[] | undefined>(() => {
+    if (!klinePosition) return undefined;
+    const long = klinePosition.side === 'LONG';
+    return [
+      {
+        price: klinePosition.entryPrice,
+        color: long ? '#0ecb81' : '#f6465d',
+        title: `自动${long ? '多' : '空'}成本 ${klinePosition.leverage}x`,
+      },
+      { price: klinePosition.liqPrice, color: '#f6465d', title: '强平', dashed: true },
+    ];
+  }, [klinePosition]);
+  const klineMarkers = useMemo<ChartTradeMarker[] | undefined>(() => {
+    if (!klinePosition) return undefined;
+    const long = klinePosition.side === 'LONG';
+    return [
+      {
+        timeMs: new Date(klinePosition.openedAt).getTime(),
+        position: long ? 'belowBar' : 'aboveBar',
+        shape: long ? 'arrowUp' : 'arrowDown',
+        color: long ? '#0ecb81' : '#f6465d',
+        text: '开',
+      },
+    ];
+  }, [klinePosition]);
+
+  const changePositions = (v: number) => {
+    if (v === maxPositions) return;
+    if (
+      window.confirm(
+        `确认将持仓数量改为 ${v} 仓？\n\n· 将自动平仓当前全部 ${data?.positions.length ?? 0} 笔持仓（按标记价市价）\n· 每仓保证金改为「可用余额 ÷ 剩余仓位数」均分\n· 新确认趋势按新口径开仓`,
+      )
+    ) {
+      act('setMaxPositions', undefined, v, undefined, true);
+    }
+  };
+
   return (
     <div className="space-y-3">
       {/* 头部：标题 + 模式 + 控制 */}
@@ -251,11 +356,36 @@ export function TrendTradeView() {
         <h1 className="text-sm font-bold sm:text-base">趋势自动模拟交易</h1>
         <ModeBadge mode={mode} />
         <span className="hidden text-[10px] text-muted-foreground sm:inline">
-          账户 {data?.config.accountName ?? 'trend-auto-v1'} · 初始 {data?.config.initialCapital ?? '—'} USDT ·{' '}
-          {((data?.config.marginRatio ?? 0.2) * 100).toFixed(0)}% 权益/笔 · {data?.config.leverage ?? 20}x · 最多{' '}
-          {data?.config.maxPositions ?? 4} 仓 · 无固定止盈止损（趋势结束离场）
+          账户 {data?.config.accountName ?? 'trend-auto-v1'} · 初始 {data?.config.initialCapital ?? '—'} USDT
+          {totalDeposited > 0 && <span className="text-gold"> · 累计充值 +{totalDeposited.toFixed(0)}</span>} · 每仓 =
+          可用余额 ÷ 剩余仓位数 · {data?.config.leverage ?? 20}x · 无固定止盈止损（趋势结束离场）
         </span>
         <div className="ml-auto flex items-center gap-1.5">
+          {/* Task 55：持仓数量可选——更换即自动平仓原有持仓 */}
+          <label className="flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted-foreground" title="最大同时持仓数；每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；更换数量会自动平仓原有持仓">
+            持仓
+            <select
+              value={maxPositions}
+              disabled={busy}
+              onChange={(e) => changePositions(Number(e.target.value))}
+              className="rounded bg-background px-0.5 py-0.5 text-[11px] font-semibold text-foreground outline-none"
+            >
+              {POSITION_OPTIONS.map((n) => (
+                <option key={n} value={n}>
+                  {n} 仓
+                </option>
+              ))}
+            </select>
+          </label>
+          {/* Task 55：机器人充值 */}
+          <button
+            className="inline-flex items-center gap-1 rounded border border-gold/50 bg-gold/10 px-2 py-1 text-[11px] font-bold text-gold hover:bg-gold/20 disabled:opacity-40"
+            disabled={busy}
+            onClick={() => setDepositOpen(true)}
+            title="给机器人账户充值（增加可用余额，计入 ROI 本金基数，不算盈利）"
+          >
+            <Plus className="h-3 w-3" /> 充值
+          </button>
           {mode === 'RUNNING' ? (
             <button
               className="inline-flex items-center gap-1 rounded border border-gold/50 px-2 py-1 text-[11px] font-semibold text-gold hover:bg-gold/10 disabled:opacity-40"
@@ -321,20 +451,29 @@ export function TrendTradeView() {
             <Stat label="强平次数" value={String(data.stats.liquidatedCount)} cls={data.stats.liquidatedCount > 0 ? 'text-down' : 'text-muted-foreground'} />
           </div>
 
-          {/* 当前持仓（任务 §5.2 全字段） */}
+          {/* 当前持仓（任务 §5.2 全字段；Task 55：点击卡片看 K 线） */}
           <div className="space-y-1.5">
             <div className="flex items-center gap-1.5 text-xs font-semibold">
               <Wallet className="h-3.5 w-3.5 text-muted-foreground" /> 当前持仓（{data.positions.length}）
-              <span className="text-[10px] font-normal text-muted-foreground">趋势信息与趋势面板同源（统一信号），持仓期间趋势变化实时可见</span>
+              <span className="text-[10px] font-normal text-muted-foreground">
+                点击持仓卡片查看对应 K 线（成本线/强平线/开仓时点）· 趋势信息与趋势面板同源
+              </span>
             </div>
             {data.positions.length === 0 ? (
               <div className="rounded-lg border border-dashed border-border/60 px-4 py-3 text-center text-xs text-muted-foreground">
-                暂无自动持仓 · 确认趋势（CONFIRMED）出现后按 {(data.config.marginRatio * 100).toFixed(0)}% 权益 + {data.config.leverage}x 自动开仓；候选趋势/数据过期/暂停状态一律不开仓
+                暂无自动持仓 · 确认趋势（CONFIRMED）出现后按「可用余额 ÷ 剩余仓位数（当前 {data.config.maxPositions}）」均分 +{' '}
+                {data.config.leverage}x 自动开仓；候选趋势/数据过期/暂停状态一律不开仓
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
                 {data.positions.map((p) => (
-                  <PositionCard key={p.positionId} p={p} onClose={(id) => act('close', id)} busy={busy} />
+                  <PositionCard
+                    key={p.positionId}
+                    p={p}
+                    onClose={(id) => act('close', id)}
+                    onSelectSymbol={setKlineSymbol}
+                    busy={busy}
+                  />
                 ))}
               </div>
             )}
@@ -445,6 +584,59 @@ export function TrendTradeView() {
           </details>
         </>
       )}
+
+      {/* Task 55：机器人充值弹窗（与手动盘同规则：10 ~ 1,000,000 USDT） */}
+      <Dialog open={depositOpen} onOpenChange={setDepositOpen}>
+        <DialogContent className="w-[min(400px,95vw)]">
+          <DialogTitle className="text-lg font-bold">给机器人充值</DialogTitle>
+          <DialogDescription className="text-xs">
+            充值直接增加「{data?.config.accountName ?? 'trend-auto-v1'}」可用余额，同步计入 ROI 本金基数（充值不算盈利）；
+            与手动模拟盘账户完全隔离
+          </DialogDescription>
+          <div className="grid grid-cols-4 gap-1.5">
+            {DEPOSIT_PRESETS.map((v) => (
+              <button
+                key={v}
+                onClick={() => setDepositAmount(String(v))}
+                className={cn(
+                  'rounded border py-1.5 text-xs font-semibold transition-colors',
+                  depositAmount === String(v)
+                    ? 'border-gold/60 bg-gold/15 text-gold'
+                    : 'border-border text-muted-foreground hover:text-foreground',
+                )}
+              >
+                +{v.toLocaleString('en-US')}
+              </button>
+            ))}
+          </div>
+          <Input
+            value={depositAmount}
+            onChange={(e) => setDepositAmount(e.target.value.replace(/[^\d.]/g, ''))}
+            placeholder={`自定义金额（${MIN_DEPOSIT} ~ ${MAX_DEPOSIT.toLocaleString('en-US')} USDT）`}
+            inputMode="decimal"
+            aria-label="机器人充值金额"
+          />
+          <button
+            onClick={submitDeposit}
+            disabled={!depositValid || busy}
+            className="w-full rounded-md bg-gold py-2.5 text-sm font-bold text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {busy ? '到账中…' : depositValid ? `确认充值 +${depositVal.toFixed(2)} U` : '请输入充值金额'}
+          </button>
+          <p className="text-center text-[11px] text-muted-foreground">
+            纯模拟充值 · 无真实资金流动 · 当前可用 {data?.account.balance.toFixed(2) ?? '—'} U
+          </p>
+        </DialogContent>
+      </Dialog>
+
+      {/* Task 55：持仓 K 线弹窗（合约多源 K 线 + 自动持仓成本线/强平线/开仓时点标记） */}
+      <CoinDialog
+        symbol={klineSymbol}
+        onClose={() => setKlineSymbol(null)}
+        market="futures"
+        extraPriceLines={klinePriceLines}
+        extraMarkers={klineMarkers}
+      />
     </div>
   );
 }

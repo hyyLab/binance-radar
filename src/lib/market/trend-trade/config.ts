@@ -12,11 +12,13 @@ export const TREND_TRADE = {
   // ===== 运行参数（DB TrendAutoConfig 行为运行时真值；此处为首次播种/重置的默认值） =====
   /** 初始资金（USDT）——可配置（DB initialCapital），界面明确展示 */
   INITIAL_CAPITAL: 100,
-  /** 开仓目标保证金 = 开仓时账户权益 × 该比例（DB TrendAutoConfig.marginRatio 运行时真值，
-   *  界面可从 MARGIN_RATIO_OPTIONS 中选择并持久化；此处为首次播种的默认值） */
+  /** 【遗留字段】每笔保证金比例（Task 54 定版 20%）。Task 55 起 sizing 改为
+   *  「可用余额 ÷ 剩余仓位数」平均分配（见 auto-trader.manageEntries），
+   *  本字段仅作 DB 播种默认值/审计保留，不再参与开仓测算 */
   MARGIN_RATIO: 0.2,
-  /** 每笔保证金比例可选项（界面下拉；Task 55：开仓数量可选） */
-  MARGIN_RATIO_OPTIONS: [0.05, 0.1, 0.15, 0.2, 0.3, 0.5] as const,
+  /** 持仓数量（最大同时持仓数）可选项（界面下拉；Task 55：可选持仓数量——
+   *  每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；更换数量时自动平仓原有持仓） */
+  MAX_POSITIONS_OPTIONS: [1, 2, 3, 4, 5, 6, 8] as const,
   /** 固定杠杆（任务 §3.2 定版 20 倍） */
   LEVERAGE: 20,
   /** 最大同时持仓数（任务建议默认 4，避免权益全被占用） */

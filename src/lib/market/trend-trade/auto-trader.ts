@@ -2,10 +2,11 @@
 // 消费 TrendWatchService 输出的统一趋势信号（UnifiedTrendSignal，单一趋势来源——
 // 本服务绝不另行计算趋势方向），按固定规则开仓/持仓/平仓；纯模拟，不接入真实下单。
 //
-// 规则（任务定版）：
+// 规则（用户定版）：
 // - 独立账户 trend-auto-v1（PaperAccount.name 隔离；手动 default 盘完全不受影响）
-// - 开仓：确认趋势（CONFIRMED_UP/DOWN）才开；目标保证金 = 开仓时账户权益 × 20%；
-//   杠杆固定 20x；最大同时持仓 4；同一趋势周期只允许一笔（决策键幂等）
+// - 开仓：确认趋势（CONFIRMED_UP/DOWN）才开；Task 55 sizing = 可用余额 ÷ 剩余仓位数
+//   （持仓数量界面可选，更换时自动平仓原有持仓；分子预留开仓手续费）；
+//   杠杆固定 20x；同一趋势周期只允许一笔（决策键幂等）
 // - 不设固定止盈止损：趋势确认结束（ENDED）平仓；反向趋势确认平仓（先平后开，
 //   新方向须由晚于平仓时刻的已收盘 K 线再次确认）；保留强平机制（独立巡检任务）
 // - 数据不可用（DATA_UNAVAILABLE/过期）：不新开仓、不伪装趋势结束、继续按标记价
@@ -388,8 +389,14 @@ export class AutoPaperTrader {
         }
       }
 
-      // 仓位测算：目标保证金 = 开仓时账户权益 × marginRatio；杠杆固定
-      const targetMargin = floor2(eq.equity * cfg.marginRatio);
+      // 仓位测算（Task 55 用户定版）：每仓目标保证金由「持仓数量」决定——
+      // 可用余额按剩余仓位数平均分配；分子预留开仓手续费（margin×杠杆×taker），
+      // 否则最后一仓因 margin+fee>可用余额永远开不出。分母用剩余仓位数：
+      // 已占用的仓位不再重复分钱，每次开仓天然填满一个槽位。
+      // （开仓时点余额即「当时权益中可动用的现金」；已实现盈亏会随余额滚动计入，
+      //  浮动盈亏不影响未开槽位的分配——保守口径）
+      const remainingSlots = Math.max(1, cfg.maxPositions - eq.openCount);
+      const targetMargin = floor2(eq.balance / remainingSlots / (1 + cfg.leverage * TAKER_FEE));
       if (targetMargin < TREND_TRADE.MIN_MARGIN) {
         await this.recordSkipDb(signal.symbol, cycleId, `权益不足：目标保证金 ${targetMargin} < ${TREND_TRADE.MIN_MARGIN}`);
         continue;
@@ -477,7 +484,9 @@ export class AutoPaperTrader {
       lastBarTime: signal.lastBarTime,
       margin,
       leverage: cfg.leverage,
-      marginRatio: cfg.marginRatio,
+      /** Task 55：sizing = 可用余额 ÷ 剩余仓位数（由持仓数量决定，平均分配） */
+      positionSlots: cfg.maxPositions,
+      marginBasis: 'balance/remainingSlots',
       volRegime: signal.features.volRegime,
       atrPct: signal.features.atrPct,
       efficiencyRatio: signal.features.efficiencyRatio,

@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 import { getEnhancedEngine } from '@/lib/market/enhanced/engine';
-import { PaperError, paperEngineFor } from '@/lib/market/paper';
+import { paperEngineFor } from '@/lib/market/paper';
 import { ensureTrendTradeSchema, trendTradeRepo } from '@/lib/market/trend-trade/repo';
 import { TREND_TRADE } from '@/lib/market/trend-trade/config';
 
@@ -16,7 +16,8 @@ export const dynamic = 'force-dynamic';
  * - closeAll ：按标记价市价平掉全部自动持仓（mode 不变——全平 ≠ 暂停）
  * - close    ：平掉单笔持仓（body.positionId）
  * - deposit  ：给机器人账户充值（Task 55：增加可用余额与 ROI 本金基数，不计入盈亏）
- * - setMarginRatio：设置每笔开仓保证金比例（Task 55：开仓数量可选，持久化 DB，下个 tick 生效）
+ * - setMaxPositions：设置持仓数量/最大同时持仓数（Task 55：可选；更换时自动平仓
+ *   原有持仓，每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配）
  *
  * ⚠️ 纯模拟；不接入真实下单。暂停与全部平仓是两个独立操作，不混为一谈。
  */
@@ -66,30 +67,58 @@ export async function POST(req: Request) {
           const r = await paperEngineFor(TREND_TRADE.ACCOUNT_NAME).deposit(amount);
           return NextResponse.json({ ok: true, ...r });
         } catch (e) {
-          const msg = e instanceof PaperError ? e.message : '充值失败';
-          return NextResponse.json({ ok: false, error: msg }, { status: 400 });
+          // ⚠️ 不用 instanceof PaperError：引擎单例可能由其它路由图创建（Turbopack 多模块图，
+          // 跨图类身份不同——见 paper.ts 全局单例注释）。deposit 只抛校验类错误（文案含 USDT）。
+          const msg = e instanceof Error ? e.message : '';
+          if (msg.includes('USDT')) {
+            return NextResponse.json({ ok: false, error: msg }, { status: 400 });
+          }
+          return NextResponse.json({ ok: false, error: msg || '充值失败' }, { status: 500 });
         }
       }
-      // Task 55：开仓数量（每笔保证金占权益比例）界面可选——白名单校验后持久化，
-      // auto-trader 每 tick 重读 DB 配置，下一轮开仓决策即按新比例执行
-      case 'setMarginRatio': {
+      // Task 55：可选持仓数量（最大同时持仓数）——更换时自动平仓原有持仓（用户定版：
+      // 旧仓按旧口径开出，换数量即清场，新仓按新数量均分开仓）。同值不动作。
+      case 'setMaxPositions': {
         const value = Number(body.value);
-        if (!TREND_TRADE.MARGIN_RATIO_OPTIONS.includes(value as (typeof TREND_TRADE.MARGIN_RATIO_OPTIONS)[number])) {
+        if (
+          !Number.isInteger(value) ||
+          !TREND_TRADE.MAX_POSITIONS_OPTIONS.includes(value as (typeof TREND_TRADE.MAX_POSITIONS_OPTIONS)[number])
+        ) {
           return NextResponse.json(
-            { ok: false, error: `保证金比例须为以下之一：${TREND_TRADE.MARGIN_RATIO_OPTIONS.map((v) => `${(v * 100).toFixed(0)}%`).join(' / ')}` },
+            {
+              ok: false,
+              error: `持仓数量须为以下之一：${TREND_TRADE.MAX_POSITIONS_OPTIONS.join(' / ')}`,
+            },
             { status: 400 },
           );
         }
-        await trendTradeRepo.updateMarginRatio(TREND_TRADE.ACCOUNT_NAME, value);
+        await ensureTrendTradeSchema();
+        const current = await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+        if (current && current.maxPositions === value) {
+          return NextResponse.json({
+            ok: true,
+            maxPositions: value,
+            closed: 0,
+            skipped: 0,
+            note: `持仓数量已是 ${value}，未做变更`,
+          });
+        }
+        // 先自动平仓原有持仓（先平后开：被平仓的旧趋势周期不会立即重开，新仓只来自新确认周期）
+        const closed = await engine.autoTrader.closeAllManual();
+        await trendTradeRepo.updateMaxPositions(TREND_TRADE.ACCOUNT_NAME, value);
         return NextResponse.json({
           ok: true,
-          marginRatio: value,
-          note: `每笔开仓保证金已设为权益的 ${(value * 100).toFixed(0)}%（下一轮开仓决策生效）`,
+          maxPositions: value,
+          closed: closed.closed,
+          skipped: closed.skipped,
+          note: `持仓数量已设为 ${value}；已自动平仓 ${closed.closed} 笔原持仓${
+            closed.skipped > 0 ? `（${closed.skipped} 笔暂时未能平仓，将在下轮巡检重试）` : ''
+          }。每仓保证金改为「可用余额 ÷ 剩余仓位数」均分，新确认趋势按新口径开仓`,
         });
       }
       default:
         return NextResponse.json(
-          { ok: false, error: `未知操作：${body.action ?? '(空)'}；支持 start/pause/resume/closeAll/close/deposit/setMarginRatio` },
+          { ok: false, error: `未知操作：${body.action ?? '(空)'}；支持 start/pause/resume/closeAll/close/deposit/setMaxPositions` },
           { status: 400 },
         );
     }
