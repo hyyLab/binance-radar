@@ -414,3 +414,21 @@ Stage Summary:
 - 用户预期管理：默认算法仍是短周期套利（线上交易行为零变化）；UTE 在 UI 算法下拉可选，切换会先自动平仓清场再热装配（control API 既有语义）；UTE 控制台无参数可调（代码默认=纯确认制+走弱先走+2 轮上限），用户了解两算法区别后如需调参再按 docs §6.3 注册 DEFS（键前缀 UTE_ 不撞名）
 - 两算法核心区别（给用户的一句话）：短周期套利=确认+分数/ER 门槛+5m 背景分级+冲高落袋（在 UTE 之上加过滤）；通用趋势引擎=确认就做、确认在就拿、走弱才走（UTE 裸哲学）；同一信号源，决策层不同
 - 未验证假设：UTE 默认参数（ENTRY_MIN_SCORE=0 纯确认制）未做历史回放校准，切换后交易频率预计高于短周期套利（无 ER/背景/分数过滤）；轮次上限 2 与 60s 再入场间隔为防磨损护栏非优化值
+
+---
+Task ID: 63
+Agent: Super Z (main)
+Task: 历史交易两处展示改造——「费·滑」列换「算法」列（费用仅停逐行展示，口径全保留）+ 历史明细默认 10 条折叠展开 + 全量推送远端 binance-radar
+
+Work Log:
+- 实施前核对：trades API 行数据源自 TrendTradeMeta+PaperPosition，meta 表无 strategyId 独立列；grep 确认 executeOpen 自 Task 57 起把 strategy.id 写进 featuresAtOpen 快照 JSON（auto-trader.ts featuresAtOpen.strategyId）——历史行的算法信息天然已存在，无需改表/迁移
+- 算法列数据链（零 schema 变更、零引擎 bump、零重启）：trades route 从 featuresAtOpen JSON 提取 strategyId（快照损坏/缺失兜底 DEFAULT_STRATEGY_ID=short-swing-v1，Task 62 前唯一在线算法，历史事实正确）；registry.listStrategies() 建立 id→中文名映射（与 UI 算法下拉同源）；行新增 strategyId/strategyName；hook 类型 TrendTradeRow 同步（可选字段）
+- UI：TradeHeader「费·滑」→「算法」；TradeRow 费用格 → 算法名格（truncate + title 注明费用累计口径见统计卡）；API 保留 openFee/closeFee/slippageEst 字段（详情链还原与统计仍用）；顶部「累计手续费」统计卡保留（用户仅要求历史列替换）
+- 折叠：TrendTradeView 新增 historyExpanded 状态；列表默认 slice(0,10)，>10 条时底部按钮「展开更早的 N 条（共 M 条）/收起，仅显示最近 10 条」；筛选/排序/单笔详情/K 线弹窗交互全部不变
+- 验证：bun test 92/92 全绿；tsc 改动文件 0 错误；eslint 0；线上不重启热生效——/trend-trading 页面 200，trades API 实测 50 笔已平仓 = 短周期套利 40 + 通用趋势引擎 10（用户已切 UTE 运行，逐笔标注正确区分两算法）
+- 推送：GitHub API 先验证用户新提供的 fine-grained token（对 hyyLab/binance-radar 可写）→ remote origin 重挂（环境回滚曾抹掉 Task 52 的配置）→ main 全量推送（含历史 UUID 快照提交与 db 运行时数据，与 Task 52 惯例一致）；token 仅存 .git/config 本地，绝不写入仓库文件/worklog
+
+Stage Summary:
+- 交付：历史明细「算法」列（逐笔可辨开仓算法，混合算法历史首次可读）+ 默认 10 条折叠展开；费用信息在 API/详情/统计卡保留完整口径，仅逐行展示停掉
+- 关键设计：复用 featuresAtOpen.strategyId 快照（Task 57 起天然存在）实现零 DB 变更零 bump；未来若需按算法筛选/对比统计（如 UTE vs 短周期套利胜率），再把 strategyId 升为 TrendTradeMeta 独立列（PRAGMA 补列既有模式）
+- 红线遵守：未动引擎/未动手动盘/未重启 server；92 测试全绿；纯模拟不变

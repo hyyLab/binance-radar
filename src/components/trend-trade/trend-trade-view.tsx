@@ -329,6 +329,8 @@ export function TrendTradeView() {
   const [filterSymbol, setFilterSymbol] = useState('');
   const [sort, setSort] = useState<'time' | 'pnl'>('time');
   const [order, setOrder] = useState<'asc' | 'desc'>('desc');
+  // Task 63：历史明细默认只展示最近 10 条，其余折叠（一键展开/收起，避免列表过长刷屏）
+  const [historyExpanded, setHistoryExpanded] = useState(false);
   const history = useTrendTradeHistory(filterSymbol, sort, order);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TradeDetail | null>(null);
@@ -688,7 +690,7 @@ export function TrendTradeView() {
             {history.data && history.data.trades.length > 0 && (
               <div className="space-y-0.5">
                 <TradeHeader />
-                {history.data.trades.map((t) => (
+                {(historyExpanded ? history.data.trades : history.data.trades.slice(0, 10)).map((t) => (
                   <div key={t.positionId}>
                     <TradeRow t={t} onDetail={openDetail} onKline={(row) => setKline({ symbol: row.symbol, row })} />
                     {detailId === t.positionId && detail && (
@@ -726,6 +728,16 @@ export function TrendTradeView() {
                     )}
                   </div>
                 ))}
+                {history.data.trades.length > 10 && (
+                  <button
+                    onClick={() => setHistoryExpanded((v) => !v)}
+                    className="w-full rounded border border-border/60 bg-secondary/30 px-2 py-1 text-center text-[11px] text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground"
+                  >
+                    {historyExpanded
+                      ? '收起，仅显示最近 10 条'
+                      : `展开更早的 ${history.data.trades.length - 10} 条（共 ${history.data.trades.length} 条）`}
+                  </button>
+                )}
               </div>
             )}
             {history.data && history.data.trades.length === 0 && (
