@@ -481,10 +481,11 @@ export class AutoPaperTrader {
       }
 
       // ⑤ 开仓（仅 RUNNING 且数据新鲜；暂停/停止只停新开仓与待入场转换）
-      if (cfg.mode === 'RUNNING') {
-        await this.managePendings(bySymbol, cfg, eq); // 先转换已到期的待入场（等一根 K 线复核）
-        await this.manageEntries(cfg, signals, eq); // 再为策略想开仓的趋势创建待入场记录
+      if (cfg.mode === 'RUNNING' && !isEventDrivenStrategy(this.strategy)) {
+        await this.managePendings(bySymbol, cfg, eq); // 趋势策略：先转换已到期的待入场
+        await this.manageEntries(cfg, signals, eq); // 趋势策略：再扫描趋势池信号
       }
+      // MAJOR P1 策略由独立的 2s 事件扫描器直接执行，不消费趋势池信号或二次确认待入场。
       this.lastError = null;
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
@@ -548,9 +549,36 @@ export class AutoPaperTrader {
    */
   private async manageExits(bySymbol: Map<string, UnifiedTrendSignal>): Promise<void> {
     const openMetas = await this.repo.loadMetasByStatus('OPEN');
+    const eventDriven = isEventDrivenStrategy(this.strategy);
     for (const meta of openMetas) {
       const signal = bySymbol.get(meta.symbol);
-      if (!signal) continue; // 信号缺失（标的退池/未评估）：不误平仓，仅强平/人工管理
+      if (eventDriven) {
+        // 事件驱动持仓不受 UTE ENDED/END_PENDING/反向确认规则管理；由该算法自己的
+        // 突破失效、硬止损、保本与移动止盈规则管理。信号可以缺失，因为标的无需在趋势池。
+        const mark = this.deps.markPrice(meta.symbol);
+        if (!(mark > 0)) continue;
+        const pos = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
+        if (!pos || pos.status !== 'OPEN') continue;
+        const verdict = this.strategy.evaluateExit({
+          meta,
+          pos: {
+            entryPrice: pos.entryPrice,
+            qty: pos.qty,
+            margin: pos.margin,
+            side: meta.side as 'LONG' | 'SHORT',
+            openedAt: pos.openedAt instanceof Date ? pos.openedAt.getTime() : Number(pos.openedAt),
+          },
+          mark,
+          signal: signal ?? null,
+          now: Date.now(),
+        });
+        if (verdict.exit && verdict.reason) {
+          logDecision(`策略离场 [${this.strategy.id}] ${verdict.detail} positionId=${meta.positionId}`);
+          await this.closePosition(meta, verdict.reason, signal ?? null);
+        }
+        continue;
+      }
+      if (!signal) continue; // 普通趋势策略：信号缺失（退池/未评估）不误平仓
       const favorable = meta.side === 'LONG' ? signal.direction === 'up' : signal.direction === 'down';
 
       // ① 趋势已结束（ENDED）→ 周期匹配 + 证据时序校验后自行平仓
