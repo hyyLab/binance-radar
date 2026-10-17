@@ -122,6 +122,21 @@ function cooldownOf(cfg: TrendAutoConfigRow): number {
   return cfg.cooldownMs ?? TREND_TRADE.COOLDOWN_MS;
 }
 
+type EventDrivenStrategy = TrendStrategy & {
+  readonly eventDriven: true;
+  evaluateEventEntry: NonNullable<TrendStrategy['evaluateEventEntry']>;
+};
+
+function isEventDrivenStrategy(strategy: TrendStrategy): strategy is EventDrivenStrategy {
+  return strategy.eventDriven === true && typeof strategy.evaluateEventEntry === 'function';
+}
+
+interface EventBarsCache {
+  loadedAt: number;
+  retryAfter: number;
+  bars: TrendCandle[];
+}
+
 export class AutoPaperTrader {
   private readonly deps: AutoTraderDeps;
   private readonly repo: TrendTradeRepo;
@@ -135,6 +150,10 @@ export class AutoPaperTrader {
   private starting: Promise<void> | null = null;
   private stopped = false;
   private timer: ReturnType<typeof setInterval> | null = null;
+  /** MAJOR P1 事件入场轮询：2s 一次，不改变原有 10s 趋势策略主循环。 */
+  private eventTimer: ReturnType<typeof setInterval> | null = null;
+  private eventTicking = false;
+  private readonly eventBarsCache = new Map<string, EventBarsCache>();
   /** 引擎启动时刻（engine.stats 摘要用；0 = 未启动） */
   startedAt = 0;
   private lastTickAt = 0;
@@ -211,7 +230,10 @@ export class AutoPaperTrader {
     // 3) reconcile：修复崩溃窗口（开仓成功但 meta 未写 / 平仓成功但 meta 未关）
     await this.reconcile();
     // 4) 主循环（独立持续风险检查任务：无页面访问也照常巡检强平与管理持仓）
-    if (!this.noTimer) this.timer = setInterval(() => void this.tick(), TREND_TRADE.SCAN_MS);
+    if (!this.noTimer) {
+      this.timer = setInterval(() => void this.tick(), TREND_TRADE.SCAN_MS);
+      this.eventTimer = setInterval(() => void this.eventTick(), 2_000);
+    }
   }
 
   /**
@@ -328,7 +350,9 @@ export class AutoPaperTrader {
     this.stopped = true;
     this.started = false;
     if (this.timer) clearInterval(this.timer);
+    if (this.eventTimer) clearInterval(this.eventTimer);
     this.timer = null;
+    this.eventTimer = null;
   }
 
   /**
