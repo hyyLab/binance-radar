@@ -71,6 +71,10 @@ export class EnhancedEngine {
       getSignals: () => this.trendWatch.latestSignals(),
       markPrice: (symbol) =>
         activeFuturesCollector().getTickers().find((t) => t.symbol === symbol)?.price ?? 0,
+      getActiveEvents: (now) => this.events(now).active,
+      getCandles: (symbol, lookbackMs, now) => this.store.closedCandles(symbol, lookbackMs, now),
+      quoteVolume24h: (symbol) =>
+        activeFuturesCollector().getTickers().find((t) => t.symbol === symbol)?.quoteVolume24h ?? 0,
     });
   }
 
@@ -495,7 +499,11 @@ function spikeFixedLabel(d: Detection): string {
   return `vol×${d.magnitude.toFixed(1)}`;
 }
 
-// ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// ============ 单例（globalThis 驻留，HMR 不重复启动） ==========
+// v21（Task 69）：重大异动突破 v1——MAJOR P1 事件独立入口（不依赖趋势池/UTE），
+//   1 秒事件循环、直接模拟入场、平台/加速/假突破分类、结构止损/硬止损/移动止盈，
+//   同一事件按新价格位移允许再次入场；复用公共模拟成交、资金、手续费、滑点、幂等与强平。
+//   改行为必 bump key。==
 // v20（Task 68）：两算法二轮定版——①通用趋势引擎长周期化（用户「持仓时间太短，它是长周期
 //   模型」）：WEAKNESS_EXIT_EARLY 默认 false（走弱迹象不离场，持有到 ENDED/反向）、硬止损
 //   1.0→1.5%（住进生命周期容忍带 0.875% 之外）、移动止盈 15/8→30/20（1.5% 价格启动保护 /
@@ -597,6 +605,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v18?: EnhancedEngine; // v18（Task 66）：两算法复盘定版（顺势化 + 方向选择确认制 + 三层离场）
   __binanceRadarEnhanced_v19?: EnhancedEngine; // v19（Task 67）：仓位划分按配置舱位数（1 舱满配 95%、N 舱各 95%/N）
   __binanceRadarEnhanced_v20?: EnhancedEngine; // v20（Task 68）：UTE 长周期化 + short-swing 再入场解禁
+  __binanceRadarEnhanced_v21?: EnhancedEngine; // v21（Task 69）：MAJOR P1 event-driven breakout
 };
 
 function pickLegacyEngine(
@@ -621,9 +630,11 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v18?: EnhancedEngine;
     __binanceRadarEnhanced_v19?: EnhancedEngine;
     __binanceRadarEnhanced_v20?: EnhancedEngine;
+    __binanceRadarEnhanced_v21?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v21 ??
     g.__binanceRadarEnhanced_v20 ??
     g.__binanceRadarEnhanced_v19 ??
     g.__binanceRadarEnhanced_v18 ??
@@ -674,20 +685,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v20;
+  const existing = g.__binanceRadarEnhanced_v21;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v20 = fresh;
+  g.__binanceRadarEnhanced_v21 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v20 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v21 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v20 = fresh;
+  g.__binanceRadarEnhanced_v21 = fresh;
   return fresh;
 }

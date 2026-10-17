@@ -14,7 +14,8 @@
 // - 未在 DEFS 中的键一律拒绝（防止拼错键名造成「看起来生效了」的错觉）。
 
 import { TREND_TRADE } from './config';
-import { SHORT_SWING, type ShortSwingParams } from './strategy/short-swing';
+import { SHORT_SWING } from './strategy/short-swing';
+import { MAJOR_P1_BREAKOUT } from './strategy/major-p1-breakout';
 
 /** 解析 DB strategyParamsJson（{ [strategyId]: 覆盖项 }；损坏/格式不对返回空 map——参数回退代码默认） */
 export function parseStrategyParamsMap(
@@ -93,7 +94,7 @@ export const PARAM_DEFS: ParamDef[] = [
   {
     key: 'waitBarConfirm', scope: 'infra', group: '入场时机（滞后调节）',
     label: '等待下一根收盘K线二次确认', type: 'boolean', default: true,
-    desc: '开：策略想开仓后先记「待入场」，等下一根已收盘 K 线复核仍达标才真正开仓（多等 1 根，防一根 K 线的噪声/插针）。关：达标当根即直接开仓（快 1 根 K 线，少一层防护）。1m 趋势确认本身固定需要 3 根已收盘 K 线，本开关只影响确认之后的等待。',
+    desc: '通用趋势算法：开则等待下一根已收盘 K 线复核，关则当根直接开仓。重大异动突破使用独立 MAJOR P1 事件入口，直接入场，不受此开关约束。',
     effect: '关 = 入场快约 1 根 K 线，但假信号直接进场；开 = 慢 1 根，进场质量更高（默认开）',
   },
   {
@@ -160,12 +161,136 @@ export const PARAM_DEFS: ParamDef[] = [
     desc: '开：1m 方向与 5m 背景相反时也允许入场（真正的纯短周期博弈）。关：5m 反向一律拒绝（不做逆势，用户定版默认）。',
     effect: '开 = 单量变多但胜率结构变差（逆势单）；默认关——短周期套利不做逆势',
   },
+  // ===== MAJOR P1 · 事件触发与流动性 =====
+  {
+    key: 'MP1_MAX_P1_AGE_MS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '重大异动 · 触发与流动性',
+    label: 'P1 新鲜窗口', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_MAX_P1_AGE_MS,
+    min: 2_000, max: 60_000, step: 1_000, unit: 'ms',
+    desc: '首次入场只接收刚进入 P1 的事件；同一事件后续轮次由新位移条件控制，不受本窗口限制。',
+    effect: '调大 → 更晚也允许首次入场、追价风险上升；调小 → 更接近第一时间入场，但更容易漏过处理延迟',
+  },
+  {
+    key: 'MP1_MIN_QV24H', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '重大异动 · 触发与流动性',
+    label: '24h 最低成交额', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_MIN_QV24H,
+    min: 1_000_000, max: 500_000_000, step: 1_000_000, unit: 'USDT',
+    desc: '仅交易达到最低 24h 成交额的 USDT 本位合约，降低薄盘口假突破和滑点风险。',
+    effect: '调大 → 更偏向高流动性标的；调小 → 机会增多但成交质量风险增加',
+  },
+  {
+    key: 'MP1_MIN_QV1M', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '重大异动 · 触发与流动性',
+    label: '事件最低 1m 成交额', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_MIN_QV1M,
+    min: 10_000, max: 5_000_000, step: 10_000, unit: 'USDT',
+    desc: '事件一分钟计价成交额下限，用于过滤低参与度的尖刺价格变动。',
+    effect: '调大 → 过滤更多低参与度异动；调小 → 成交额较低的事件会增多',
+  },
+  // ===== MAJOR P1 · 平台突破形态 =====
+  {
+    key: 'MP1_PLATFORM_LOOKBACK_BARS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '平台突破形态',
+    label: '平台观察 K 线数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_LOOKBACK_BARS,
+    min: 10, max: 60, step: 1, unit: '根 1m K 线',
+    desc: '使用事件发生前已收盘的 1m K 线识别平台，不使用当前未收盘 K 线。',
+    effect: '调大 → 结构更稳定但反应更慢；调小 → 更敏感但容易把短暂停顿识别成平台',
+  },
+  {
+    key: 'MP1_PLATFORM_MAX_RANGE_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '平台突破形态',
+    label: '平台最大区间幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_MAX_RANGE_PCT,
+    min: 2, max: 20, step: 0.5, unit: '%',
+    desc: '观察区间最高价与最低价的相对幅度上限。首版允许加密合约相对宽的整理平台。',
+    effect: '调大 → 更多结构会被视为平台；调小 → 只接受更紧凑的区间',
+  },
+  {
+    key: 'MP1_PLATFORM_MAX_DRIFT_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '平台突破形态',
+    label: '平台最大净漂移', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_MAX_DRIFT_PCT,
+    min: 0.5, max: 8, step: 0.25, unit: '%',
+    desc: '回看窗口首尾价格净位移上限；净位移过大时更可能是既有趋势加速，而不是横盘后的方向选择。',
+    effect: '调大 → 更宽松地识别平台；调小 → 只接受净方向较弱的整理结构',
+  },
+  {
+    key: 'MP1_PLATFORM_BREAK_MIN_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '平台突破形态',
+    label: '平台突破最小超越幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_PLATFORM_BREAK_MIN_PCT,
+    min: 0.1, max: 2.5, step: 0.05, unit: '%',
+    desc: '当前价至少越过此前平台边界该幅度，才将 MAJOR P1 标记为平台突破型；不足时归入加速/普通动量分类。',
+    effect: '调大 → 只交易更明确的越界突破；调小 → 更多边界附近的异动会被归类为突破',
+  },
+  {
+    key: 'MP1_ACCELERATION_MIN_DRIFT_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '平台突破形态',
+    label: '加速型最小净位移', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_ACCELERATION_MIN_DRIFT_PCT,
+    min: 1, max: 12, step: 0.25, unit: '%',
+    desc: '既有趋势净位移或事件瞬时涨跌幅达到加速条件后，按加速型处理并降低保证金预算。',
+    effect: '调大 → 加速型更少；调小 → 更多事件被归为加速型并采用小仓位',
+  },
+  // ===== MAJOR P1 · 结构止损与硬止损 =====
+  {
+    key: 'MP1_BREAKOUT_FAILURE_BACK_IN_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构止损与硬止损',
+    label: '突破失效缓冲', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_BREAKOUT_FAILURE_BACK_IN_PCT,
+    min: 0.2, max: 2.5, step: 0.05, unit: '%',
+    desc: '价格越过原平台边界反向进入一定幅度，并连续多次确认，才按结构失效退出；过滤单次影线回踩。',
+    effect: '调大 → 更能容忍回踩、但假突破亏损可能扩大；调小 → 更快退出、也更容易被洗出',
+  },
+  {
+    key: 'MP1_HARD_STOP_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构止损与硬止损',
+    label: '平台型硬止损', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_HARD_STOP_PCT,
+    min: 0.8, max: 6, step: 0.1, unit: '% 价格',
+    desc: '平台突破仓位的最大逆向价格变动；结构失效条件可以更早退出。默认 2.2%，扩大了正常加密波动空间。',
+    effect: '调大 → 容忍更深逆行、单笔亏损增大；调小 → 更快限亏但更易被噪声止损',
+  },
+  {
+    key: 'MP1_ACCEL_HARD_STOP_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '结构止损与硬止损',
+    label: '加速型硬止损', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_ACCEL_HARD_STOP_PCT,
+    min: 0.8, max: 5, step: 0.1, unit: '% 价格',
+    desc: '加速行情的最大逆向价格变动，略紧于平台型，因为追入加速段更容易处于脉冲后段。',
+    effect: '调大 → 容忍更深逆行；调小 → 更快退出但更易被正常回撤洗出',
+  },
+  // ===== MAJOR P1 · 浮盈保护与止盈 =====
+  {
+    key: 'MP1_TRAIL_START_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '浮盈保护与止盈',
+    label: '移动止盈启动幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_TRAIL_START_PCT,
+    min: 0.8, max: 10, step: 0.1, unit: '% 价格',
+    desc: '标的价格顺向运行达到该阈值后开始保护浮盈，不因 UTE 分数轻微下降直接退出。',
+    effect: '调大 → 让利润跑得更远但回吐可能更大；调小 → 更早启动浮盈保护',
+  },
+  {
+    key: 'MP1_TRAIL_GAP_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '浮盈保护与止盈',
+    label: '峰值回撤落袋距离', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_TRAIL_GAP_PCT,
+    min: 0.4, max: 5, step: 0.1, unit: '% 价格',
+    desc: '顺向价格峰值达到启动线后，从峰值回撤达到该距离则落袋。距离为价格百分点，不是保证金收益率。',
+    effect: '调大 → 更能容忍回撤但回吐可能更大；调小 → 更早落袋但可能截断延续行情',
+  },
+  {
+    key: 'MP1_ACCEL_TAKE_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '浮盈保护与止盈',
+    label: '加速型固定兑现阈值', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_ACCEL_TAKE_PCT,
+    min: 1, max: 15, step: 0.25, unit: '% 价格',
+    desc: '加速型达到该顺向价格幅度后直接兑现；平台突破型不使用这条固定目标，以免提前截断突破延续。',
+    effect: '调大 → 加速仓持有更久；调小 → 更快兑现急拉急砸利润',
+  },
+  // ===== MAJOR P1 · 同事件再入场 =====
+  {
+    key: 'MP1_REENTRY_MOVE_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '同事件再入场',
+    label: '再次入场最小新位移', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_REENTRY_MOVE_PCT,
+    min: 0.5, max: 8, step: 0.25, unit: '% 价格',
+    desc: '同一 P1 事件平仓后，不使用固定 5 分钟冷却；价格需从上次退出价沿新交易方向产生该幅度的新位移，才允许同方向再入。',
+    effect: '调大 → 同事件再入场更少；调小 → 更快跟随新脉冲，但重复磨损风险增加',
+  },
+  {
+    key: 'MP1_MAX_ROUNDS_PER_EVENT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '同事件再入场',
+    label: '每个 P1 事件最大轮次', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_MAX_ROUNDS_PER_EVENT,
+    min: 1, max: 20, step: 1, unit: '轮',
+    desc: '同一事件内按新的价格位移允许多轮交易，但设置总轮次上限，避免震荡里无限重复进出。',
+    effect: '调大 → 同事件允许更多脉冲交易；调小 → 更早停止同一事件内的重复交易',
+  },
+  {
+    key: 'MP1_STRUCTURE_FAIL_OBSERVATIONS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: '同事件再入场',
+    label: '结构失效确认次数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1_STRUCTURE_FAIL_OBSERVATIONS,
+    min: 1, max: 5, step: 1, unit: '次',
+    desc: '价格进入平台失效区间后，要求连续多少次退出评估都满足条件才平仓，避免单次影线引发退出。',
+    effect: '调大 → 更多容忍短时回撤；调小 → 更快退出疑似假突破',
+  },
   // ===== G · 节奏（基础设施） =====
   {
     key: 'cooldownMs', scope: 'infra', group: '节奏（基础设施）',
     label: '同币种平仓后冷却', type: 'number', default: TREND_TRADE.COOLDOWN_MS,
     min: 0, max: 30 * 60_000, step: 30_000, unit: 'ms',
-    desc: '同一币种平仓后该时长内新信号只记录不执行，到期后重走完整门槛。防止同一波行情刚平仓又立刻反向追。',
+    desc: '通用趋势算法的同币种平仓冷却。重大异动突破不使用固定冷却，而要求同事件出现新的价格位移或确认的假突破反向证据。',
     effect: '调小 → 平仓后更快允许再进；0 = 无冷却（磨损风险自担）；调大 → 更保守',
   },
   // ===== H · 仓位与资金（基础设施；Task 58） =====
@@ -280,7 +405,7 @@ export function sanitizeRuntimeParamsLenient(
  */
 export interface SanitizedRuntimeParams {
   /** 策略域覆盖项（干净、仅含合法键——存什么用什么） */
-  strategyParams: ShortSwingParams;
+  strategyParams: Record<string, unknown>;
   waitBarConfirm?: number;
   cooldownMs?: number;
   /** 每仓保证金比例（Task 58；TrendAutoConfig.marginRatio 列，NOT NULL DEFAULT 0.2） */

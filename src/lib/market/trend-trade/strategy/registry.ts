@@ -8,18 +8,21 @@
 // │ id                  │ 名称       │ 一句话定位
 // │ short-swing-v1      │ 短周期套利  │ 默认算法：确认+评分/ER 门槛+5m 背景分级+冲高落袋
 // │ universal-trend-v1  │ 通用趋势引擎│ 最开始的 UTE 长周期跟随：确认+方向选择证据才入场、确认在就拿满周期、走弱不离场
+// │ major-p1-breakout-v1│ 重大异动突破│ MAJOR P1 事件驱动；平台突破优先，加速型缩小风险预算
 // ────────────────────────────────────────────────────────────────
 // 默认算法保持 short-swing-v1（Task 62 用户定版：UTE 先上架可选，控制台暂用
 // 其代码默认参数；切换在 UI 算法下拉进行，切换前自动平仓清场由 control API 负责）。
 
 import { ShortSwingStrategy, type ShortSwingParams } from './short-swing';
 import { UniversalTrendStrategy, type UniversalTrendParams } from './universal-trend';
+import { MajorP1BreakoutStrategy, type MajorP1BreakoutParams } from './major-p1-breakout';
 import type { StrategyDescriptor, TrendStrategy } from './types';
 
 /** 策略工厂表（id → 实例构造；params 为已校验的覆盖项，键随策略自解释） */
 const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => TrendStrategy> = {
   'short-swing-v1': (p) => new ShortSwingStrategy(p as ShortSwingParams | undefined),
   'universal-trend-v1': (p) => new UniversalTrendStrategy(p as UniversalTrendParams | undefined),
+  'major-p1-breakout-v1': (p) => new MajorP1BreakoutStrategy(p as MajorP1BreakoutParams | undefined),
 };
 
 /** 默认策略（TrendAutoConfig.strategyId 播种值；不存在/未知 id 时兜底） */

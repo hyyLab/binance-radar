@@ -13,6 +13,8 @@
 //   再进，用户定版），每轮决策/待入场键 = `{cycleId}#R{round}`，轮次上限由策略约束。
 
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
+import type { Candle1m } from '../../enhanced/klines';
+import type { EnhancedEventDTO } from '../../enhanced/types';
 import type { TrendExitReason } from '../config';
 import type { TrendAutoConfigRow, TrendTradeMetaRow } from '../repo';
 
@@ -41,6 +43,22 @@ export interface StrategyEntryVerdict {
   modeTag: string;
   /** 拒绝原因或入场理由（中文，进审计日志） */
   reason: string;
+  /** Fraction of configured per-position margin; event strategies may reduce this by shape. */
+  riskMultiplier?: number;
+}
+
+/** Direct event data for strategies triggered by live MAJOR P1 anomalies rather than UTE signals. */
+export interface StrategyMajorEventEntryInput {
+  event: EnhancedEventDTO;
+  candles: Candle1m[];
+  quoteVolume24h: number;
+  ctx: StrategyMarketCtx;
+}
+
+/** Event entry has an event-scoped idempotency cycle and an audit snapshot. */
+export interface StrategyMajorEventEntryVerdict extends StrategyEntryVerdict {
+  eventCycleId: string;
+  metadata: Record<string, unknown>;
 }
 
 /** 持仓上下文（策略离场评估用；来自 PaperPosition 当前快照） */
@@ -70,6 +88,10 @@ export interface TrendStrategy {
   readonly name: string;
   /** 一句话说明（UI 悬浮提示） */
   readonly description: string;
+  /** True when entry is driven by live anomaly events instead of trend-pool signals. */
+  readonly eventDriven?: boolean;
+  /** Optional event-driven entry path; shared AutoPaperTrader still owns execution and safety. */
+  evaluateMajorEventEntry?(input: StrategyMajorEventEntryInput): StrategyMajorEventEntryVerdict | null;
 
   /**
    * 行情采样：每 tick 对池内/持仓 symbol 调用（mark>0 才会调用）。
@@ -99,7 +121,7 @@ export interface TrendStrategy {
   onOpen(symbol: string, cycleId: string, barTime: number | null, now: number): void;
 
   /** 平仓成功回调（保留轮次状态供再入场判定；记录离场时刻/原因） */
-  onClose(symbol: string, cycleId: string, reason: string, now: number): void;
+  onClose(symbol: string, cycleId: string, reason: string, now: number, exitPrice?: number): void;
 
   /** 导出全部 symbol 状态（持久化到 TrendStrategyState；重启恢复轮次语义） */
   exportState(): Record<string, unknown>;

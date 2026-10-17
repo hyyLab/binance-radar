@@ -10,7 +10,8 @@ src/lib/market/trend-trade/strategy/
 ├── types.ts             # TrendStrategy 接口（你要 implements 的契约）
 ├── registry.ts          # 注册表（新算法在这里登记一行，UI 下拉自动出现）
 ├── short-swing.ts       # 短周期套利（默认算法，最完整的参考实现）
-└── universal-trend.ts   # 通用趋势引擎（最短骨架，复制它起步最快）
+├── universal-trend.ts   # 通用趋势引擎（趋势池/UTE 驱动）
+└── major-p1-breakout.ts # 重大异动突破（MAJOR P1 事件驱动，不依赖趋势池）
 ```
 
 ## 1. 写算法文件（复制 universal-trend.ts → 你的算法.ts）
@@ -83,20 +84,21 @@ const STRATEGY_FACTORIES = {
 
 ## 4. 上线：bump 引擎单例（不重启 server！）
 
-运行中的 auto-trader 是旧模块图的实例，必须让它退役重建。`src/lib/market/enhanced/engine.ts`：
+运行中的 auto-trader 是旧模块图的实例，必须让它退役重建。对于 MAJOR P1 事件驱动算法，不能只实现 `TrendStrategy.evaluateEntry`：
+还需在 `AutoTraderDeps` 接入活动异动事件与已收盘 K 线，并在 `AutoPaperTrader` 增加独立事件扫描/直接入场路径。
+公共执行层仍统一管理资金、手续费、滑点、幂等和强平。
 
-- 全局键 `__binanceRadarEnhanced_v16` → `v17`（类型声明 + getEngine 存取 + 遗留交接链，共 4 处）
-- 头部版本注释链加一行 v17 说明
+当前引擎单例为 `__binanceRadarEnhanced_v20`；本次需升为 `v21`（类型声明、legacy 链和 get/reset 存取全部同步修改）。
 
 保存后热重载自动生效。**验证：**
 
 ```bash
 curl -s http://localhost:3000/api/trend-trading | jq '.config.strategies'
-# 出现 {"id":"my-algo-v1","name":"我的算法",...} 即注册成功
+# 出现 {"id":"major-p1-breakout-v1","name":"重大异动突破",...} 即注册成功
 ```
 
-UI：算法下拉出现新名字 → 确认框切换 → 控制台出现你的参数分组 →
-改一个值保存 → 日志出现「参数控制台：策略参数已更新并热应用」→ 生效。
+UI：算法下拉出现新名字 → 切换并确认 → 控制台出现「重大异动」参数分组 → 保存参数 → 日志出现 MAJOR P1 事件入场记录。
+
 
 ## 参数保存后去了哪（链路，排障用）
 
