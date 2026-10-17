@@ -12,7 +12,9 @@
 // - 轮次（round）：同一 trendCycleId 内允许多轮「开仓→平仓→再入场」（走弱先走、走强
 //   再进，用户定版），每轮决策/待入场键 = `{cycleId}#R{round}`，轮次上限由策略约束。
 
+import type { EnhancedEventDTO } from '../../enhanced/types';
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
+import type { TrendCandle } from '../../trend-watch/types';
 import type { TrendExitReason } from '../config';
 import type { TrendAutoConfigRow, TrendTradeMetaRow } from '../repo';
 
@@ -29,6 +31,9 @@ export interface StrategyMarketCtx {
   openSymbols: Set<string>;
   /** 该 symbol 最近一次平仓时刻（ms；null = 从未平仓） */
   lastCloseAt: number | null;
+  /** 事件驱动算法可读取的行情快照（趋势策略可忽略）。 */
+  quoteVolume24h?: number | null;
+  marketUpdatedAt?: number | null;
 }
 
 /** 入场评估结论 */
@@ -53,6 +58,16 @@ export interface StrategyPositionCtx {
   openedAt: number;
 }
 
+/** 事件触发型算法的入场结论。signal 用于复用共享模拟成交和审计结构，不代表 UTE 确认。 */
+export interface StrategyEventEntryVerdict extends StrategyEntryVerdict {
+  /** 稳定事件周期 ID，用于共享数据库幂等键和策略轮次状态 */
+  cycleId: string | null;
+  /** 本次开仓保证金相对基础设施预算的缩放系数（1 = 常规预算） */
+  marginScale: number;
+  /** 事件触发构造的审计信号；只在 want=true 时存在 */
+  signal: (UnifiedTrendSignal & { breakoutTrade?: Record<string, unknown> }) | null;
+}
+
 /** 离场评估结论 */
 export interface StrategyExitVerdict {
   exit: boolean;
@@ -70,6 +85,17 @@ export interface TrendStrategy {
   readonly name: string;
   /** 一句话说明（UI 悬浮提示） */
   readonly description: string;
+  /** true = 事件触发模式；入场不消费趋势池信号，执行独立事件扫描。 */
+  readonly eventDriven?: boolean;
+  /**
+   * 可选的事件驱动入口。普通趋势策略不实现此方法；事件策略由 AutoPaperTrader 直接调用，
+   * 绕过趋势池和下一根收盘 K 线二次确认，但仍使用同一模拟成交/资金/审计基础设施。
+   */
+  evaluateEventEntry?(
+    event: EnhancedEventDTO,
+    candles: TrendCandle[],
+    ctx: StrategyMarketCtx,
+  ): StrategyEventEntryVerdict;
 
   /**
    * 行情采样：每 tick 对池内/持仓 symbol 调用（mark>0 才会调用）。
