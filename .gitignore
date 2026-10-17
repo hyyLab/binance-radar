@@ -61,3 +61,4 @@ db/trend-trade-test.db
 scripts/replay/data/
 tool-results/
 /*.png
+/db/*.bak
