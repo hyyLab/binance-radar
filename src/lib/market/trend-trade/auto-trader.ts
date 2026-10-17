@@ -33,6 +33,7 @@
 
 import { db } from '@/lib/db';
 import { PaperError, PaperEngine, paperEngineFor } from '../paper';
+import type { EnhancedEventDTO } from '../enhanced/types';
 import type { UnifiedTrendSignal } from '../trend-watch/signal';
 import { TREND_WATCH } from '../trend-watch/config';
 import {
@@ -55,8 +56,10 @@ import type { StrategyEntryVerdict, StrategyMarketCtx, TrendStrategy } from './s
 import { parseStrategyParamsMap, sanitizeRuntimeParamsLenient } from './console-params';
 
 export interface AutoTraderDeps {
-  /** 统一趋势信号（trendWatch.latestSignals——唯一趋势来源） */
+  /** 统一趋势信号（普通趋势策略消费；事件算法不依赖趋势池） */
   getSignals(): UnifiedTrendSignal[];
+  /** 可选的原始活动异动事件，供 MAJOR P1 事件驱动算法直接消费 */
+  getEvents?(now: number): { active: EnhancedEventDTO[]; ended: EnhancedEventDTO[] };
   /** 标记价（合约多源供价） */
   markPrice(symbol: string): number;
 }
@@ -155,6 +158,16 @@ export class AutoPaperTrader {
 
   private readonly noTimer: boolean;
 
+  private isEventDrivenStrategy(): boolean {
+    return typeof this.strategy.evaluateAnomalyEntry === 'function';
+  }
+
+  private rescheduleTimer(): void {
+    if (this.noTimer || !this.timer) return;
+    clearInterval(this.timer);
+    this.timer = setInterval(() => void this.tick(), this.strategy.scanIntervalMs ?? TREND_TRADE.SCAN_MS);
+  }
+
   // ============ 生命周期 ============
 
   async ensureStarted(): Promise<void> {
@@ -206,7 +219,7 @@ export class AutoPaperTrader {
     // 3) reconcile：修复崩溃窗口（开仓成功但 meta 未写 / 平仓成功但 meta 未关）
     await this.reconcile();
     // 4) 主循环（独立持续风险检查任务：无页面访问也照常巡检强平与管理持仓）
-    if (!this.noTimer) this.timer = setInterval(() => void this.tick(), TREND_TRADE.SCAN_MS);
+    if (!this.noTimer) this.timer = setInterval(() => void this.tick(), this.strategy.scanIntervalMs ?? TREND_TRADE.SCAN_MS);
   }
 
   /**
@@ -239,6 +252,7 @@ export class AutoPaperTrader {
       // 恢复失败从空状态开始（轮次按首次处理，保守不丢单）
     }
     this.strategy = s;
+    this.rescheduleTimer();
   }
 
   /**
@@ -453,8 +467,14 @@ export class AutoPaperTrader {
 
       // ⑤ 开仓（仅 RUNNING 且数据新鲜；暂停/停止只停新开仓与待入场转换）
       if (cfg.mode === 'RUNNING') {
-        await this.managePendings(bySymbol, cfg, eq); // 先转换已到期的待入场（等一根 K 线复核）
-        await this.manageEntries(cfg, signals, eq); // 再为策略想开仓的趋势创建待入场记录
+        if (this.isEventDrivenStrategy()) {
+          // 重大异动算法不使用趋势池、固定冷却或下一根已收盘 K 线二次确认。
+          await this.cancelActivePendingsForEventDrivenStrategy();
+          await this.manageAnomalyEntries(cfg, eq);
+        } else {
+          await this.managePendings(bySymbol, cfg, eq);
+          await this.manageEntries(cfg, signals, eq);
+        }
       }
       this.lastError = null;
     } catch (e) {
@@ -519,47 +539,34 @@ export class AutoPaperTrader {
    */
   private async manageExits(bySymbol: Map<string, UnifiedTrendSignal>): Promise<void> {
     const openMetas = await this.repo.loadMetasByStatus('OPEN');
+    const eventDriven = this.isEventDrivenStrategy();
     for (const meta of openMetas) {
-      const signal = bySymbol.get(meta.symbol);
-      if (!signal) continue; // 信号缺失（标的退池/未评估）：不误平仓，仅强平/人工管理
-      const favorable = meta.side === 'LONG' ? signal.direction === 'up' : signal.direction === 'down';
+      const signal = bySymbol.get(meta.symbol) ?? null;
+      if (!signal && !eventDriven) continue;
 
-      // ① 趋势已结束（ENDED）→ 周期匹配 + 证据时序校验后自行平仓
-      if (signal.phase === 'ENDED') {
-        if (!signal.trendCycleId || signal.trendCycleId !== meta.trendCycleId) {
-          // 旧周期 ENDED 归属他人——不得据此平掉本周期持仓
-          logDecision(
-            `离场跳过 ENDED 周期不匹配 symbol=${meta.symbol} posCycle=${meta.trendCycleId} ` +
-              `signalCycle=${signal.trendCycleId ?? '-'} positionId=${meta.positionId}`,
-          );
+      // 普通趋势策略保留 UTE 生命周期管理；事件算法不由趋势池 / UTE 决定离场。
+      if (!eventDriven && signal) {
+        if (signal.phase === 'ENDED') {
+          if (!signal.trendCycleId || signal.trendCycleId !== meta.trendCycleId) {
+            logDecision(`离场跳过 ENDED 周期不匹配 symbol=${meta.symbol} posCycle=${meta.trendCycleId} signalCycle=${signal.trendCycleId ?? '-'}`);
+            continue;
+          }
+          const entryBar = this.entryBarTimeOf(meta);
+          if (entryBar != null && signal.lastBarTime != null && signal.lastBarTime <= entryBar) {
+            logDecision(`离场跳过结束证据未晚于开仓K线 symbol=${meta.symbol} positionId=${meta.positionId}`);
+            continue;
+          }
+          await this.closePosition(meta, 'TREND_ENDED', signal);
           continue;
         }
-        const entryBar = this.entryBarTimeOf(meta);
-        if (entryBar != null && signal.lastBarTime != null && signal.lastBarTime <= entryBar) {
-          // 结束证据未出现「开仓之后的新收盘 K 线」——不得平仓
-          logDecision(
-            `离场跳过 证据K线未晚于开仓K线 symbol=${meta.symbol} posCycle=${meta.trendCycleId} ` +
-              `entryBar=${entryBar} signalBar=${signal.lastBarTime} positionId=${meta.positionId}`,
-          );
-          continue;
-        }
-        await this.closePosition(meta, 'TREND_ENDED', signal);
-        continue;
-      }
-
-      // ② 本周期出现结束迹象（模型已报警）→ 只记录首次报警时刻；是否提前离场由策略决定
-      if (signal.phase === 'END_PENDING' && signal.trendCycleId === meta.trendCycleId) {
-        if (signal.endPendingSince != null && meta.firstEndSignAt == null) {
+        if (signal.phase === 'END_PENDING' && signal.trendCycleId === meta.trendCycleId &&
+            signal.endPendingSince != null && meta.firstEndSignAt == null) {
           await this.repo.markFirstEndSign(meta.positionId, signal.endPendingSince);
-          logDecision(
-            `结束迹象首次报警（是否提前离场由策略「${this.strategy.name}」决定） ` +
-              `symbol=${meta.symbol} posCycle=${meta.trendCycleId} ev=${signal.endEvidenceBars} ` +
-              `positionId=${meta.positionId}`,
-          );
+          logDecision(`趋势出现结束迹象，是否提前离场由策略「${this.strategy.name}」决定 symbol=${meta.symbol}`);
         }
       }
 
-      // ③ 策略离场（SPIKE_TAKE 冲高套利 / WEAKNESS_EARLY 走弱先走；基于当时可用数据）
+      // 事件算法即使标的不在趋势池，也继续按照实时标记价运行硬止损/结构退出/移动止盈。
       const mark = this.deps.markPrice(meta.symbol);
       if (mark > 0) {
         const pos = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
@@ -574,23 +581,22 @@ export class AutoPaperTrader {
               openedAt: pos.openedAt instanceof Date ? pos.openedAt.getTime() : Number(pos.openedAt),
             },
             mark,
-            signal,
+            signal: eventDriven ? null : signal,
             now: Date.now(),
           });
           if (v.exit && v.reason) {
             logDecision(`策略离场 [${this.strategy.id}] ${v.detail} positionId=${meta.positionId}`);
-            await this.closePosition(meta, v.reason, signal);
+            await this.closePosition(meta, v.reason, eventDriven ? null : signal);
             continue;
           }
         }
       }
 
-      // ④ 反向趋势已确认（独立确认 + 数据新鲜）→ 自行平仓（反手开仓见 manageEntries 守卫）
-      if (
-        (signal.phase === 'CONFIRMED_UP' || signal.phase === 'CONFIRMED_DOWN') &&
-        !favorable &&
-        signal.dataFresh
-      ) {
+      // 仅普通趋势策略使用反向趋势确认规则。
+      if (!eventDriven && signal &&
+          (signal.phase === 'CONFIRMED_UP' || signal.phase === 'CONFIRMED_DOWN') &&
+          !(meta.side === 'LONG' ? signal.direction === 'up' : signal.direction === 'down') &&
+          signal.dataFresh) {
         await this.closePosition(meta, 'REVERSE_CONFIRMED', signal);
       }
     }
@@ -733,6 +739,68 @@ export class AutoPaperTrader {
   }
 
   /** 开仓时高周期门控状态标签（快照存档用；方向分级与策略同源） */
+  /** 组装执行层需要的公共快照；eventSnapshot 一并写进 signalAtOpen 供退出规则读取。 */
+  private anomalySignal(event: EnhancedEventDTO, cycleId: string, side: 'LONG' | 'SHORT', modeTag: string): UnifiedTrendSignal {
+    const htf = { dir: 'flat' as const, efficiencyRatio: 0, returnPct: 0, valid: false, bars: 0 };
+    return {
+      symbol: event.symbol, market: 'futures', interval: '1m', phase: 'OBSERVING', direction: 'flat',
+      trendCycleId: cycleId, trendStartedAt: event.p1At ?? event.firstAt,
+      endPendingSince: null, endEvidenceBars: 0, endedAt: null, endReason: null,
+      score: 0, strength: 0, confirmCount: 0,
+      features: { atr: 0, atrPct: 0, realizedVolPct: 0, volPercentile: -1, volRegime: 'HIGH',
+        efficiencyRatio: 0, upperWickPct: 0, lowerWickPct: 0, breakout: 'none',
+        falseBreakout: event.breakout.status === 'FALSE', barsUsed: 0 },
+      htf5m: htf, htf15m: htf, htfAgree: null, lastBarTime: null, lastKlineAt: 0,
+      dataFresh: true, dataUnavailableReason: null,
+      anomaly: { dir: event.dir, level: event.level, priority: event.priority,
+        active: event.state === 'ACTIVE', lastAt: event.p1At ?? event.updatedAt },
+      conflict: side !== (event.dir === 'UP' ? 'LONG' : 'SHORT'),
+      reason: `MAJOR P1 event entry [${modeTag}]: ${event.headline}`, changedAt: event.updatedAt,
+      eventSnapshot: event, eventEntryMode: modeTag,
+    } as UnifiedTrendSignal;
+  }
+
+  private async cancelActivePendingsForEventDrivenStrategy(): Promise<void> {
+    const pendings = await this.repo.loadActivePendings();
+    for (const p of pendings) {
+      await this.repo.markPendingCanceled(p.cycleId, '当前策略为 MAJOR P1 事件入口，不使用趋势池待入场确认');
+    }
+  }
+
+  /** 2 秒扫活跃 MAJOR P1：无固定冷却、无待入场二次确认；资金与执行仍走 executeOpen。 */
+  private async manageAnomalyEntries(
+    cfg: TrendAutoConfigRow,
+    eq: { balance: number; marginUsed: number; unrealized: number; equity: number; openCount: number },
+  ): Promise<void> {
+    const evaluate = this.strategy.evaluateAnomalyEntry;
+    const getEvents = this.deps.getEvents;
+    if (!evaluate || !getEvents) return;
+    const accountId = await this.autoAccountId();
+    const rows = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
+    const openSymbols = new Set(rows.map(p => p.symbol));
+    const events = getEvents(Date.now()).active
+      .filter(e => e.state === 'ACTIVE' && e.level === 'MAJOR' && e.priority === 'P1')
+      .sort((a, b) => {
+        const rank = (e: EnhancedEventDTO) => e.breakout.status === 'CONFIRMED' ? 3 : e.breakout.status === 'FALSE' ? 2 : 1;
+        return rank(b) - rank(a) || (b.p1At ?? b.firstAt) - (a.p1At ?? a.firstAt);
+      });
+    for (const event of events) {
+      if (eq.openCount >= cfg.maxPositions) break;
+      if (openSymbols.has(event.symbol)) continue;
+      const mark = this.deps.markPrice(event.symbol);
+      if (!(mark > 0)) continue;
+      const lastClose = await this.repo.lastCloseAt(event.symbol); // 提供上下文，但不应用固定冷却。
+      const ctx = this.strategyCtx(Date.now(), mark, cfg, eq, openSymbols, lastClose);
+      const verdict = evaluate.call(this.strategy, event, ctx);
+      if (!verdict.want || !verdict.side || !verdict.cycleId || verdict.evidenceAt == null) continue;
+      const round = this.strategy.nextRound(event.symbol, verdict.cycleId);
+      const rKey = roundKey(verdict.cycleId, round);
+      const signal = this.anomalySignal(event, verdict.cycleId, verdict.side, verdict.modeTag);
+      const outcome = await this.executeOpen({ signal, rKey, side: verdict.side, verdict, cfg, eq, via: 'direct' });
+      if (outcome.outcome === 'opened') openSymbols.add(event.symbol);
+    }
+  }
+
   private htfGateLabel(signal: UnifiedTrendSignal): HtfGateState {
     const trendDir = signal.direction === 'down' ? 'down' : 'up';
     const g5 = classifyHtf(signal.htf5m.dir, signal.htf5m.valid, trendDir);
@@ -885,10 +953,13 @@ export class AutoPaperTrader {
     //    超出可用余额直接跳过）。费率唯一真值 = 引擎实例 feeRate（Task 59：自动账户 0.02%；
     //    测试注入引擎默认 TAKER_FEE，口径随引擎走）
     const feeRate = this.engine.feeRate;
-    const feeFactor = 1 + cfg.leverage * feeRate;
     const effRatio = effectiveMarginRatio(cfg.marginRatio, cfg.maxPositions);
-    const effRatioPct = (effRatio * 100).toFixed(2).replace(/\.?0+$/, '');
-    const targetMargin = floor2(eq.equity * effRatio);
+    const riskMultiplier = Number.isFinite(verdict.riskMultiplier)
+      ? Math.max(0.1, Math.min(1, verdict.riskMultiplier as number))
+      : 1;
+    const effectiveRatio = effRatio * riskMultiplier;
+    const effRatioPct = (effectiveRatio * 100).toFixed(2).replace(/\\.?0+$/, '');
+    const targetMargin = floor2(eq.equity * effectiveRatio);
     const fee = targetMargin * cfg.leverage * feeRate;
     if (targetMargin + fee > eq.balance) {
       const reason = `权益 ${effRatioPct}% 保证金 ${targetMargin.toFixed(2)} + 手续费 ${fee.toFixed(2)} 超出可用余额 ${eq.balance.toFixed(2)}（跳过不变通）`;
@@ -906,7 +977,7 @@ export class AutoPaperTrader {
       symbol: signal.symbol,
       action: 'OPEN',
       cycleId: posCycle,
-      detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg, verdict.modeTag)),
+      detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg, verdict.modeTag, riskMultiplier)),
     });
     if (!claimed) {
       return { outcome: 'skipped', reason: '本趋势周期本轮次已决策过（幂等）' };
@@ -936,6 +1007,9 @@ export class AutoPaperTrader {
           strength: signal.strength,
           anomaly: signal.anomaly,
           conflict: signal.conflict,
+          eventSnapshot: (signal as UnifiedTrendSignal & { eventSnapshot?: EnhancedEventDTO }).eventSnapshot ?? null,
+          eventEntryMode: (signal as UnifiedTrendSignal & { eventEntryMode?: string }).eventEntryMode ?? null,
+          riskMultiplier,
         }),
         signalAtOpen: JSON.stringify(signal),
         slippageEst,
@@ -974,10 +1048,10 @@ export class AutoPaperTrader {
       const waitedMs =
         input.waitedSince != null ? ` waitedMs=${Date.now() - input.waitedSince}` : '';
       logDecision(
-        `开仓（${via === 'pending' ? '二次确认通过' : '直接开仓·二次确认关闭'}）strategy=${this.strategy.id} mode=${verdict.modeTag} ` +
+        `开仓（${via === 'pending' ? '二次确认通过' : this.isEventDrivenStrategy() ? 'MAJOR P1 事件即时触发' : '直接开仓·二次确认关闭'}）strategy=${this.strategy.id} mode=${verdict.modeTag} ` +
           `round=${pendingRoundOf(rKey)} symbol=${signal.symbol} side=${side} posCycle=${posCycle} ` +
           `positionId=${pos.id} margin=${targetMargin}(${effRatioPct}%权益=min(${Math.round(cfg.marginRatio * 100)}%,95%/${cfg.maxPositions}仓)) ` +
-          `leverage=${cfg.leverage}x entryBar=${signal.lastBarTime}${waitedMs} ` +
+          `leverage=${cfg.leverage}x riskFactor=${riskMultiplier.toFixed(2)} entryBar=${signal.lastBarTime}${waitedMs} ` +
           `score=${signal.score.toFixed(0)} er=${signal.features.efficiencyRatio.toFixed(2)} ` +
           `htf5m=${signal.htf5m.dir} htf15m=${signal.htf15m.dir}`,
       );
@@ -1120,7 +1194,7 @@ export class AutoPaperTrader {
     }
   }
 
-  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow, modeTag: string) {
+  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow, modeTag: string, riskMultiplier = 1) {
     return {
       strategyId: this.strategy.id,
       modeTag,
@@ -1134,7 +1208,10 @@ export class AutoPaperTrader {
       margin,
       leverage: cfg.leverage,
       /** Task 58 建；Task 67 语义定版：sizing = 开仓时权益 × min(设定上限, 95%÷配置舱位数)（保证金 + 手续费超出余额则跳过） */
-      marginBasis: `equity × min(${cfg.marginRatio}, ${TREND_TRADE.MARGIN_SLOT_HEADROOM}/${cfg.maxPositions}) (skip if unaffordable)`,
+      marginBasis: `equity × min(${cfg.marginRatio}, ${TREND_TRADE.MARGIN_SLOT_HEADROOM}/${cfg.maxPositions}) × riskFactor(${riskMultiplier.toFixed(2)}) (skip if unaffordable)`,
+      riskMultiplier,
+      signalReason: signal.reason,
+      anomaly: signal.anomaly,
       entryEr: signal.features.efficiencyRatio,
       htf5mDir: signal.htf5m.dir,
       htf15mDir: signal.htf15m.dir,
