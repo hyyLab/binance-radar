@@ -50,6 +50,7 @@ import {
   type TrendTradeRepo,
 } from './repo';
 import { createStrategy, DEFAULT_STRATEGY_ID } from './strategy/registry';
+import { majorP1CycleId } from './strategy/major-p1-breakout';
 import type { StrategyEntryVerdict, StrategyEventEntryVerdict, StrategyMarketCtx, TrendStrategy } from './strategy/types';
 import { parseStrategyParamsMap, sanitizeRuntimeParamsLenient } from './console-params';
 
@@ -492,6 +493,151 @@ export class AutoPaperTrader {
       console.warn('[trend-auto] tick 失败：', this.lastError);
     } finally {
       this.ticking = false;
+    }
+  }
+
+  /**
+   * MAJOR P1 专属事件扫描。每 2s 读取异动聚合器的 ACTIVE 事件，直接经共享模拟成交层入场；
+   * 不读趋势池、不等待 UTE CONFIRMED，也不经过 TrendPendingEntry / waitBarConfirm。
+   * 每个 P1 周期的历史 K 线只拉取一次，且 endMs 固定在 P1 时刻，平台判断不使用未来数据。
+   */
+  private async eventTick(): Promise<void> {
+    if (this.stopped || this.ticking || this.eventTicking) return;
+    const strategy = this.strategy;
+    if (
+      !isEventDrivenStrategy(strategy) ||
+      !this.deps.getEvents ||
+      !this.deps.fetchKlines ||
+      !this.deps.marketSnapshot
+    ) return;
+
+    this.eventTicking = true;
+    try {
+      const now = Date.now();
+      const cfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+      if (!cfg || cfg.mode !== 'RUNNING' || cfg.strategyId !== strategy.id) return;
+      const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+      if (!acc) return;
+
+      // 新鲜 MAJOR P1 排在前面；同一时刻同一个 symbol 只取最新的 P1 事件。
+      const active = this.deps.getEvents(now).active
+        .filter((e) => e.state === 'ACTIVE' && e.level === 'MAJOR' && e.priority === 'P1')
+        .sort((a, b) => (b.p1At ?? b.firstAt) - (a.p1At ?? a.firstAt));
+      const seen = new Set<string>();
+      const candidates: EnhancedEventDTO[] = [];
+      for (const event of active) {
+        if (seen.has(event.symbol)) continue;
+        seen.add(event.symbol);
+        candidates.push(event);
+        if (candidates.length >= 6) break; // 控制每轮最多处理的候选数与历史 K 线请求预算
+      }
+
+      const openMetas = await this.repo.loadMetasByStatus('OPEN');
+      const openSymbols = new Set(openMetas.map((m) => m.symbol));
+
+      // 2s 价格采样给事件策略的移动止盈/MFE 使用；已持仓品种即使异动结束也继续采样。
+      for (const meta of openMetas) {
+        const snap = this.deps.marketSnapshot(meta.symbol);
+        if (snap && snap.price > 0 && now - snap.updatedAt <= 10_000) {
+          strategy.observe(meta.symbol, snap.price, now);
+        }
+      }
+      for (const event of candidates) {
+        const snap = this.deps.marketSnapshot(event.symbol);
+        if (snap && snap.price > 0 && now - snap.updatedAt <= 10_000) {
+          strategy.observe(event.symbol, snap.price, now);
+        }
+      }
+
+      let eq = await this.accountEquity(acc.id);
+      // 只允许 4 次新历史 K 线请求/轮，避免事件暴增时抢占监控引擎的行情预算。
+      let freshKlineFetches = 0;
+      for (const event of candidates) {
+        if (this.stopped || this.ticking || this.strategy !== strategy) break;
+        if (openSymbols.has(event.symbol)) continue;
+
+        const snap = this.deps.marketSnapshot(event.symbol);
+        if (!snap || !(snap.price > 0) || now - snap.updatedAt > 10_000) continue;
+
+        const p1At = typeof event.p1At === 'number' && event.p1At > 0 ? event.p1At : event.firstAt;
+        const cycleId = majorP1CycleId(event);
+        let cache = this.eventBarsCache.get(cycleId);
+        if (!cache || (cache.bars.length === 0 && now >= cache.retryAfter)) {
+          if (freshKlineFetches >= 4) continue;
+          freshKlineFetches++;
+          try {
+            const bars = await this.deps.fetchKlines(event.symbol, 40, p1At);
+            const clean = bars
+              .filter((b) => Number.isFinite(b.t) && b.t > 0 &&
+                Number.isFinite(b.o) && b.o > 0 &&
+                Number.isFinite(b.h) && b.h > 0 &&
+                Number.isFinite(b.l) && b.l > 0 &&
+                Number.isFinite(b.c) && b.c > 0 &&
+                Number.isFinite(b.qv) && b.qv >= 0)
+              .sort((a, b) => a.t - b.t);
+            const closedPrior = clean.filter((b) => b.t + 60_000 <= p1At);
+            cache = {
+              loadedAt: now,
+              retryAfter: closedPrior.length >= 12 ? Number.POSITIVE_INFINITY : now + 15_000,
+              bars: closedPrior.length >= 12 ? clean : [],
+            };
+            this.eventBarsCache.set(cycleId, cache);
+          } catch {
+            cache = { loadedAt: now, retryAfter: now + 15_000, bars: [] };
+            this.eventBarsCache.set(cycleId, cache);
+          }
+        }
+        if (!cache || cache.bars.length < 12) continue;
+
+        const lastCloseAt = await this.repo.lastCloseAt(event.symbol);
+        const eventCtx: StrategyMarketCtx = {
+          ...this.strategyCtx(now, snap.price, cfg, eq, openSymbols, lastCloseAt),
+          quoteVolume24h: snap.quoteVolume24h,
+          marketUpdatedAt: snap.updatedAt,
+        };
+        const decision: StrategyEventEntryVerdict = strategy.evaluateEventEntry(event, cache.bars, eventCtx);
+        if (!decision.want || !decision.signal || !decision.side || !decision.cycleId) continue;
+
+        // 拉 K 线期间事件可能已结束或降级；成交前再次核对当前事件仍是同一个 ACTIVE MAJOR P1。
+        const stillActive = this.deps.getEvents(Date.now()).active.some((e) =>
+          e.id === event.id && e.state === 'ACTIVE' && e.level === 'MAJOR' && e.priority === 'P1' &&
+          (e.p1At ?? e.firstAt) === p1At,
+        );
+        if (!stillActive || this.ticking || this.strategy !== strategy) continue;
+        const latestCfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+        if (!latestCfg || latestCfg.mode !== 'RUNNING' || latestCfg.strategyId !== strategy.id) continue;
+
+        const round = strategy.nextRound(event.symbol, decision.cycleId);
+        const rKey = roundKey(decision.cycleId, round);
+        const outcome = await this.executeOpen({
+          signal: decision.signal,
+          rKey,
+          side: decision.side,
+          verdict: decision,
+          cfg: latestCfg,
+          eq,
+          via: 'event',
+          marginScale: decision.marginScale,
+        });
+        if (outcome.outcome === 'opened') {
+          openSymbols.add(event.symbol);
+          logDecision(
+            `MAJOR P1 事件入场 strategy=${strategy.id} event=${event.id} mode=${decision.modeTag} ` +
+            `round=${round} symbol=${event.symbol} side=${decision.side} p1At=${p1At}`,
+          );
+        } else if (outcome.outcome === 'skipped') {
+          this.pushSkip(event.symbol, `MAJOR P1 事件入场跳过：${outcome.reason}`, rKey);
+        }
+      }
+
+      // 清理旧事件的历史缓存，避免内存随着持续运行无限增长。
+      for (const [key, value] of this.eventBarsCache) {
+        if (now - value.loadedAt > 60 * 60_000) this.eventBarsCache.delete(key);
+      }
+    } catch (e) {
+      console.warn('[trend-auto] MAJOR P1 event tick failed:', e instanceof Error ? e.message : e);
+    } finally {
+      this.eventTicking = false;
     }
   }
 
