@@ -1,6 +1,7 @@
 // MAJOR P1 重大异动突破 v1：事件驱动，不依赖 TrendWatch 候选池或 UTE 确认。
 // 所有涨跌阈值均为标的价格百分比；是回放起点，不代表已验证的最优参数。
 import type { EnhancedEventDTO } from '../../enhanced/types';
+import type { Candle1m } from '../../enhanced/klines';
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
 import type { TrendTradeMetaRow } from '../repo';
 import type { StrategyAnomalyEntryVerdict, StrategyExitVerdict, StrategyMarketCtx, TrendStrategy } from './types';
@@ -20,6 +21,14 @@ export const MAJOR_P1_BREAKOUT = {
   MP1B_ACCELERATION_RISK_MULTIPLIER: 0.5,
   MP1B_PENDING_BREAKOUT_RISK_MULTIPLIER: 0.7,
   MP1B_FALSE_BREAKOUT_RISK_MULTIPLIER: 0.6,
+  /** 仅用事件发生前的本地已收盘K线识别平台整理；过期K线不用于分类。 */
+  MP1B_PLATFORM_LOOKBACK_BARS: 20,
+  MP1B_PLATFORM_MAX_RANGE_PCT: 5.0,
+  MP1B_PLATFORM_MAX_ER: 0.35,
+  MP1B_PLATFORM_LEVEL_PROXIMITY_PCT: 2.0,
+  MP1B_PLATFORM_CANDLE_MAX_AGE_MS: 180_000,
+  MP1B_PLATFORM_PENDING_RISK_MULTIPLIER: 0.8,
+  MP1B_NON_PLATFORM_BREAKOUT_RISK_MULTIPLIER: 0.65,
 };
 export type MajorP1BreakoutParams = Partial<typeof MAJOR_P1_BREAKOUT>;
 type State = {
@@ -58,7 +67,7 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     return { want: false, side: null, modeTag: '-', reason: '本算法只由独立 MAJOR P1 事件触发' } as const;
   }
 
-  evaluateAnomalyEntry(e: EnhancedEventDTO, ctx: StrategyMarketCtx): StrategyAnomalyEntryVerdict {
+  evaluateAnomalyEntry(e: EnhancedEventDTO, ctx: StrategyMarketCtx, priorCandles: Candle1m[] = []): StrategyAnomalyEntryVerdict {
     this.candidates.delete(e.symbol);
     if (e.state !== 'ACTIVE' || e.level !== 'MAJOR' || e.priority !== 'P1') return noEntry('非活跃 MAJOR P1');
     if (!(ctx.mark > 0)) return noEntry('标记价不可用');
@@ -82,6 +91,7 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     if (c1 != null && c1 > this.params.MP1B_MAX_CHASE_1M_PCT) return noEntry(`1m 已延伸 ${c1.toFixed(2)}%，拒绝追单`);
     if (c5 != null && c5 > this.params.MP1B_MAX_CHASE_5M_PCT) return noEntry(`5m 已延伸 ${c5.toFixed(2)}%，拒绝追单`);
 
+    const platform = this.isPlatformBreakout(e, priorCandles, ctx.now);
     let side: 'LONG' | 'SHORT', modeTag: string, riskMultiplier: number;
     if (e.breakout.status === 'FALSE') {
       const base = e.breakout.baseline;
@@ -93,8 +103,8 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
       riskMultiplier = this.params.MP1B_FALSE_BREAKOUT_RISK_MULTIPLIER;
     } else if (e.breakout.status === 'CONFIRMED') {
       side = e.dir === 'UP' ? 'LONG' : 'SHORT';
-      modeTag = 'BREAKOUT_CONFIRMED';
-      riskMultiplier = 1;
+      modeTag = platform ? 'PLATFORM_BREAKOUT_CONFIRMED' : 'BREAKOUT_EXTENSION';
+      riskMultiplier = platform ? 1 : this.params.MP1B_NON_PLATFORM_BREAKOUT_RISK_MULTIPLIER;
     } else if (e.breakout.status === 'REVIEW') {
       return noEntry('突破状态待复核，不自动猜方向');
     } else {
@@ -102,8 +112,8 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
       const spike = e.evidence.some(x => x.kind === (e.dir === 'UP' ? 'SPIKE_UP' : 'SPIKE_DOWN'));
       if (pending) {
         side = e.dir === 'UP' ? 'LONG' : 'SHORT';
-        modeTag = 'BREAKOUT_PENDING';
-        riskMultiplier = this.params.MP1B_PENDING_BREAKOUT_RISK_MULTIPLIER;
+        modeTag = platform ? 'PLATFORM_BREAKOUT_PENDING' : 'BREAKOUT_PENDING';
+        riskMultiplier = platform ? this.params.MP1B_PLATFORM_PENDING_RISK_MULTIPLIER : this.params.MP1B_PENDING_BREAKOUT_RISK_MULTIPLIER;
       } else if (spike) {
         side = e.dir === 'UP' ? 'LONG' : 'SHORT';
         modeTag = 'MOMENTUM_ACCELERATION';
@@ -197,6 +207,32 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
       });
     }
   }
+  /** 检查异动前是否为低方向效率、窄区间且靠近突破基准的整理平台。 */
+  private isPlatformBreakout(e: EnhancedEventDTO, candles: Candle1m[], now: number): boolean {
+    const base = e.breakout.baseline;
+    if (!(base != null && base > 0) ||
+        (e.breakout.status !== 'CONFIRMED' && e.breakout.status !== 'PENDING')) return false;
+    const bars = candles
+      .filter(c => Number.isFinite(c.t) && c.t > 0 && c.t + 60_000 <= now &&
+        c.o > 0 && c.h > 0 && c.l > 0 && c.c > 0)
+      .slice(-this.params.MP1B_PLATFORM_LOOKBACK_BARS);
+    if (bars.length < Math.min(12, this.params.MP1B_PLATFORM_LOOKBACK_BARS)) return false;
+    const last = bars[bars.length - 1];
+    if (now - (last.t + 60_000) > this.params.MP1B_PLATFORM_CANDLE_MAX_AGE_MS) return false;
+
+    const high = Math.max(...bars.map(b => b.h));
+    const low = Math.min(...bars.map(b => b.l));
+    const rangePct = (high - low) / ((high + low) / 2) * 100;
+    let path = 0;
+    for (let i = 1; i < bars.length; i++) path += Math.abs(bars[i].c - bars[i - 1].c);
+    const er = path > 0 ? Math.abs(last.c - bars[0].c) / path : 0;
+    const localLevel = e.dir === 'UP' ? high : low;
+    const levelGapPct = Math.abs(base - localLevel) / localLevel * 100;
+    return rangePct <= this.params.MP1B_PLATFORM_MAX_RANGE_PCT &&
+      er <= this.params.MP1B_PLATFORM_MAX_ER &&
+      levelGapPct <= this.params.MP1B_PLATFORM_LEVEL_PROXIMITY_PCT;
+  }
+
   private readEventSnapshot(raw: string): EnhancedEventDTO | null {
     try { return (JSON.parse(raw) as { eventSnapshot?: EnhancedEventDTO }).eventSnapshot ?? null; }
     catch { return null; }
