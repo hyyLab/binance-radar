@@ -12,6 +12,7 @@
 // - 轮次（round）：同一 trendCycleId 内允许多轮「开仓→平仓→再入场」（走弱先走、走强
 //   再进，用户定版），每轮决策/待入场键 = `{cycleId}#R{round}`，轮次上限由策略约束。
 
+import type { EnhancedEventDTO } from '../../enhanced/types';
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
 import type { TrendExitReason } from '../config';
 import type { TrendAutoConfigRow, TrendTradeMetaRow } from '../repo';
@@ -41,6 +42,14 @@ export interface StrategyEntryVerdict {
   modeTag: string;
   /** 拒绝原因或入场理由（中文，进审计日志） */
   reason: string;
+  /** 单笔保证金预算系数；1=标准保证金，小于1时按比例缩小，不改变账户杠杆。 */
+  riskMultiplier?: number;
+}
+
+/** 事件触发策略入场结论：独立于趋势池及下一根K线复核。 */
+export interface StrategyAnomalyEntryVerdict extends StrategyEntryVerdict {
+  cycleId: string | null;
+  evidenceAt: number | null;
 }
 
 /** 持仓上下文（策略离场评估用；来自 PaperPosition 当前快照） */
@@ -70,6 +79,8 @@ export interface TrendStrategy {
   readonly name: string;
   /** 一句话说明（UI 悬浮提示） */
   readonly description: string;
+  /** 可选：策略专用扫描周期；省略时使用默认交易周期。 */
+  readonly scanIntervalMs?: number;
 
   /**
    * 行情采样：每 tick 对池内/持仓 symbol 调用（mark>0 才会调用）。
@@ -79,6 +90,9 @@ export interface TrendStrategy {
 
   /** 入场评估（该 symbol 无持仓、信号 dataFresh 时调用；相位/方向门槛由策略全权定义） */
   evaluateEntry(signal: UnifiedTrendSignal, ctx: StrategyMarketCtx): StrategyEntryVerdict;
+
+  /** 可选事件入口：直接接收 EnhancedEngine 活跃异动事件，不使用趋势池。 */
+  evaluateAnomalyEntry?(event: EnhancedEventDTO, ctx: StrategyMarketCtx): StrategyAnomalyEntryVerdict;
 
   /** 离场评估（该 symbol 有 OPEN 持仓时调用；基础设施离场规则在此之前已处理） */
   evaluateExit(input: {
