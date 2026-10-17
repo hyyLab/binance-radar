@@ -152,13 +152,22 @@ export function useTrendTradeHistory(symbol: string, sort: string, order: string
 export function useTrendTradeControl() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (input: { action: string; positionId?: string }) => {
+    mutationFn: async (input: { action: string; positionId?: string; amount?: number; value?: number }) => {
       const res = await fetch('/api/trend-trading/control', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(input),
       });
-      return (await res.json()) as { ok: boolean; message?: string; error?: string; mode?: string; note?: string };
+      return (await res.json()) as {
+        ok: boolean;
+        message?: string;
+        error?: string;
+        mode?: string;
+        note?: string;
+        balance?: number;
+        totalDeposited?: number;
+        marginRatio?: number;
+      };
     },
     onSuccess: () => {
       void qc.invalidateQueries({ queryKey: ['trend-trading'] });

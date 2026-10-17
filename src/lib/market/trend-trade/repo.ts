@@ -181,6 +181,16 @@ export function createTrendTradeRepo(client: RawClient = db) {
       );
     },
 
+    /** 更新每笔保证金比例（Task 55：开仓数量界面可选；auto-trader 每 tick 重读配置，即时生效） */
+    async updateMarginRatio(name: string, marginRatio: number): Promise<void> {
+      await client.$executeRawUnsafe(
+        `UPDATE TrendAutoConfig SET marginRatio = ?, updatedAt = ? WHERE name = ?`,
+        marginRatio,
+        new Date(),
+        name,
+      );
+    },
+
     async updatePeakEquity(name: string, peakEquity: number): Promise<void> {
       await client.$executeRawUnsafe(
         `UPDATE TrendAutoConfig SET peakEquity = ?, updatedAt = ? WHERE name = ? AND peakEquity < ?`,
