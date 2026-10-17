@@ -568,3 +568,18 @@ Stage Summary:
 - 币安封禁期数据链路全通：白名单降级（Bybit∩Gate 交集）→ 分片 → 供价（Bybit/Gate）→ K 线（挂起源跳过）→ 引擎基线 → 异动/趋势信号，全站数据恢复
 - 解封自愈路径明确：refreshInstruments('binance') 在 bannedUntil 后自动重试 → 真白名单覆盖 → instrumentsDegraded=false，Top125 分片归属已预留、恢复后币安自动回到供价/K 线主力位
 - 语义代价明示：降级期品种池 ≈ 445 个（交集）而非币安全量 525+；tickSize/成交额口径按 Bybit/Gate（展示层影响极小，模拟盘规则仍币安语义）；K 线历史为 Bybit/Gate 口径（行情大差不差设计前提内）
+
+---
+Task ID: deploy-3（Task 70 收尾 + 数据库恢复）
+Agent: Super Z (main)
+Task: 提交推送 Task 70 修复；解释状态栏指标（监控/基线就绪/活跃事件）；途中抢救两起数据库事故
+
+Work Log:
+- 推送：远端已有用户另一会话的「Task 69: MAJOR P1 breakout strategy」（engine v21）→ 我方修复重编号 Task 70（代码注释/worklog/脚本名同步改，只动自己文件）；rebase origin/main 后推送 c5ee173；数据库恢复补丁 2f60d13；用户 v21 策略代码随 rebase 进入部署环境，趋势服务 strategies 现含 major-p1-breakout-v1 三算法
+- 事故一（readonly database）：rebase 的 git checkout 把运行中被写动的 db/custom.db 整文件替换，next-server 持有的旧 inode 变 deleted，SQLite 报 1032 readonly——停服重启即解（写路径恢复后无新错误）
+- 事故二（部署期空库，追溯根因）：初装时 `cp -rn` 保留了脚手架空 custom.db（24KB），仓库真实库（1.38MB）从未启用——当日全部「新数据」实为空库上自建的全新账户；真实库从 git blob 5d13110:db/custom.db 完整恢复（trend-auto-v1=92.23U 与 Task 68 台账吻合、default=13.61U、8 笔交易、10 条决策、integrity ok）；当日空库快照留 db/custom.db.deploy1017.bak（已 gitignore）
+- 经验沉淀：①git 与活动 SQLite 共库是本环境固有风险——rebase/stash/checkout 前必须停服；②cp -n 静默跳过 + mv 目标目录非空时报错被 2>/dev/null 吞掉，两处叠加造成「看似部署成功实则空库」；③sqlite3.connect 对不存在路径会静默建空库，检查脚本必须先判 os.path.exists
+
+Stage Summary:
+- 修复已上链：Task 70（白名单降级）+ 真实业务库恢复；线上跑用户真实数据（92.23U/13.61U）
+- 布防：custom.db.deploy1017.bak 留档不入库；当日两起事故均为环境操作层，代码无回归
