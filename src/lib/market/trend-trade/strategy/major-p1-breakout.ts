@@ -57,11 +57,26 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
   readonly params: typeof MAJOR_P1_BREAKOUT;
   private states = new Map<string, State>();
   private candidates = new Map<string, Candidate>();
+  /** 最新事件状态会在持仓期间刷新；不持久化，重启后由事件源重新灌入。 */
+  private latestEvents = new Map<string, EnhancedEventDTO>();
   private onStateChange: ((id: string, symbol: string, json: string) => void) | null = null;
 
   constructor(params?: MajorP1BreakoutParams) { this.params = { ...MAJOR_P1_BREAKOUT, ...(params ?? {}) }; }
   bindPersistence(fn: (id: string, symbol: string, json: string) => void): void { this.onStateChange = fn; }
   observe(_symbol: string, _mark: number, _now: number): void {}
+
+  observeAnomalyEvent(event: EnhancedEventDTO): void {
+    this.latestEvents.set(event.id, event);
+    const cutoff = Date.now() - 30 * 60_000;
+    for (const [id, old] of this.latestEvents) {
+      if (old.updatedAt < cutoff) this.latestEvents.delete(id);
+    }
+    // 防止极端事件密度下内存缓存无限增长。
+    if (this.latestEvents.size > 1000) {
+      const oldest = [...this.latestEvents.values()].sort((a, b) => a.updatedAt - b.updatedAt);
+      for (const old of oldest.slice(0, this.latestEvents.size - 1000)) this.latestEvents.delete(old.id);
+    }
+  }
 
   evaluateEntry(_signal: UnifiedTrendSignal, _ctx: StrategyMarketCtx) {
     return { want: false, side: null, modeTag: '-', reason: '本算法只由独立 MAJOR P1 事件触发' } as const;
@@ -69,7 +84,10 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
 
   evaluateAnomalyEntry(e: EnhancedEventDTO, ctx: StrategyMarketCtx, priorCandles: Candle1m[] = []): StrategyAnomalyEntryVerdict {
     this.candidates.delete(e.symbol);
-    if (e.state !== 'ACTIVE' || e.level !== 'MAJOR' || e.priority !== 'P1') return noEntry('非活跃 MAJOR P1');
+    const eligibleFalseReversal = e.level === 'MAJOR' && e.peakPriority === 'P1' && e.breakout.status === 'FALSE';
+    if (e.state !== 'ACTIVE' || e.level !== 'MAJOR' || (e.priority !== 'P1' && !eligibleFalseReversal)) {
+      return noEntry('非活跃 MAJOR P1（假突破反向仅允许曾达 P1 的事件）');
+    }
     if (!(ctx.mark > 0)) return noEntry('标记价不可用');
     if (ctx.openSymbols.has(e.symbol)) return noEntry('同币种已有持仓');
     if (e.dir !== 'UP' && e.dir !== 'DOWN') return noEntry('异动方向不明确');
@@ -137,7 +155,24 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
       return { exit: true, reason: 'STOP_LOSS', detail: `MAJOR P1 硬止损：价格逆向 ${adverse.toFixed(2)}% ≥ ${this.params.MP1B_STOP_LOSS_PCT}%` };
     }
 
-    const snapshot = this.readEventSnapshot(meta.signalAtOpen), base = snapshot?.breakout?.baseline;
+    const openedEvent = this.readEventSnapshot(meta.signalAtOpen);
+    const snapshot = openedEvent ? (this.latestEvents.get(openedEvent.id) ?? openedEvent) : null;
+    const originalDirectionMatchesPosition =
+      (pos.side === 'LONG' && snapshot?.dir === 'UP') ||
+      (pos.side === 'SHORT' && snapshot?.dir === 'DOWN');
+    const positionOpposesEvent =
+      (pos.side === 'SHORT' && snapshot?.dir === 'UP') ||
+      (pos.side === 'LONG' && snapshot?.dir === 'DOWN');
+
+    // 原方向持仓遇到明确 FALSE 直接退出；假突破反向仓则在原突破重新确认时退出。
+    if (snapshot?.breakout.status === 'FALSE' && originalDirectionMatchesPosition) {
+      return { exit: true, reason: 'BREAKOUT_FAILED', detail: '事件引擎已将本次突破标记为 FALSE，退出原突破方向持仓' };
+    }
+    if (snapshot?.breakout.status === 'CONFIRMED' && positionOpposesEvent) {
+      return { exit: true, reason: 'BREAKOUT_FAILED', detail: '原突破方向重新确认，退出假突破反向持仓' };
+    }
+
+    const base = snapshot?.breakout?.baseline;
     if (base != null && base > 0) {
       const breached = pos.side === 'LONG'
         ? mark <= base * (1 - this.params.MP1B_STRUCTURE_INVALIDATION_PCT / 100)
