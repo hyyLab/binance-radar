@@ -13,6 +13,7 @@
 //   再进，用户定版），每轮决策/待入场键 = `{cycleId}#R{round}`，轮次上限由策略约束。
 
 import type { EnhancedEventDTO } from '../../enhanced/types';
+import type { Candle1m } from '../../enhanced/klines';
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
 import type { TrendExitReason } from '../config';
 import type { TrendAutoConfigRow, TrendTradeMetaRow } from '../repo';
@@ -92,7 +93,7 @@ export interface TrendStrategy {
   evaluateEntry(signal: UnifiedTrendSignal, ctx: StrategyMarketCtx): StrategyEntryVerdict;
 
   /** 可选事件入口：直接接收 EnhancedEngine 活跃异动事件，不使用趋势池。 */
-  evaluateAnomalyEntry?(event: EnhancedEventDTO, ctx: StrategyMarketCtx): StrategyAnomalyEntryVerdict;
+  evaluateAnomalyEntry?(event: EnhancedEventDTO, ctx: StrategyMarketCtx, priorCandles?: Candle1m[]): StrategyAnomalyEntryVerdict;
 
   /** 离场评估（该 symbol 有 OPEN 持仓时调用；基础设施离场规则在此之前已处理） */
   evaluateExit(input: {
