@@ -432,3 +432,4 @@ Stage Summary:
 - 交付：历史明细「算法」列（逐笔可辨开仓算法，混合算法历史首次可读）+ 默认 10 条折叠展开；费用信息在 API/详情/统计卡保留完整口径，仅逐行展示停掉
 - 关键设计：复用 featuresAtOpen.strategyId 快照（Task 57 起天然存在）实现零 DB 变更零 bump；未来若需按算法筛选/对比统计（如 UTE vs 短周期套利胜率），再把 strategyId 升为 TrendTradeMeta 独立列（PRAGMA 补列既有模式）
 - 红线遵守：未动引擎/未动手动盘/未重启 server；92 测试全绿；纯模拟不变
+- 推送补记（实际执行）：远端 main 与本地分叉（另一环境推过 Task 55-3 时代历史）——先核实远端文件集合是本地严格子集（comm 双向比对零独有文件），旧远端历史备份为 backup/task55-3-remote 分支后 force-with-lease 覆盖，main 现为 25e71b0；恢复旧远端视角随时可查 backup 分支
