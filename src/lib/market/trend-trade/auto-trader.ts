@@ -30,7 +30,9 @@
 
 import { db } from '@/lib/db';
 import { PaperError, PaperEngine, paperEngineFor } from '../paper';
+import type { EnhancedEventDTO } from '../enhanced/types';
 import type { UnifiedTrendSignal } from '../trend-watch/signal';
+import type { TrendCandle } from '../trend-watch/types';
 import { TREND_WATCH } from '../trend-watch/config';
 import {
   TREND_TRADE,
@@ -48,14 +50,20 @@ import {
   type TrendTradeRepo,
 } from './repo';
 import { createStrategy, DEFAULT_STRATEGY_ID } from './strategy/registry';
-import type { StrategyEntryVerdict, StrategyMarketCtx, TrendStrategy } from './strategy/types';
+import type { StrategyEntryVerdict, StrategyEventEntryVerdict, StrategyMarketCtx, TrendStrategy } from './strategy/types';
 import { parseStrategyParamsMap, sanitizeRuntimeParamsLenient } from './console-params';
 
 export interface AutoTraderDeps {
-  /** 统一趋势信号（trendWatch.latestSignals——唯一趋势来源） */
+  /** 统一趋势信号（trendWatch.latestSignals——现有趋势策略消费） */
   getSignals(): UnifiedTrendSignal[];
   /** 标记价（合约多源供价） */
   markPrice(symbol: string): number;
+  /** 可选事件源：只供事件驱动算法使用，不依赖 TrendWatchService 候选池。 */
+  getEvents?(now: number): { active: EnhancedEventDTO[]; ended: EnhancedEventDTO[] };
+  /** 可选历史 K 线入口；endMs 用于只取事件发生前的历史数据。 */
+  fetchKlines?(symbol: string, limit: number, endMs?: number): Promise<TrendCandle[]>;
+  /** 可选行情快照，用于判定事件入场时的价格新鲜度和 24h 流动性。 */
+  marketSnapshot?(symbol: string): { price: number; updatedAt: number; quoteVolume24h: number } | null;
 }
 
 interface SkipRecord {
