@@ -1,0 +1,918 @@
+     1→// ---------- 趋势跟踪服务（Universal Trend Engine 集成 · Task 54 v2） ----------
+     2→// 职责：候选交易对管理（异动事件 + 主动探针双通道）、1m K 线按需刷新（480 根，
+     3→// 聚合 5m/15m）、UTE 趋势评估调度、波动率特征计算、趋势生命周期（END_PENDING/
+     4→// ENDED/DATA_UNAVAILABLE）管理、统一信号（UnifiedTrendSignal）输出与持久化。
+     5→//
+     6→// 分工纪律（Task 53 定版 + Task 54 扩展）：Radar 负责行情采集与异动检测（不改）；
+     7→// UTE 负责趋势方向判断、评分与确认（vendor 包，不复制/改写其算法）；本服务只做
+     8→// 数据整形、门控、候选选择与生命周期管理——方向结论唯一来自 UTE。
+     9→//
+    10→// 生命周期：绑定 EnhancedEngine——engine.boot() 时 ensureStarted()（幂等，从 DB 恢复
+    11→// 候选池、UTE 确认历史与生命周期状态），engine.stop() 时停表。单例由 engine 单例保证。
+    12→//
+    13→// 请求预算：池内 ≤20 标的 × 1 req/60s（480 根 = 币安权重 2）+ 主动探针
+    14→// ≤PROBE_PER_REBUILD req/30s；并发 ≤3，inflight 去重；不扫描全市场。
+    15→//
+    16→// ⚠️ 趋势评分为启发式证据分（UTE score 0-100），未经历史回放校准；
+    17→//    趋势确认不等于买卖指令（是否交易由 AutoPaperTrader 规则层决定，纯模拟）。
+    18→
+    19→import {
+    20→  assessTrend,
+    21→  scanAnomalyCandidates,
+    22→  toClosedBars,
+    23→  type TrendConfig,
+    24→  type TrendSignal,
+    25→  type TrendState,
+    26→  type WatchOhlcvSeries,
+    27→} from 'universal-trend-engine';
+    28→import { TREND_WATCH, trendEngineConfig } from './config';
+    29→import { ensureTrendWatchSchema } from './repo';
+    30→import {
+    31→  assessHtf,
+    32→  computeVolatilityFeatures,
+    33→  type HtfAssessment,
+    34→  type VolatilityFeatures,
+    35→} from './indicators';
+    36→import { createLifecycleState, stepLifecycle, type LifecycleState } from './lifecycle';
+    37→import type { UnifiedTrendSignal } from './signal';
+    38→import type {
+    39→  EnhancedEventLike,
+    40→  TrendCandle,
+    41→  TrendPoolEntry,
+    42→  TrendTickerSnap,
+    43→  TrendWatchDeps,
+    44→  TrendWatchRow,
+    45→  TrendWatchSnapshot,
+    46→  TrendWatchStats,
+    47→} from './types';
+    48→
+    49→const INTERVAL_MS = 60_000; // 1m 周期
+    50→const MARKET = 'futures';
+    51→const INTERVAL = '1m';
+    52→
+    53→/** 异动上下文（候选依据；展示「异动原因/方向冲突」用） */
+    54→interface AnomalyCtx {
+    55→  dir: 'UP' | 'DOWN';
+    56→  level: 'MINOR' | 'MAJOR';
+    57→  priority: 'P1' | 'P2' | 'P3';
+    58→  active: boolean;
+    59→  kinds: string[];
+    60→  breakoutConfirmed: boolean;
+    61→  volumeMultiple: number | null;
+    62→  updatedAt: number;
+    63→}
+    64→
+    65→function baseOf(symbol: string): string {
+    66→  return symbol.endsWith('USDT') ? symbol.slice(0, -4) : symbol;
+    67→}
+    68→
+    69→function toCtx(ev: EnhancedEventLike): AnomalyCtx {
+    70→  return {
+    71→    dir: ev.dir,
+    72→    level: ev.level,
+    73→    priority: ev.priority,
+    74→    active: ev.state === 'ACTIVE',
+    75→    kinds: [...new Set(ev.evidence.map((e) => e.kind))],
+    76→    breakoutConfirmed: ev.breakout.status === 'CONFIRMED',
+    77→    volumeMultiple: ev.volumeMultiple,
+    78→    updatedAt: ev.updatedAt,
+    79→  };
+    80→}
+    81→
+    82→/** 防御性清洗：只留有限数值行，升序（三所适配器已归一化，此处兜底） */
+    83→function cleanCandles(candles: TrendCandle[]): TrendCandle[] {
+    84→  return candles
+    85→    .filter(
+    86→      (c) =>
+    87→        Number.isFinite(c.t) && c.t > 0 &&
+    88→        Number.isFinite(c.o) && c.o > 0 &&
+    89→        Number.isFinite(c.h) && c.h > 0 &&
+    90→        Number.isFinite(c.l) && c.l > 0 &&
+    91→        Number.isFinite(c.c) && c.c > 0 &&
+    92→        Number.isFinite(c.qv) && c.qv >= 0,
+    93→    )
+    94→    .sort((a, b) => a.t - b.t);
+    95→}
+    96→
+    97→function seriesOf(symbol: string, clean: TrendCandle[]): WatchOhlcvSeries {
+    98→  return {
+    99→    symbol,
+   100→    barMs: clean.map((c) => c.t),
+   101→    opens: clean.map((c) => c.o),
+   102→    highs: clean.map((c) => c.h),
+   103→    lows: clean.map((c) => c.l),
+   104→    closes: clean.map((c) => c.c),
+   105→    vols: clean.map((c) => c.qv), // 计价成交额（USDT）作为量
+   106→  };
+   107→}
+   108→
+   109→export class TrendWatchService {
+   110→  private readonly deps: TrendWatchDeps;
+   111→  private readonly trendCfg: Partial<TrendConfig> = trendEngineConfig();
+   112→
+   113→  // —— 生命周期 ——
+   114→  private started = false;
+   115→  private starting: Promise<void> | null = null;
+   116→  private stopped = false;
+   117→  private timer: ReturnType<typeof setInterval> | null = null;
+   118→  private startedAt = 0;
+   119→  private restoredFromDb = 0;
+   120→
+   121→  // —— 内存态 ——
+   122→  private pool = new Map<string, TrendPoolEntry>();
+   123→  private states = new Map<string, TrendState>();
+   124→  private lastSignals = new Map<string, TrendSignal>();
+   125→  private anomalyCtx = new Map<string, AnomalyCtx>();
+   126→  private inflight = new Set<string>();
+   127→  /** Task 54：生命周期状态与统一信号（面板/自动交易共同消费） */
+   128→  private lifecycles = new Map<string, LifecycleState>();
+   129→  private v2Signals = new Map<string, UnifiedTrendSignal>();
+   130→
+   131→  // —— Task 54：主动探针（仅当 deps.probe=true 时启用，测试注入默认关闭） ——
+   132→  private probeQueue: string[] = [];
+   133→  private probeQueueBuiltAt = 0;
+   134→  private probeInflight = new Set<string>();
+   135→
+   136→  // —— 计数 ——
+   137→  klineReqs = 0;
+   138→  probeReqs = 0;
+   139→  dbWrites = 0;
+   140→  dbErrors = 0;
+   141→  lastScanAt = 0;
+   142→  lastRebuildAt = 0;
+   143→
+   144→  constructor(deps: TrendWatchDeps) {
+   145→    this.deps = deps;
+   146→  }
+   147→
+   148→  // ============ 生命周期 ============
+   149→
+   150→  /** 幂等启动：从 DB 恢复候选池、UTE 确认历史与生命周期状态，再启动扫描定时器 */
+   151→  async ensureStarted(): Promise<void> {
+   152→    if (this.started) return;
+   153→    if (this.starting) {
+   154→      await Promise.race([this.starting, new Promise((r) => setTimeout(r, 6000))]);
+   155→      return;
+   156→    }
+   157→    this.started = true;
+   158→    this.stopped = false;
+   159→    this.startedAt = Date.now();
+   160→    this.starting = this.boot().finally(() => {
+   161→      this.starting = null; // 完成后清空：stop → ensureStarted 可安全重入
+   162→    });
+   163→    await Promise.race([this.starting, new Promise((r) => setTimeout(r, 6000))]);
+   164→  }
+   165→
+   166→  private async boot(): Promise<void> {
+   167→    // 0) 幂等 schema 迁移：v2 新列（SQLite ADD COLUMN 无损；运行中服务免 prisma generate）
+   168→    try {
+   169→      await ensureTrendWatchSchema();
+   170→    } catch (e) {
+   171→      this.dbErrors++;
+   172→      console.warn('[trend-watch] schema 迁移失败：', e instanceof Error ? e.message : e);
+   173→    }
+   174→    // 1) 恢复候选池、确认历史与生命周期状态（重启后 confirmed/candidate/END_PENDING 不丢）
+   175→    try {
+   176→      const records = await this.deps.repo.loadActive();
+   177→      for (const rec of records) {
+   178→        const now = Date.now();
+   179→        this.pool.set(rec.symbol, {
+   180→          symbol: rec.symbol,
+   181→          addedAt: rec.addedAt,
+   182→          lastAnomalyAt: rec.lastAnomalyAt ?? rec.addedAt,
+   183→          expiresAt: rec.expiresAt ?? now + TREND_WATCH.CANDIDATE_TTL_MS,
+   184→          lastEntryScore: 0,
+   185→          lastWeakAt: 0,
+   186→          lastKlineAt: rec.lastKlineAt ?? 0,
+   187→          lastBarTime: rec.lastBarTime,
+   188→          dataMissing: false,
+   189→          confirmedLeftAt: null,
+   190→          entryChannel: 'restored',
+   191→        });
+   192→        // 恢复 UTE 状态（含 lastObservationKey——同根 K 线去重在重启后仍然生效）
+   193→        try {
+   194→          const st = JSON.parse(rec.trendStateJson) as TrendState;
+   195→          if (st && typeof st.symbol === 'string') this.states.set(rec.symbol, st);
+   196→        } catch {
+   197→          // JSON 损坏：该标的从 idle 重新确认（不阻断其他标的恢复）
+   198→        }
+   199→        // 恢复生命周期状态（END_PENDING 证据计数/周期 id；损坏则从 OBSERVING 重建）
+   200→        try {
+   201→          const lc = JSON.parse(rec.lifecycleStateJson || '{}') as LifecycleState;
+   202→          if (lc && lc.symbol === rec.symbol && typeof lc.phase === 'string') {
+   203→            this.lifecycles.set(rec.symbol, lc);
+   204→          }
+   205→        } catch {
+   206→          this.lifecycles.set(rec.symbol, createLifecycleState(rec.symbol));
+   207→        }
+   208→      }
+   209→      this.restoredFromDb = records.length;
+   210→    } catch (e) {
+   211→      this.dbErrors++;
+   212→      console.warn('[trend-watch] loadActive 失败：', e instanceof Error ? e.message : e);
+   213→      // 恢复失败不阻断服务（池从零重建，异动事件会重新填充）
+   214→    }
+   215→    // 2) 扫描定时器（到期检查粒度 = SCAN_MS）
+   216→    this.timer = setInterval(() => this.tick(), TREND_WATCH.SCAN_MS);
+   217→  }
+   218→
+   219→  /** 停止扫描（engine 热重置时调用；inflight 请求自然完成但不派发新任务） */
+   220→  stop(): void {
+   221→    this.stopped = true;
+   222→    this.started = false;
+   223→    if (this.timer) clearInterval(this.timer);
+   224→    this.timer = null;
+   225→  }
+   226→
+   227→  // ============ 主扫描循环 ============
+   228→
+   229→  private tick(): void {
+   230→    if (this.stopped) return;
+   231→    const now = Date.now();
+   232→    this.lastScanAt = now;
+   233→    if (now - this.lastRebuildAt >= TREND_WATCH.REBUILD_MS) {
+   234→      this.lastRebuildAt = now;
+   235→      this.rebuildPool(now);
+   236→    }
+   237→    this.refreshDue(now);
+   238→  }
+   239→
+   240→  // ============ 候选筛选（评分 + 迟滞 + 上限 + 退出） ============
+   241→
+   242→  /** 候选选择分（非 UTE 趋势分）：按异动证据质量排序；工程参数未经回测校准 */
+   243→  private scoreOf(ctx: AnomalyCtx, now: number): number {
+   244→    const c = TREND_WATCH;
+   245→    let score = 0;
+   246→    score += ctx.priority === 'P1' ? c.wPriorityP1 : ctx.priority === 'P2' ? c.wPriorityP2 : c.wPriorityP3;
+   247→    score += ctx.level === 'MAJOR' ? c.wMajor : c.wMinor;
+   248→    score += Math.min(3, ctx.kinds.length) * c.wEvidenceEach;
+   249→    if (ctx.breakoutConfirmed) score += c.wBreakoutConfirmed;
+   250→    if (ctx.volumeMultiple != null && ctx.volumeMultiple > 0) {
+   251→      score += Math.min(c.wVolumeMultCap, ctx.volumeMultiple * c.wVolumeMultPer);
+   252→    }
+   253→    if (ctx.active) {
+   254→      score += c.wActiveFresh;
+   255→    } else {
+   256→      const decay = Math.max(0, 1 - (now - ctx.updatedAt) / c.endedDecayMs);
+   257→      score += c.wActiveFresh * decay;
+   258→    }
+   259→    return score;
+   260→  }
+   261→
+   262→  /** 流动性门控：≥500 万正常参与；100~500 万仅 MAJOR+（有效突破 或 ≥3 种独立证据）例外入池 */
+   263→  private liquidityOk(ctx: AnomalyCtx, qv24: number): boolean {
+   264→    if (qv24 >= TREND_WATCH.QV_NORMAL) return true;
+   265→    if (qv24 < TREND_WATCH.QV_EXCEPTION) return false;
+   266→    return (
+   267→      ctx.level === 'MAJOR' &&
+   268→      (ctx.breakoutConfirmed || ctx.kinds.length >= TREND_WATCH.EXCEPTION_MIN_KINDS)
+   269→    );
+   270→  }
+   271→
+   272→  private rebuildPool(now: number): void {
+   273→    const { active, ended } = this.deps.getEvents(now);
+   274→    const tickers = new Map<string, TrendTickerSnap>(
+   275→      this.deps.getTickers().map((t) => [t.symbol, t]),
+   276→    );
+   277→
+   278→    // 1) 每 symbol 取最佳异动候选（active 全算；ended 只算衰减期内）
+   279→    const best = new Map<string, { ctx: AnomalyCtx; score: number }>();
+   280→    for (const ev of [...active, ...ended]) {
+   281→      if (ev.state === 'ENDED' && now - ev.updatedAt > TREND_WATCH.endedDecayMs) continue;
+   282→      const ctx = toCtx(ev);
+   283→      const score = this.scoreOf(ctx, now);
+   284→      const prev = best.get(ev.symbol);
+   285→      if (!prev || score > prev.score) best.set(ev.symbol, { ctx, score });
+   286→    }
+   287→
+   288→    // 2) 入池/续期（分数降序；迟滞：在池保留下限低于入池下限）
+   289→    const ranked = [...best.entries()].sort((a, b) => b[1].score - a[1].score);
+   290→    let poolChanged = false;
+   291→    for (const [sym, { ctx, score }] of ranked) {
+   292→      const entry = this.pool.get(sym);
+   293→      const keepMin = entry
+   294→        ? TREND_WATCH.SCORE_MIN_ENTRY - TREND_WATCH.SCORE_HYSTERESIS
+   295→        : TREND_WATCH.SCORE_MIN_ENTRY;
+   296→      const ticker = tickers.get(sym);
+   297→      const liqOk = this.liquidityOk(ctx, ticker?.quoteVolume24h ?? 0);
+   298→      this.anomalyCtx.set(sym, ctx); // 上下文始终刷新（展示层用）
+   299→
+   300→      if (score >= keepMin && liqOk) {
+   301→        if (!entry) {
+   302→          if (this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) continue; // 满员：等退池释放
+   303→          this.pool.set(sym, {
+   304→            symbol: sym,
+   305→            addedAt: now,
+   306→            lastAnomalyAt: ctx.active ? now : ctx.updatedAt,
+   307→            expiresAt: now + TREND_WATCH.CANDIDATE_TTL_MS,
+   308→            lastEntryScore: score,
+   309→            lastWeakAt: 0,
+   310→            lastKlineAt: 0,
+   311→            lastBarTime: null,
+   312→            dataMissing: false,
+   313→            confirmedLeftAt: null,
+   314→            entryChannel: 'anomaly',
+   315→          });
+   316→          poolChanged = true;
+   317→          void this.persistUpsert(sym, now);
+   318→        } else if (ctx.active) {
+   319→          // 活跃异动续期：刷新 TTL 起点（迟滞宽限同时解除）
+   320→          entry.lastAnomalyAt = now;
+   321→          entry.lastEntryScore = score;
+   322→          entry.lastWeakAt = 0;
+   323→          const newExp = now + TREND_WATCH.CANDIDATE_TTL_MS;
+   324→          if (newExp > entry.expiresAt) entry.expiresAt = newExp;
+   325→          poolChanged = true;
+   326→        }
+   327→      } else if (entry && !entry.lastWeakAt) {
+   328→        entry.lastWeakAt = now; // 弱化起点（仅记录；实际退池在下面统一判定）
+   329→      }
+   330→    }
+   331→
+   332→    // 3) 退池扫描（candidate/confirmed 保留规则见 config 注释）
+   333→    for (const [sym, entry] of this.pool) {
+   334→      const st = this.states.get(sym);
+   335→      const phase = st?.phase ?? 'idle';
+   336→      const expired = now > entry.expiresAt;
+   337→      const sinceAnomaly = now - entry.lastAnomalyAt;
+   338→      const staleData =
+   339→        entry.lastKlineAt > 0 && now - entry.lastKlineAt >= TREND_WATCH.STALE_DATA_EXIT_MS;
+   340→
+   341→      let retire = false;
+   342→      if (staleData) {
+   343→        retire = true; // 数据断供（任何相位，含 confirmed——没数据就无法跟踪）
+   344→      } else if (phase === 'confirmed') {
+   345→        retire = false; // 已确认趋势：不因事件结束退池（回落 idle 后走下面的宽限）
+   346→      } else if (phase === 'candidate') {
+   347→        // 候选趋势：UTE 正在积累确认——过期后再给一个完整 TTL 的确认窗口
+   348→        retire = expired && sinceAnomaly >= TREND_WATCH.CANDIDATE_TTL_MS;
+   349→      } else {
+   350→        // idle：过期后再给 IDLE_EXIT_MS 宽限（从过期点起算；期间新异动会续期解除）；
+   351→        // 或曾确认回落 idle 后的宽限
+   352→        const leftIdle =
+   353→          entry.confirmedLeftAt != null &&
+   354→          now - entry.confirmedLeftAt >= TREND_WATCH.CONFIRMED_IDLE_EXIT_MS;
+   355→        const graceAfterExpiry = now - entry.expiresAt >= TREND_WATCH.IDLE_EXIT_MS;
+   356→        retire = (expired && graceAfterExpiry) || leftIdle;
+   357→      }
+   358→
+   359→      if (retire) {
+   360→        this.evictSymbol(sym);
+   361→        poolChanged = true;
+   362→      }
+   363→    }
+   364→
+   365→    // 4) 上限裁剪（保险：正常流程满员不入，这里处理恢复/并发导致的超员）
+   366→    if (this.pool.size > TREND_WATCH.MAX_TREND_SYMBOLS) {
+   367→      const retainRank = (sym: string) => {
+   368→        const st = this.states.get(sym);
+   369→        const phase = st?.phase ?? 'idle';
+   370→        const phaseW = phase === 'confirmed' ? 3 : phase === 'candidate' ? 2 : 1;
+   371→        const score = this.anomalyCtx.has(sym) ? this.scoreOf(this.anomalyCtx.get(sym)!, now) : 0;
+   372→        return phaseW * 1000 + score;
+   373→      };
+   374→      const ordered = [...this.pool.keys()].sort((a, b) => retainRank(b) - retainRank(a));
+   375→      for (const sym of ordered.slice(TREND_WATCH.MAX_TREND_SYMBOLS)) {
+   376→        this.evictSymbol(sym);
+   377→        poolChanged = true;
+   378→      }
+   379→    }
+   380→
+   381→    if (poolChanged) this.lastRebuildAt = now; // 有变化时不必立即再重建（防抖）
+   382→
+   383→    // 5) Task 54：主动探针通道（不依赖异动事件的候选发现；预算可配）
+   384→    this.maybeProbe(now, [...tickers.values()]);
+   385→  }
+   386→
+   387→  /** 统一退池：清空全部内存态并标记 DB RETIRED（重新入池则从零重新确认） */
+   388→  private evictSymbol(sym: string): void {
+   389→    this.pool.delete(sym);
+   390→    this.anomalyCtx.delete(sym);
+   391→    this.lastSignals.delete(sym);
+   392→    this.states.delete(sym);
+   393→    this.lifecycles.delete(sym);
+   394→    this.v2Signals.delete(sym);
+   395→    void this.persistRetire(sym);
+   396→  }
+   397→
+   398→  // ============ 主动探针通道（Task 54 §2.1：兼顾「正在形成趋势」） ============
+   399→  // 从可交易合约宇宙按成交额轮换探测未入池标的：用「形成中趋势」特征组合
+   400→  // （ER/一致性/量比/区间扩张达标 + 窗口收益未走完）判准入池；只做候选选择，
+   401→  // 方向结论仍由入池后的 UTE 正式评估给出。
+   402→
+   403→  private maybeProbe(now: number, tickers: TrendTickerSnap[]): void {
+   404→    if (!this.deps.probe) return; // 测试注入默认关闭；生产（engine）开启
+   405→    if (this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) return;
+   406→    if (this.probeInflight.size > 0) return; // 上轮探针未完成不叠加（请求预算护栏）
+   407→    if (
+   408→      now - this.probeQueueBuiltAt >= TREND_WATCH.REBUILD_MS * 2 ||
+   409→      this.probeQueue.length === 0
+   410→    ) {
+   411→      this.probeQueue = tickers
+   412→        .filter(
+   413→          (t) =>
+   414→            t.price > 0 &&
+   415→            t.quoteVolume24h >= TREND_WATCH.PROBE_QV_MIN &&
+   416→            !this.pool.has(t.symbol),
+   417→        )
+   418→        .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+   419→        .map((t) => t.symbol);
+   420→      this.probeQueueBuiltAt = now;
+   421→    }
+   422→    let budget = TREND_WATCH.PROBE_PER_REBUILD;
+   423→    while (
+   424→      budget > 0 &&
+   425→      this.probeQueue.length > 0 &&
+   426→      this.pool.size + this.probeInflight.size < TREND_WATCH.MAX_TREND_SYMBOLS
+   427→    ) {
+   428→      const sym = this.probeQueue.shift()!;
+   429→      if (this.pool.has(sym) || this.inflight.has(sym) || this.probeInflight.has(sym)) continue;
+   430→      budget--;
+   431→      this.probeInflight.add(sym);
+   432→      void this.probeSymbol(sym).finally(() => this.probeInflight.delete(sym));
+   433→    }
+   434→  }
+   435→
+   436→  /** 探测单标的：480 根 1m → 已收盘 → 特征「形成中趋势」判准 → 入池（不动方向状态） */
+   437→  private async probeSymbol(symbol: string): Promise<void> {
+   438→    try {
+   439→      const now = Date.now();
+   440→      const ticker = this.deps.getTickers().find((t) => t.symbol === symbol);
+   441→      if (!ticker || !(ticker.price > 0) || now - ticker.updatedAt > TREND_WATCH.MAX_TICK_AGE_MS) return;
+   442→      if (this.pool.has(symbol) || this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) return;
+   443→      this.probeReqs++;
+   444→      const candles = await this.deps.fetchKlines(symbol, TREND_WATCH.KLINE_BARS_V2);
+   445→      const clean = cleanCandles(candles);
+   446→      const closed = toClosedBars(seriesOf(symbol, clean), INTERVAL_MS, Date.now());
+   447→      if (closed.length < TREND_WATCH.MIN_CLOSED_BARS) return; // 数据量不足：不冒充有效特征
+   448→      const assessment = assessTrend(closed, { now: Date.now() }, this.trendCfg);
+   449→      const f = assessment.features;
+   450→      const vol = computeVolatilityFeatures(closed);
+   451→      if (!f || f.barsUsed < TREND_WATCH.MIN_CLOSED_BARS) return;
+   452→      const forming =
+   453→        assessment.direction !== 'flat' &&
+   454→        f.directionalConsistency >= TREND_WATCH.PROBE_CONSISTENCY_MIN &&
+   455→        vol.efficiencyRatio >= TREND_WATCH.PROBE_ER_MIN &&
+   456→        f.volumeRatio >= TREND_WATCH.PROBE_VOLUME_RATIO_MIN &&
+   457→        f.rangeExpansion >= TREND_WATCH.PROBE_RANGE_EXPANSION_MIN &&
+   458→        Math.abs(f.returnPct) <= TREND_WATCH.PROBE_RETURN_MAX_PCT;
+   459→      if (!forming) return;
+   460→      if (this.pool.has(symbol) || this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) return;
+   461→      const now2 = Date.now();
+   462→      this.pool.set(symbol, {
+   463→        symbol,
+   464→        addedAt: now2,
+   465→        lastAnomalyAt: now2,
+   466→        expiresAt: now2 + TREND_WATCH.CANDIDATE_TTL_MS,
+   467→        lastEntryScore: 0,
+   468→        lastWeakAt: 0,
+   469→        lastKlineAt: 0,
+   470→        lastBarTime: null,
+   471→        dataMissing: false,
+   472→        confirmedLeftAt: null,
+   473→        entryChannel: 'probe',
+   474→      });
+   475→      void this.persistUpsert(symbol, now2);
+   476→    } catch {
+   477→      // 探针失败静默：下轮重建会重新入队
+   478→    }
+   479→  }
+   480→
+   481→  // ============ K 线刷新与 UTE 评估 ============
+   482→
+   483→  /** 刷新优先级：confirmed > candidate > 从未刷新过的新入池 > 按最近刷新时间最旧优先 */
+   484→  private refreshDue(now: number): void {
+   485→    const due = [...this.pool.values()]
+   486→      .filter((e) => now - e.lastKlineAt >= TREND_WATCH.KLINE_INTERVAL_MS)
+   487→      .sort((a, b) => {
+   488→        const phaseOf = (sym: string) => this.states.get(sym)?.phase ?? 'idle';
+   489→        const w = (sym: string) =>
+   490→          phaseOf(sym) === 'confirmed' ? 2 : phaseOf(sym) === 'candidate' ? 1 : 0;
+   491→        return w(b.symbol) - w(a.symbol) || a.lastKlineAt - b.lastKlineAt;
+   492→      });
+   493→    for (const entry of due) {
+   494→      if (this.inflight.size >= TREND_WATCH.KLINE_CONCURRENCY) break;
+   495→      if (this.inflight.has(entry.symbol)) continue;
+   496→      void this.refreshSymbol(entry.symbol);
+   497→    }
+   498→  }
+   499→
+   500→  /** 数据不可用：标记 DATA_UNAVAILABLE（不伪装趋势结束；恢复后按正常规则继续） */
+   501→  private markDataUnavailable(symbol: string, reason: string, now: number): void {
+   502→    const entry = this.pool.get(symbol);
+   503→    if (!entry) return;
+   504→    entry.dataMissing = true;
+   505→    const lc = this.lifecycles.get(symbol) ?? createLifecycleState(symbol);
+   506→    const prevPhaseV2 = lc.phase;
+   507→    const res = stepLifecycle(lc, {
+   508→      utePhase: 'idle',
+   509→      uteDirection: 'flat',
+   510→      uteCandidateDirection: 'flat',
+   511→      directionalConsistency: 0,
+   512→      returnPct: 0,
+   513→      barTime: null,
+   514→      uteChangedAt: null,
+   515→      uteConfirmCount: 0,
+   516→      uteScore: 0,
+   517→      strength: 0,
+   518→      features: null,
+   519→      dataOk: false,
+   520→      now,
+   521→    });
+   522→    this.lifecycles.set(symbol, res.state); // 写回（同 refreshSymbol 纪律）
+   523→    const prevV2 = this.v2Signals.get(symbol);
+   524→    this.v2Signals.set(
+   525→      symbol,
+   526→      this.buildSignalV2({
+   527→        symbol,
+   528→        entry,
+   529→        lc: res.state,
+   530→        ute: this.lastSignals.get(symbol) ?? null,
+   531→        vol: prevV2?.features ?? null,
+   532→        htf5m: prevV2?.htf5m ?? null,
+   533→        htf15m: prevV2?.htf15m ?? null,
+   534→        dataOk: false,
+   535→        dataReason: reason,
+   536→        reason: res.reason,
+   537→        now,
+   538→      }),
+   539→    );
+   540→    if (prevPhaseV2 !== res.state.phase) void this.persistUpsert(symbol, now);
+   541→  }
+   542→
+   543→  /** 单标的刷新 + 评估（inflight 去重：同一标的绝不并发重复请求） */
+   544→  private async refreshSymbol(symbol: string): Promise<void> {
+   545→    if (this.inflight.has(symbol)) return;
+   546→    this.inflight.add(symbol);
+   547→    const entry = this.pool.get(symbol);
+   548→    if (!entry || this.stopped) {
+   549→      this.inflight.delete(symbol);
+   550→      return;
+   551→    }
+   552→    try {
+   553→      const now = Date.now();
+   554→      // ① 行情有效性门控：最新行情有效才参与趋势判断（无效时不浪费 K 线请求）
+   555→      const ticker = this.deps.getTickers().find((t) => t.symbol === symbol);
+   556→      if (!ticker || !(ticker.price > 0) || now - ticker.updatedAt > TREND_WATCH.MAX_TICK_AGE_MS) {
+   557→        this.markDataUnavailable(symbol, '行情缺失或过期（>10s）', now);
+   558→        return;
+   559→      }
+   560→      // ② 拉真实合约 K 线（归属源分片 + 多源兜底 + 令牌桶限速由 collector 统一处理）
+   561→      // 请求发出即计数（含失败），与 collector.klineReqs 口径一致
+   562→      this.klineReqs++;
+   563→      const candles = await this.deps.fetchKlines(symbol, TREND_WATCH.KLINE_BARS_V2);
+   564→      entry.lastKlineAt = Date.now();
+   565→      // ③ 防御性清洗
+   566→      const clean = cleanCandles(candles);
+   567→      const series = seriesOf(symbol, clean);
+   568→      // ④ UTE toClosedBars：剔除未收盘 K 线与非法 OHLCV（绝不从 close 估造 high/low）
+   569→      const now2 = Date.now();
+   570→      const closed = toClosedBars(series, INTERVAL_MS, now2);
+   571→      if (closed.length < TREND_WATCH.MIN_CLOSED_BARS) {
+   572→        this.markDataUnavailable(
+   573→          symbol,
+   574→          `已收盘 K 线不足（${closed.length}/${TREND_WATCH.MIN_CLOSED_BARS}）`,
+   575→          now2,
+   576→        );
+   577→        return;
+   578→      }
+   579→      entry.dataMissing = false;
+   580→      // ⑤ UTE 趋势评估（方向由价格序列独立判断，不强制等于异动方向；
+   581→      //    同根已收盘 K 线重复轮询不会累计确认——UTE lastObservationKey 保证）
+   582→      const ctx = this.anomalyCtx.get(symbol);
+   583→      const result = scanAnomalyCandidates(
+   584→        [{ series, anomalyFlag: ctx?.active ?? false }],
+   585→        this.states,
+   586→        now2,
+   587→        this.trendCfg,
+   588→        INTERVAL_MS,
+   589→      );
+   590→      const signal = result.signals.find((s) => s.symbol === symbol);
+   591→      if (!signal) return;
+   592→      const prev = this.lastSignals.get(symbol);
+   593→      this.states.set(symbol, signal);
+   594→      this.lastSignals.set(symbol, signal);
+   595→      // ⑥ Task 54：波动率特征 + 高周期过滤 + 生命周期推进（方向唯一来源仍是 UTE）
+   596→      const features = computeVolatilityFeatures(closed);
+   597→      const htfCfg = { lookbackBars: TREND_WATCH.lookbackBars, minMovePct: TREND_WATCH.minMovePct };
+   598→      const htf5m = assessHtf(closed, 5, now2, htfCfg, (bars, opts) => assessTrend(bars, opts, this.trendCfg));
+   599→      const htf15m = assessHtf(closed, 15, now2, htfCfg, (bars, opts) => assessTrend(bars, opts, this.trendCfg));
+   600→      const lastBarTime = signal.assessment.features?.latestBarTime ?? null;
+   601→      const staleBar =
+   602→        lastBarTime != null && now2 - (lastBarTime + INTERVAL_MS) > TREND_WATCH.KLINE_STALE_MS;
+   603→      const uteEligible = signal.assessment.eligible && signal.assessment.features != null;
+   604→      const dataOk = !staleBar && uteEligible;
+   605→      const lc = this.lifecycles.get(symbol) ?? createLifecycleState(symbol);
+   606→      const strength = Math.max(
+   607→        0,
+   608→        Math.min(
+   609→          1,
+   610→          Math.abs(signal.assessment.features?.returnPct ?? 0) /
+   611→            (TREND_WATCH.minMovePct * 3),
+   612→        ),
+   613→      );
+   614→      const res = stepLifecycle(lc, {
+   615→        utePhase: signal.phase,
+   616→        uteDirection: signal.direction,
+   617→        uteCandidateDirection: signal.candidateDirection,
+   618→        directionalConsistency: signal.assessment.features?.directionalConsistency ?? 0,
+   619→        returnPct: signal.assessment.features?.returnPct ?? 0,
+   620→        barTime: lastBarTime,
+   621→        uteChangedAt: signal.changedAt,
+   622→        uteConfirmCount: signal.consecutiveObservations,
+   623→        uteScore: signal.lastScore,
+   624→        strength,
+   625→        features: uteEligible ? features : null,
+   626→        dataOk,
+   627→        now: now2,
+   628→      });
+   629→      // ⚠️ 状态机产出为新对象：必须写回 map，否则生命周期永不推进（回放发现的生产 bug）
+   630→      this.lifecycles.set(symbol, res.state);
+   631→      const prevPhaseV2 = lc.phase;
+   632→      // ⑦ 相位迁移记账（confirmed 回落 idle 时启动宽限）
+   633→      const prevPhase = prev?.phase ?? 'idle';
+   634→      if (prevPhase === 'confirmed' && signal.phase !== 'confirmed') {
+   635→        entry.confirmedLeftAt = now2;
+   636→      }
+   637→      if (signal.phase === 'confirmed') entry.confirmedLeftAt = null;
+   638→      entry.lastBarTime = lastBarTime ?? entry.lastBarTime;
+   639→      // ⑧ 统一信号（面板/自动交易/回放共同消费的唯一信封）
+   640→      this.v2Signals.set(
+   641→        symbol,
+   642→        this.buildSignalV2({
+   643→          symbol,
+   644→          entry,
+   645→          lc: res.state,
+   646→          ute: signal,
+   647→          vol: features,
+   648→          htf5m,
+   649→          htf15m,
+   650→          dataOk,
+   651→          dataReason: dataOk
+   652→            ? null
+   653→            : staleBar
+   654→              ? '最新收盘 K 线过期（>3min 未更新）'
+   655→              : 'UTE 评估不可用（K 线不足/过期）',
+   656→          reason: res.reason,
+   657→          now: now2,
+   658→        }),
+   659→      );
+   660→      // ⑨ 持久化：仅新 K 线 / 状态变化 / 方向变化时写库（不每轮扫描无条件写）
+   661→      const isNewBar =
+   662→        lastBarTime != null &&
+   663→        lastBarTime !== prev?.assessment.features?.latestBarTime;
+   664→      const phaseChanged = signal.phase !== prevPhase || prevPhaseV2 !== res.state.phase;
+   665→      const dirChanged = signal.direction !== (prev?.direction ?? 'flat');
+   666→      if (isNewBar || phaseChanged || dirChanged) {
+   667→        void this.persistUpsert(symbol, now2);
+   668→      }
+   669→    } catch {
+   670→      this.markDataUnavailable(symbol, 'K 线拉取失败/数据异常', Date.now());
+   671→    } finally {
+   672→      this.inflight.delete(symbol);
+   673→    }
+   674→  }
+   675→
+   676→  // ============ 统一信号构建（Task 54 §2.4） ============
+   677→
+   678→  private buildSignalV2(input: {
+   679→    symbol: string;
+   680→    entry: TrendPoolEntry;
+   681→    lc: LifecycleState;
+   682→    ute: TrendSignal | null;
+   683→    vol: VolatilityFeatures | null;
+   684→    htf5m: HtfAssessment | null;
+   685→    htf15m: HtfAssessment | null;
+   686→    dataOk: boolean;
+   687→    dataReason: string | null;
+   688→    reason: string;
+   689→    now: number;
+   690→  }): UnifiedTrendSignal {
+   691→    const { symbol, entry, lc, ute, vol, htf5m, htf15m, dataOk, dataReason, now } = input;
+   692→    const ctx = this.anomalyCtx.get(symbol);
+   693→    const dir = ute?.direction ?? 'flat';
+   694→    const cycleDir = lc.cycleDir;
+   695→    const htfAgree =
+   696→      cycleDir !== 'flat' && htf15m?.valid ? htf15m.dir === cycleDir : null;
+   697→    const uteReason = ute?.assessment.reason ?? '';
+   698→    const conflict =
+   699→      (dir !== 'flat' || cycleDir !== 'flat') &&
+   700→      ctx?.dir != null &&
+   701→      ((cycleDir !== 'flat' ? cycleDir : dir) === 'up') !== (ctx.dir === 'UP');
+   702→    const trendDir = cycleDir !== 'flat' ? cycleDir : dir;
+   703→    return {
+   704→      symbol,
+   705→      market: MARKET,
+   706→      interval: INTERVAL,
+   707→      phase: lc.phase,
+   708→      direction: trendDir,
+   709→      trendCycleId: lc.cycleId,
+   710→      trendStartedAt: lc.cycleStartedAt,
+   711→      endPendingSince: lc.endPendingSince,
+   712→      endEvidenceBars: lc.endEvidenceBars,
+   713→      endedAt: lc.endedAt,
+   714→      endReason: lc.endReason,
+   715→      score: ute?.lastScore ?? 0,
+   716→      strength: ute
+   717→        ? Math.max(
+   718→            0,
+   719→            Math.min(1, Math.abs(ute.assessment.features?.returnPct ?? 0) / (TREND_WATCH.minMovePct * 3)),
+   720→          )
+   721→        : 0,
+   722→      confirmCount: ute?.consecutiveObservations ?? 0,
+   723→      features:
+   724→        vol ?? {
+   725→          atr: 0, atrPct: 0, realizedVolPct: 0, volPercentile: -1, volRegime: 'NORMAL',
+   726→          efficiencyRatio: 0, upperWickPct: 0, lowerWickPct: 0, breakout: 'none',
+   727→          falseBreakout: false, barsUsed: 0,
+   728→        },
+   729→      htf5m: htf5m ?? { dir: 'flat', efficiencyRatio: 0, returnPct: 0, valid: false, bars: 0 },
+   730→      htf15m: htf15m ?? { dir: 'flat', efficiencyRatio: 0, returnPct: 0, valid: false, bars: 0 },
+   731→      htfAgree,
+   732→      lastBarTime: entry.lastBarTime,
+   733→      lastKlineAt: entry.lastKlineAt,
+   734→      dataFresh: dataOk && !entry.dataMissing,
+   735→      dataUnavailableReason: dataOk && !entry.dataMissing ? null : dataReason ?? '数据不可用',
+   736→      anomaly: {
+   737→        dir: ctx?.dir ?? null,
+   738→        level: ctx?.level ?? null,
+   739→        priority: ctx?.priority ?? null,
+   740→        active: ctx?.active ?? false,
+   741→        lastAt: entry.lastAnomalyAt,
+   742→      },
+   743→      conflict,
+   744→      reason: uteReason ? `${input.reason}；UTE：${uteReason}` : input.reason,
+   745→      changedAt: now,
+   746→    };
+   747→  }
+   748→
+   749→  // ============ 持久化 ============
+   750→
+   751→  private recordFor(symbol: string, now: number) {
+   752→    const entry = this.pool.get(symbol);
+   753→    const st = this.states.get(symbol);
+   754→    const signal = this.lastSignals.get(symbol);
+   755→    const lc = this.lifecycles.get(symbol);
+   756→    return {
+   757→      symbol,
+   758→      market: MARKET,
+   759→      interval: INTERVAL,
+   760→      status: 'WATCHING' as const,
+   761→      addedAt: entry?.addedAt ?? now,
+   762→      lastAnomalyAt: entry?.lastAnomalyAt ?? null,
+   763→      expiresAt: entry?.expiresAt ?? null,
+   764→      trendStateJson: JSON.stringify(st ?? { symbol, phase: 'idle' }),
+   765→      lastSignalJson: signal ? JSON.stringify(signal) : null,
+   766→      lastPhase: st?.phase ?? 'idle',
+   767→      lastDirection: st?.direction ?? 'flat',
+   768→      lastScore: st?.lastScore ?? 0,
+   769→      lastBarTime: entry?.lastBarTime ?? null,
+   770→      lastKlineAt: entry?.lastKlineAt ? entry.lastKlineAt : null,
+   771→      lifecycleStateJson: JSON.stringify(lc ?? createLifecycleState(symbol)),
+   772→      trendCycleId: lc?.cycleId ?? null,
+   773→      lastPhaseV2: lc?.phase ?? 'OBSERVING',
+   774→      endReason: lc?.endReason ?? null,
+   775→    };
+   776→  }
+   777→
+   778→  private async persistUpsert(symbol: string, now: number): Promise<void> {
+   779→    try {
+   780→      await this.deps.repo.upsert(this.recordFor(symbol, now));
+   781→      this.dbWrites++;
+   782→    } catch (e) {
+   783→      this.dbErrors++;
+   784→      console.warn('[trend-watch] upsert 失败：', e instanceof Error ? e.message : e);
+   785→    }
+   786→  }
+   787→
+   788→  private async persistRetire(symbol: string): Promise<void> {
+   789→    try {
+   790→      await this.deps.repo.markRetired(symbol, MARKET, INTERVAL);
+   791→      this.dbWrites++;
+   792→    } catch (e) {
+   793→      this.dbErrors++;
+   794→      console.warn('[trend-watch] markRetired 失败：', e instanceof Error ? e.message : e);
+   795→    }
+   796→  }
+   797→
+   798→  // ============ 对外查询 ============
+   799→
+   800→  /** 统一趋势信号（Task 54：AutoPaperTrader 消费入口——不再另行计算趋势） */
+   801→  latestSignals(): UnifiedTrendSignal[] {
+   802→    return [...this.v2Signals.values()];
+   803→  }
+   804→
+   805→  signalOf(symbol: string): UnifiedTrendSignal | null {
+   806→    return this.v2Signals.get(symbol) ?? null;
+   807→  }
+   808→
+   809→  snapshot(now: number): TrendWatchSnapshot {
+   810→    const tickers = new Map<string, TrendTickerSnap>(
+   811→      this.deps.getTickers().map((t) => [t.symbol, t]),
+   812→    );
+   813→    const phaseW = (p: string) =>
+   814→      p === 'CONFIRMED_UP' || p === 'CONFIRMED_DOWN'
+   815→        ? 0
+   816→        : p === 'END_PENDING'
+   817→          ? 1
+   818→          : p === 'CANDIDATE_UP' || p === 'CANDIDATE_DOWN'
+   819→            ? 2
+   820→            : p === 'DATA_UNAVAILABLE'
+   821→              ? 3
+   822→              : 4;
+   823→    const rows: TrendWatchRow[] = [];
+   824→    for (const [sym, entry] of this.pool) {
+   825→      const st = this.states.get(sym);
+   826→      const signal = this.lastSignals.get(sym);
+   827→      const v2 = this.v2Signals.get(sym);
+   828→      const ctx = this.anomalyCtx.get(sym);
+   829→      const ticker = tickers.get(sym);
+   830→      const lastBar = entry.lastBarTime;
+   831→      const phase = st?.phase ?? 'idle';
+   832→      const direction = st?.direction ?? 'flat';
+   833→      const score = st?.lastScore ?? 0;
+   834→      const trendDir = v2?.direction ?? direction;
+   835→      const conflict =
+   836→        v2?.conflict ??
+   837→        (direction !== 'flat' &&
+   838→          ctx?.dir != null &&
+   839→          (direction === 'up') !== (ctx.dir === 'UP'));
+   840→      rows.push({
+   841→        symbol: sym,
+   842→        base: baseOf(sym),
+   843→        phase,
+   844→        direction,
+   845→        phaseV2: v2?.phase ?? 'OBSERVING',
+   846→        trendCycleId: v2?.trendCycleId ?? null,
+   847→        trendStartedAt: v2?.trendStartedAt ?? null,
+   848→        endPendingSince: v2?.endPendingSince ?? null,
+   849→        endEvidenceBars: v2?.endEvidenceBars ?? 0,
+   850→        endedAt: v2?.endedAt ?? null,
+   851→        endReason: v2?.endReason ?? null,
+   852→        strength: v2?.strength ?? 0,
+   853→        vol: v2?.features ?? null,
+   854→        htf5m: v2?.htf5m ?? null,
+   855→        htf15m: v2?.htf15m ?? null,
+   856→        htfAgree: v2?.htfAgree ?? null,
+   857→        dataFresh: v2?.dataFresh ?? false,
+   858→        dataUnavailableReason: v2?.dataUnavailableReason ?? null,
+   859→        entryChannel: entry.entryChannel,
+   860→        score,
+   861→        reason: signal?.assessment.reason ?? '',
+   862→        features: signal?.assessment.features
+   863→          ? {
+   864→              returnPct: signal.assessment.features.returnPct,
+   865→              directionalConsistency: signal.assessment.features.directionalConsistency,
+   866→              volumeRatio: signal.assessment.features.volumeRatio,
+   867→              breakout: signal.assessment.features.breakout,
+   868→              rangeExpansion: signal.assessment.features.rangeExpansion,
+   869→              barsUsed: signal.assessment.features.barsUsed,
+   870→              latestBarTime: signal.assessment.features.latestBarTime,
+   871→            }
+   872→          : null,
+   873→        consecutiveObservations: st?.consecutiveObservations ?? 0,
+   874→        changedAt: st?.changedAt ?? null,
+   875→        addedAt: entry.addedAt,
+   876→        lastAnomalyAt: entry.lastAnomalyAt,
+   877→        expiresAt: entry.expiresAt,
+   878→        anomalyDir: ctx?.dir ?? null,
+   879→        anomalyLevel: ctx?.level ?? null,
+   880→        anomalyPriority: ctx?.priority ?? null,
+   881→        anomalyActive: ctx?.active ?? false,
+   882→        conflict,
+   883→        lastBarTime: lastBar,
+   884→        lastKlineAt: entry.lastKlineAt,
+   885→        stale:
+   886→          lastBar != null && now - (lastBar + INTERVAL_MS) > TREND_WATCH.KLINE_STALE_MS,
+   887→        dataMissing: entry.dataMissing,
+   888→        price: ticker?.price ?? null,
+   889→        quoteVolume24h: ticker?.quoteVolume24h ?? null,
+   890→      });
+   891→    }
+   892→    rows.sort(
+   893→      (a, b) =>
+   894→        phaseW(a.phaseV2) - phaseW(b.phaseV2) ||
+   895→        b.score - a.score ||
+   896→        a.symbol.localeCompare(b.symbol),
+   897→    );
+   898→    const stats: TrendWatchStats = {
+   899→      poolSize: this.pool.size,
+   900→      maxPoolSize: TREND_WATCH.MAX_TREND_SYMBOLS,
+   901→      confirmed: rows.filter((r) => r.phase === 'confirmed').length,
+   902→      candidate: rows.filter((r) => r.phase === 'candidate').length,
+   903→      watching: rows.filter((r) => r.phase === 'idle').length,
+   904→      endPending: rows.filter((r) => r.phaseV2 === 'END_PENDING').length,
+   905→      dataUnavailable: rows.filter((r) => r.phaseV2 === 'DATA_UNAVAILABLE').length,
+   906→      probeReqs: this.probeReqs,
+   907→      klineReqs: this.klineReqs,
+   908→      dbWrites: this.dbWrites,
+   909→      dbErrors: this.dbErrors,
+   910→      lastScanAt: this.lastScanAt,
+   911→      lastRebuildAt: this.lastRebuildAt,
+   912→      startedAt: this.startedAt,
+   913→      restoredFromDb: this.restoredFromDb,
+   914→    };
+   915→    return { ts: now, interval: INTERVAL, market: MARKET, pool: rows, stats };
+   916→  }
+   917→}
+   918→

@@ -1,12 +1,15 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { useEnhancedAnomalies } from '@/hooks/use-enhanced';
+import { usePaperAccount } from '@/hooks/use-scanner';
 import { fmtAgo, fmtAgoShort, fmtHM, fmtPrice, fmtTime } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { TradeModal, type TradeIntent } from '@/components/scanner/trade-modal';
 import { CoinDialog } from '@/components/market/coin-dialog';
-import { PositionsPanel } from './positions-panel';
+import { PaperPanel } from '@/components/scanner/paper-panel';
+import { TrendPanel } from '@/components/enhanced/trend-panel';
 import { Skeleton } from '@/components/ui/skeleton';
 import {
   Activity,
@@ -15,6 +18,7 @@ import {
   CircleAlert,
   Radar,
   ShieldCheck,
+  TrendingUp,
 } from 'lucide-react';
 import type { EnhancedEventDTO } from '@/lib/market/enhanced/types';
 
@@ -329,13 +333,44 @@ function StatsBar(props: {
   bootTotal: number;
   active: number;
   outbound: number;
+  sources: Array<{
+    source: string;
+    label: string;
+    ok: boolean;
+    suspended: boolean;
+    symbols: number;
+    homeSymbols: number;
+    klineReqs: number;
+    lastError: string;
+  }>;
 }) {
   return (
     <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border border-border/70 bg-card px-4 py-3 text-xs text-muted-foreground">
       <span className="flex items-center gap-1.5 font-semibold text-foreground">
         <Radar className="h-4 w-4 text-gold" />
-        升级版异动引擎
+        升级版异动引擎 · USDT-M 合约
       </span>
+      {/* 多源分片供价：币安 Top125，其余 ~400 由 Bybit/Gate 平分；源挂掉自动降级 */}
+      {props.sources.length > 0 && (
+        <span className="flex items-center gap-2.5">
+          {props.sources.map((s) => (
+            <span
+              key={s.source}
+              className="inline-flex items-center gap-1"
+              title={`${s.label} · ${s.ok ? '供价中' : s.suspended ? '异常挂起，稍后自动重试' : '连接中'} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个 · K 线已承接 ${s.klineReqs} req${s.lastError ? ` · ${s.lastError}` : ''}`}
+            >
+              <span
+                className={cn(
+                  'h-1.5 w-1.5 rounded-full',
+                  s.ok ? 'bg-up' : s.suspended ? 'bg-down' : 'animate-pulse bg-muted-foreground/60',
+                )}
+              />
+              {s.label}
+              <span className="tabular-nums text-muted-foreground/80">{s.homeSymbols}</span>
+            </span>
+          ))}
+        </span>
+      )}
       <span className="tabular-nums">
         监控 <span className="font-semibold text-foreground">{props.tracked}</span> 个 · 基线就绪{' '}
         <span className="font-semibold text-foreground">{props.baselineReady}</span>
@@ -348,7 +383,7 @@ function StatsBar(props: {
       <span className="tabular-nums">活跃事件 {props.active}</span>
       <span className="tabular-nums">引擎出站 {props.outbound} req（独立计数）</span>
       <span className="hidden lg:inline">
-        滚动 24h 基线由已收盘 1m K 线计算 · 自适应阈值 · 多重证据聚合 · 方向可输出「不明」
+        品种=币安 U 本位永续 · 币安监控 Top125 其余两所平分 · 单源供价 · 滚动 24h 基线 · 自适应阈值
       </span>
     </div>
   );
@@ -356,6 +391,7 @@ function StatsBar(props: {
 
 export function EnhancedView() {
   const { data, isLoading, isError } = useEnhancedAnomalies();
+  const paper = usePaperAccount();
   const [tradeIntent, setTradeIntent] = useState<TradeIntent | null>(null);
   const [tradeKey, setTradeKey] = useState(0);
   const [selectedSymbol, setSelectedSymbol] = useState<string | null>(null);
@@ -422,6 +458,15 @@ export function EnhancedView() {
   return (
     <>
       <div className="space-y-4 sm:space-y-5">
+        {/* Task 54：趋势自动模拟交易入口（独立页面，不与手动模拟盘混同） */}
+        <div className="flex justify-end">
+          <Link
+            href="/trend-trading"
+            className="inline-flex items-center gap-1.5 rounded border border-gold/50 px-2.5 py-1 text-xs font-semibold text-gold hover:bg-gold/10"
+          >
+            <TrendingUp className="h-3.5 w-3.5" /> 趋势自动模拟交易 →
+          </Link>
+        </div>
         {/* 引擎状态条 */}
         {stats && (
           <StatsBar
@@ -431,6 +476,7 @@ export function EnhancedView() {
             bootTotal={stats.bootBackfillTotal}
             active={stats.activeEvents}
             outbound={stats.outboundRequests}
+            sources={stats.sources ?? []}
           />
         )}
 
@@ -618,12 +664,20 @@ export function EnhancedView() {
           )
         )}
 
-        {/* 持仓明细：与模拟盘同账户（3s 轮询），本页直接盯涨跌 + 一键平仓 */}
-        <PositionsPanel onSelectSymbol={setSelectedSymbol} onManualTrade={openManual} />
+        {/* 趋势跟踪（Universal Trend Engine 集成）：候选池/阶段/方向/评分/冲突展示 */}
+        <TrendPanel onSelectSymbol={setSelectedSymbol} />
+
+        {/* 模拟建仓系统（原模拟盘页签并入）：账户总览 + 持仓 + 平仓流水 + 充值/重置 */}
+        <PaperPanel
+          data={paper.data}
+          loading={paper.isLoading}
+          onSelectSymbol={setSelectedSymbol}
+          onManualTrade={openManual}
+        />
       </div>
 
-      <TradeModal key={tradeKey} intent={tradeIntent} onClose={() => setTradeIntent(null)} />
-      <CoinDialog symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} />
+      <TradeModal key={tradeKey} intent={tradeIntent} onClose={() => setTradeIntent(null)} market="futures" />
+      <CoinDialog symbol={selectedSymbol} onClose={() => setSelectedSymbol(null)} market="futures" />
     </>
   );
 }

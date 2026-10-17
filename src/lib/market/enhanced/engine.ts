@@ -1,12 +1,16 @@
-// ---------- 升级版异动交易 · 引擎单例 ----------
+// ---------- 升级版异动交易 · 引擎单例（Task 50 起扫描 USDT-M 合约） ----------
 // 编排：行情有效性检查（§2.2）→ 三检测器（独立）→ 事件聚合器（§七）。
-// 数据源：collector 的 2s 全市场内存快照（零额外请求）+ 本引擎的 1m K 线仓库
+// 数据源（Task 50 定版）：合约多源聚合行情（futures-collector：币安 > Bybit > Gate，
+// 品种白名单 = 币安 U 本位永续）+ 本引擎的 1m 合约 K 线仓库
 //（滚动 24h 基线 / 自适应阈值 / 放量中位数基准，稳态 ~10 req/min）。
 // 单例驻留 globalThis，HMR 不重复启动；只在 /api/enhanced/* 被访问时启动。
 
-import { bFetch } from '../binance';
-import { collector } from '../collector';
+import { activeFuturesCollector } from '../futures-collector';
 import { isExcludedBase } from '../excluded';
+import type { FuturesSourceName } from '../futures-feeds';
+import { TrendWatchService } from '../trend-watch/service';
+import { prismaTrendWatchRepo } from '../trend-watch/repo';
+import { AutoPaperTrader } from '../trend-trade/auto-trader';
 import { AGG, STORE, VALIDITY, VOLUME, tierOf } from './config';
 import { KlineStore } from './klines';
 import { BreakoutTracker, detectSpike, detectVolume, type TickSnap } from './detectors';
@@ -32,14 +36,12 @@ interface SuspectState {
   logged: boolean;
 }
 
-interface ExchangeInfoEntry {
-  status: string;
-  baseAsset: string;
-  tickSize: number;
-}
-
 export class EnhancedEngine {
   store: KlineStore;
+  /** 趋势跟踪（Universal Trend Engine 集成）：生命周期随引擎，单例由引擎单例保证 */
+  readonly trendWatch: TrendWatchService;
+  /** 趋势自动模拟交易（Task 54）：消费 trendWatch 统一信号，纯模拟，独立账户 */
+  readonly autoTrader: AutoPaperTrader;
   private breakout = new BreakoutTracker();
   private agg = new Aggregator();
   private logs: DetectionLogEntry[] = [];
@@ -53,6 +55,23 @@ export class EnhancedEngine {
   /** 可接管旧实例的 K 线仓库（热重置时避免重复回填出站请求） */
   constructor(carriedStore?: KlineStore) {
     this.store = carriedStore ?? new KlineStore();
+    // 趋势服务：数据源与异动事件都从本引擎动态取（箭头函数延迟绑定）；
+    // 持久化走 Prisma repo——重建后从 DB 恢复候选池与确认历史，不依赖实例交接；
+    // Task 54：主动探针通道开启（engine 常驻场景）
+    this.trendWatch = new TrendWatchService({
+      fetchKlines: (symbol, limit) =>
+        activeFuturesCollector().fetchKlinesFor(symbol, '1m', { limit }),
+      getTickers: () => activeFuturesCollector().getTickers(),
+      getEvents: (now) => this.events(now),
+      repo: prismaTrendWatchRepo,
+      probe: true,
+    });
+    // 自动模拟交易：消费同一份统一信号（不另算趋势）；标记价走合约多源供价
+    this.autoTrader = new AutoPaperTrader({
+      getSignals: () => this.trendWatch.latestSignals(),
+      markPrice: (symbol) =>
+        activeFuturesCollector().getTickers().find((t) => t.symbol === symbol)?.price ?? 0,
+    });
   }
 
   /** 停止本实例全部定时器与回填（热重置用，防双实例重复出站） */
@@ -60,10 +79,11 @@ export class EnhancedEngine {
     this.bootBackfillAborted = true;
     for (const t of this.timers) clearInterval(t);
     this.timers = [];
+    this.trendWatch.stop(); // 趋势扫描同步停表（DB 恢复机制保证新实例不丢状态）
+    this.autoTrader.stop(); // 自动交易主循环停表（持仓/模式在 DB，新实例 reconcile 恢复）
     this.started = false;
   }
 
-  private tickSizeMap = new Map<string, ExchangeInfoEntry>();
   private suspects = new Map<string, SuspectState>();
   private baselineNoteAt = new Map<string, number>(); // BASELINE_INSUFFICIENT 节流
   private expansionQueue: string[] = [];
@@ -86,11 +106,14 @@ export class EnhancedEngine {
   }
 
   private async boot(): Promise<void> {
-    // 1) 交易对校验（§2.1）：状态 + 精度，每小时刷新
-    void this.refreshExchangeInfo();
-    // 2) 等 collector 就绪（tickers 有数据），再建监控清单
+    // 0) 启动合约多源采集器（幂等）：币安白名单 + 三源价格/24h 就绪后才有监控清单
+    void activeFuturesCollector().ensureStarted();
+    // 0.5) 启动趋势跟踪服务与自动模拟交易（幂等；从 DB 恢复候选池/确认历史/持仓关联）
+    void this.trendWatch.ensureStarted();
+    void this.autoTrader.ensureStarted();
+    // 1) 等 collector 就绪（tickers 有数据），再建监控清单
     setTimeout(() => void this.buildWatchlistAndBackfill(), STORE.collectReadyWaitMs);
-    // 3) 定时器：2s 检测 / 30s 放量 / 12s 轮换槽 / 5min 清单 / 30s 结束判定
+    // 2) 定时器：2s 检测 / 30s 放量 / 12s 轮换槽 / 5min 清单 / 30s 结束判定
     this.timers.push(setInterval(() => this.tick(), TICK_MS));
     this.timers.push(setInterval(() => this.volumeTick(), VOLUME_MS));
     this.timers.push(setInterval(() => void this.rotateSlot(), ROTATE_SLOT_MS));
@@ -98,39 +121,13 @@ export class EnhancedEngine {
     this.timers.push(setInterval(() => this.agg.sweep(Date.now()), SWEEP_MS));
   }
 
-  private async refreshExchangeInfo(): Promise<void> {
-    try {
-      const info = await bFetch<{
-        symbols: {
-          symbol: string;
-          status: string;
-          baseAsset: string;
-          filters: { filterType: string; tickSize?: string }[];
-        }[];
-      }>('/api/v3/exchangeInfo', { permissions: 'SPOT' });
-      this.tickSizeMap.clear();
-      for (const s of info.symbols) {
-        const pf = s.filters.find((f) => f.filterType === 'PRICE_FILTER');
-        this.tickSizeMap.set(s.symbol, {
-          status: s.status,
-          baseAsset: s.baseAsset,
-          tickSize: pf?.tickSize ? Number(pf.tickSize) : 0,
-        });
-      }
-    } catch {
-      // 校验信息不可用时降级：tickSize 按价格估算，状态视为通过（检测仍有其余有效性检查）
-    }
-    setTimeout(() => void this.refreshExchangeInfo(), STORE.exchangeInfoRefreshMs);
-  }
-
   // ============ 监控清单（§2.1/§六） ============
+  // 标的宇宙 = futures-collector 聚合行情（品种白名单：币安 U 本位永续，
+  // 且已剔除稳定币对/代币化股票；只有可交易品种会出现在 tickers 里）
 
   private candidateUniverse(): { symbol: string; qv: number }[] {
     const out: { symbol: string; qv: number }[] = [];
-    for (const t of collector.getTickers()) {
-      if (isExcludedBase(t.base)) continue; // 代币化股票/贵金属
-      const info = this.tickSizeMap.get(t.symbol);
-      if (info && info.status !== 'TRADING') continue; // 未通过交易对校验
+    for (const t of activeFuturesCollector().getTickers()) {
       if (t.price <= 0) continue;
       out.push({ symbol: t.symbol, qv: t.quoteVolume24h });
     }
@@ -138,17 +135,40 @@ export class EnhancedEngine {
   }
 
   private async buildWatchlistAndBackfill(): Promise<void> {
-    if (collector.getTickers().length === 0) {
+    if (activeFuturesCollector().getTickers().length === 0) {
       // collector 未就绪，稍后重试
+      setTimeout(() => void this.buildWatchlistAndBackfill(), 10_000);
+      return;
+    }
+    if (!activeFuturesCollector().isSharded()) {
+      // 分片未就绪（等待首次 24h 统计）：按归属均摊回填前先等分配完成
       setTimeout(() => void this.buildWatchlistAndBackfill(), 10_000);
       return;
     }
     this.rebuildWatchlist();
     if (this.baselineNoteAt.size > 800) this.baselineNoteAt.clear(); // 节流表防膨胀
-    // 冷启动回填：按成交额降序，前 bootBackfillCap 个立即回填（并发 2 + 间隔，防突发）
-    const list = this.candidateUniverse()
-      .filter((c) => c.qv >= 5_000_000 && !this.store.has(c.symbol))
-      .slice(0, STORE.bootBackfillCap);
+    // 冷启动回填（Task 51）：按归属源轮流排序——Bybit/Gate 优先就绪，币安只背它分片那份
+    //（且被令牌桶二次限速），不再出现「前 125 名全打币安」的突发
+    const uni = this.candidateUniverse().filter(
+      (c) => c.qv >= 5_000_000 && !this.store.has(c.symbol),
+    );
+    const byHome: Record<FuturesSourceName, { symbol: string; qv: number }[]> = {
+      binance: [],
+      bybit: [],
+      gate: [],
+    };
+    for (const c of uni) {
+      byHome[activeFuturesCollector().shardOf(c.symbol) ?? 'binance'].push(c);
+    }
+    const interleaved: { symbol: string; qv: number }[] = [];
+    const rounds = Math.max(byHome.binance.length, byHome.bybit.length, byHome.gate.length);
+    for (let i = 0; i < rounds; i++) {
+      for (const h of ['bybit', 'gate', 'binance'] as const) {
+        const c = byHome[h][i];
+        if (c) interleaved.push(c);
+      }
+    }
+    const list = interleaved.slice(0, STORE.bootBackfillCap);
     this.backfillTotal = list.length;
     this.backfillDone = 0;
     void this.runBootBackfill(list);
@@ -268,12 +288,10 @@ export class EnhancedEngine {
 
   private validSnaps(now: number): TickSnap[] {
     const out: TickSnap[] = [];
-    for (const t of collector.getTickers()) {
-      if (isExcludedBase(t.base)) continue;
-      const info = this.tickSizeMap.get(t.symbol);
-      if (info && info.status !== 'TRADING') continue;
+    for (const t of activeFuturesCollector().getTickers()) {
+      if (isExcludedBase(t.base)) continue; // 防御性保留（collector 白名单已剔除）
       if (!(t.price > 0)) continue;
-      // 时间戳有效性：collector 2s 节奏下超过 10s 视为延迟
+      // 时间戳有效性：供价源 5s 轮询节奏下超过 10s 视为延迟
       if (now - t.updatedAt > VALIDITY.maxTickAgeMs) continue;
       out.push({
         symbol: t.symbol,
@@ -376,7 +394,6 @@ export class EnhancedEngine {
     // 此前直接 undefined 导致 265 个达标币只有 220 个被检测）
     const tracked = this.store.has(snap.symbol);
     const s = tracked ? this.store.get(snap.symbol)! : null;
-    const info = this.tickSizeMap.get(snap.symbol);
     return {
       symbol: snap.symbol,
       tier: tierOf(snap.quoteVolume24h),
@@ -385,8 +402,8 @@ export class EnhancedEngine {
       medAbs5m: s ? this.store.medAbsReturn5m(snap.symbol, _now) : null,
       medQv1m: null,
       dataCoverage: s ? this.store.coverage(s, _now) : 0,
-      tickSize: info?.tickSize || snap.price * 0.0001,
-      tradingOk: info ? info.status === 'TRADING' : true,
+      tickSize: activeFuturesCollector().tickSizeOf(snap.symbol) || snap.price * 0.0001,
+      tradingOk: true, // 白名单即已通过交易对校验（合约清单只收 TRADING 永续）
     };
   }
 
@@ -433,10 +450,11 @@ export class EnhancedEngine {
     const now = Date.now();
     const counts = this.agg.counts();
     const tierCounts = { HIGH: 0, MID: 0, LOW: 0 };
-    for (const t of collector.getTickers()) {
+    for (const t of activeFuturesCollector().getTickers()) {
       const tier = tierOf(t.quoteVolume24h);
       if (tier !== 'NONE' && !isExcludedBase(t.base)) tierCounts[tier]++;
     }
+    const tw = this.trendWatch.snapshot(now).stats;
     return {
       ts: now,
       startedAt: this.startedAt,
@@ -452,6 +470,21 @@ export class EnhancedEngine {
       outboundRequests: this.store.outbound,
       lastRotateAt: this.lastRotateAt,
       dataAnomalies: this.dataAnomalies,
+      sources: activeFuturesCollector().getSourcesHealth(),
+      trendWatch: {
+        on: tw.startedAt > 0,
+        poolSize: tw.poolSize,
+        maxPoolSize: tw.maxPoolSize,
+        confirmed: tw.confirmed,
+        candidate: tw.candidate,
+        klineReqs: tw.klineReqs,
+        dbErrors: tw.dbErrors,
+      },
+      autoTrader: {
+        on: this.autoTrader.startedAt > 0,
+        opens: this.autoTrader.opens,
+        closes: this.autoTrader.closes,
+      },
     };
   }
 }
@@ -463,34 +496,128 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v13（Task 57-c）：参数控制台——用户可自行调整自动开仓参数（策略门槛/轮次/冲高套利
+//   来自 SHORT_SWING 覆盖，二次确认开关/冷却为基础设施列）+ waitBarConfirm 直开路径
+//   （关闭二次确认 = 达标当根直接开仓，快 1 根 K 线）+ executeOpen 抽取（pending/direct
+//   共用）。改行为必 bump key；旧实例 stop() 会同步停掉 autoTrader 主循环，新实例从 DB
+//   恢复持仓关联（reconcile）。
+// v12（Task 57-b）：短周期套利入场门槛下调——趋势起点入场（用户定版：高分≈走势已成熟，
+//   趋势起点分数不高）：模式 A score 60→45、模式 B 70→55（ER 守门不变）；清理 config.ts
+//   Task 56 死门槛常量（入场门槛自 Task 57 起唯一入口在策略 SHORT_SWING）。改行为必 bump
+//   key；旧实例 stop() 会同步停掉 autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
+// v11（Task 57）：策略可插拔重构——通用策略接口（strategy/types.ts + registry）+
+//   新策略「短周期套利 v1」（异动选币不问方向 / 1m 确认定多空 + 5m 背景分级 / 冲高套利
+//   SPIKE_TAKE / 走弱先走 WEAKNESS_EARLY / 同周期轮次再入场）；决策/待入场键轮次化
+//   `{cycleId}#R{round}`；TrendAutoConfig.strategyId + TrendTradeMeta.entryRound +
+//   TrendStrategyState 表。改行为必 bump key；旧实例 stop() 会同步停掉 autoTrader 主循环，
+//   新实例从 DB 恢复持仓关联（reconcile）。
+// v10（Task 56b）：db 单例 bump v2→v3（Prisma 连接永久只读事件，平台快照替换 db 文件
+//   inode 后旧连接写全挂）——engine/autoTrader/trendWatch 持有旧 db 引用，必须重建实例
+//   才能切到新 client。改行为必 bump key；旧实例 stop() 会同步停掉 autoTrader 主循环，
+//   新实例从 DB 恢复持仓关联（reconcile）。
+// v9（Task 56）：趋势结束状态机修复（证据幂等键/周期出生 bar 排除/方向感知衰减阈值）+
+//   退出 v3（END_PENDING 不平仓、ENDED 周期匹配 + 证据晚于开仓 bar）+ 入场门槛
+//   （score/ER/HTF 分级 + 待入场二次确认 + 同币种冷却 5min）+ sizing 改权益 20% +
+//   MFE/MAE 采集 + TrendPendingEntry 表。改行为必 bump key；旧实例 stop() 会同步停掉
+//   autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
+// v8（Task 55-3）：AutoPaperTrader sizing v2（每仓 = 权益÷持仓数量，余额不足 clamp）
+//   + tick 重入锁（防 setInterval 并发轮次双扣余额）。改行为必 bump key；旧实例 stop()
+//   会同步停掉 autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
+// v7（Task 55-2）：AutoPaperTrader 退出管理 v2（END_PENDING/ENDED 任意周期归属即自行平仓）
+//   + resetAccount（重置账户到 100 U）。改行为必 bump key；旧实例 stop() 会同步停掉
+//   autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
+// v6（Task 54b）：修复 TrendWatchService 生命周期状态未写回 map 的 bug（回放发现——
+//   END_PENDING/ENDED 永不推进）。v5（Task 54）：集成 AutoPaperTrader + TrendWatchService v2。
 
-const g = globalThis as typeof globalThis & { __binanceRadarEnhanced?: EnhancedEngine };
+const g = globalThis as typeof globalThis & {
+  __binanceRadarEnhanced?: EnhancedEngine; // v1（现货，遗留）
+  __binanceRadarEnhanced_v2?: EnhancedEngine; // v2（合约，回填按 qv 排序期）
+  __binanceRadarEnhanced_v3?: EnhancedEngine; // v3（分片均摊回填）
+  __binanceRadarEnhanced_v4?: EnhancedEngine;
+  __binanceRadarEnhanced_v5?: EnhancedEngine;
+  __binanceRadarEnhanced_v6?: EnhancedEngine;
+  __binanceRadarEnhanced_v7?: EnhancedEngine;
+  __binanceRadarEnhanced_v8?: EnhancedEngine;
+  __binanceRadarEnhanced_v9?: EnhancedEngine;
+  __binanceRadarEnhanced_v10?: EnhancedEngine;
+  __binanceRadarEnhanced_v11?: EnhancedEngine;
+  __binanceRadarEnhanced_v12?: EnhancedEngine;
+  __binanceRadarEnhanced_v13?: EnhancedEngine;
+};
+
+function pickLegacyEngine(
+  g: typeof globalThis & {
+    __binanceRadarEnhanced?: EnhancedEngine;
+    __binanceRadarEnhanced_v2?: EnhancedEngine;
+    __binanceRadarEnhanced_v3?: EnhancedEngine;
+    __binanceRadarEnhanced_v4?: EnhancedEngine;
+    __binanceRadarEnhanced_v5?: EnhancedEngine;
+    __binanceRadarEnhanced_v6?: EnhancedEngine;
+    __binanceRadarEnhanced_v7?: EnhancedEngine;
+    __binanceRadarEnhanced_v8?: EnhancedEngine;
+    __binanceRadarEnhanced_v9?: EnhancedEngine;
+    __binanceRadarEnhanced_v10?: EnhancedEngine;
+    __binanceRadarEnhanced_v11?: EnhancedEngine;
+    __binanceRadarEnhanced_v12?: EnhancedEngine;
+  },
+): EnhancedEngine | undefined {
+  return (
+    g.__binanceRadarEnhanced_v12 ??
+    g.__binanceRadarEnhanced_v11 ??
+    g.__binanceRadarEnhanced_v10 ??
+    g.__binanceRadarEnhanced_v9 ??
+    g.__binanceRadarEnhanced_v8 ??
+    g.__binanceRadarEnhanced_v7 ??
+    g.__binanceRadarEnhanced_v6 ??
+    g.__binanceRadarEnhanced_v5 ??
+    g.__binanceRadarEnhanced_v4 ??
+    g.__binanceRadarEnhanced_v3 ??
+    g.__binanceRadarEnhanced_v2 ??
+    g.__binanceRadarEnhanced
+  );
+}
+
+function carryStoreOf(old: EnhancedEngine | undefined): KlineStore | undefined {
+  // K 线仓库按市场标签携带：仅当旧仓库也是合约数据时复用（防现货/合约K线混用）
+  return old?.store && (old.store as { market?: string }).market === 'futures'
+    ? old.store
+    : undefined;
+}
+
+function stopLegacyEngine(old: EnhancedEngine | undefined): void {
+  if (!old) return;
+  if (typeof old.stop === 'function') {
+    old.stop();
+    return;
+  }
+  // 旧原型实例（无 stop 方法）：运行时字段可直接访问，手动清定时器防双实例出站
+  const legacy = old as unknown as {
+    timers?: ReturnType<typeof setInterval>[];
+    bootBackfillAborted?: boolean;
+  };
+  if (legacy.timers?.length) {
+    for (const t of legacy.timers) clearInterval(t);
+    legacy.timers = [];
+  }
+  if ('bootBackfillAborted' in legacy) legacy.bootBackfillAborted = true;
+}
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  return (g.__binanceRadarEnhanced ??= new EnhancedEngine());
+  const existing = g.__binanceRadarEnhanced_v13;
+  if (existing) return existing;
+  const legacy = pickLegacyEngine(g);
+  if (legacy) stopLegacyEngine(legacy);
+  const fresh = new EnhancedEngine(carryStoreOf(legacy));
+  g.__binanceRadarEnhanced_v13 = fresh;
+  return fresh;
 }
 
-/** 热重置：停掉旧实例定时器，携带 K 线仓库创建新实例（应用新代码，不再重复回填） */
+/** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced;
-  if (old) {
-    if (typeof old.stop === 'function') {
-      old.stop();
-    } else {
-      // 旧原型实例（无 stop 方法）：运行时字段可直接访问，手动清定时器防双实例出站
-      const legacy = old as unknown as {
-        timers?: ReturnType<typeof setInterval>[];
-        bootBackfillAborted?: boolean;
-      };
-      if (legacy.timers?.length) {
-        for (const t of legacy.timers) clearInterval(t);
-        legacy.timers = [];
-      }
-      if ('bootBackfillAborted' in legacy) legacy.bootBackfillAborted = true;
-    }
-  }
-  const fresh = new EnhancedEngine(old?.store);
-  g.__binanceRadarEnhanced = fresh;
+  const old = g.__binanceRadarEnhanced_v13 ?? pickLegacyEngine(g);
+  stopLegacyEngine(old);
+  const fresh = new EnhancedEngine(carryStoreOf(old));
+  g.__binanceRadarEnhanced_v13 = fresh;
   return fresh;
 }

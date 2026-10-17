@@ -5,7 +5,7 @@ import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/compone
 import { Input } from '@/components/ui/input';
 import { Slider } from '@/components/ui/slider';
 import { useOpenPosition, usePaperAccount } from '@/hooks/use-scanner';
-import { useTickers } from '@/hooks/use-market';
+import { useFuturesTickers, useTickers } from '@/hooks/use-market';
 import {
   PAPER_MIN_MARGIN,
   PAPER_MAX_MARGIN_RATIO,
@@ -20,6 +20,12 @@ import { AlertTriangle, TrendingDown, TrendingUp } from 'lucide-react';
 const LEV_PRESETS = [5, 10, 20];
 const MARGIN_PRESETS = [0.1, 0.25, 0.5, 1];
 
+const SOURCE_LABEL: Record<string, string> = {
+  binance: '币安U本位',
+  bybit: 'Bybit',
+  gate: 'Gate',
+};
+
 export interface TradeIntent {
   open: boolean;
   symbol?: string;
@@ -29,15 +35,23 @@ export interface TradeIntent {
 export function TradeModal({
   intent,
   onClose,
+  market = 'spot',
 }: {
   intent: TradeIntent | null;
   onClose: () => void;
+  /** 行情市场：异动交易页签传 futures（合约多源，币安优先），默认现货币安 */
+  market?: 'spot' | 'futures';
 }) {
   const { data: tickersResp } = useTickers();
+  const { data: futuresResp } = useFuturesTickers();
   const { data: paper } = usePaperAccount();
   const openMutation = useOpenPosition();
 
-  const allTickers = tickersResp?.data ?? [];
+  // 本页签主行情 + 跨市场兑底（与 paper.markPrice 的取价优先级一致）
+  const primary = market === 'futures' ? futuresResp?.data ?? [] : tickersResp?.data ?? [];
+  const secondary = market === 'futures' ? tickersResp?.data ?? [] : futuresResp?.data ?? [];
+  const list = primary.length > 0 ? primary : secondary;
+  const allTickers = list;
   const hot = useMemo(
     () => [...allTickers].sort((a, b) => b.quoteVolume24h - a.quoteVolume24h),
     [allTickers],
@@ -50,7 +64,9 @@ export function TradeModal({
   const [customMargin, setCustomMargin] = useState('');
   const [search, setSearch] = useState('');
 
-  const ticker = allTickers.find((t) => t.symbol === symbol);
+  const ticker =
+    allTickers.find((t) => t.symbol === symbol) ??
+    secondary.find((t) => t.symbol === symbol);
   const price = ticker?.price ?? 0;
   const balance = paper?.account.balance ?? 0;
 
@@ -100,6 +116,7 @@ export function TradeModal({
         <DialogTitle className="text-lg font-bold">模拟建仓 · 市价单</DialogTitle>
         <DialogDescription className="text-xs">
           以最新成交价即时成交 · 初始资金 10 USDT · 最高 20× 杠杆 · 币安 USDT-M 合约规则
+          {market === 'futures' && ticker?.source ? ` · 行情源 ${SOURCE_LABEL[ticker.source] ?? ticker.source}` : ''}
         </DialogDescription>
 
         {/* 币种选择 */}

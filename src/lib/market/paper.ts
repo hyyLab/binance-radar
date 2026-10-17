@@ -5,6 +5,7 @@
 
 import { db } from '@/lib/db';
 import { collector } from './collector';
+import { activeFuturesCollector } from './futures-collector';
 import {
   PAPER_INITIAL_CAPITAL,
   PAPER_MAX_LEVERAGE,
@@ -29,7 +30,7 @@ export const MIN_MARGIN = PAPER_MIN_MARGIN;
 export const MAX_OPEN_POSITIONS = 20;
 export const MIN_DEPOSIT = PAPER_MIN_DEPOSIT;
 export const MAX_DEPOSIT = PAPER_MAX_DEPOSIT;
-const ACCOUNT_NAME = 'default';
+const ACCOUNT_NAME = 'default'; // 保留常量供文案引用；实际账户名经构造参数注入
 
 const CLOSE_ACTIONS = ['CLOSE_LONG', 'CLOSE_SHORT'];
 
@@ -44,14 +45,34 @@ function activeCollector(): typeof collector {
   return g.__binanceRadarCollectorActive ?? collector;
 }
 
+// Task 50：合约供价源同样经稳定别名动态解析（futures-collector 未来 bump key 时
+// 旧实例不至读僵尸）。
+function liveFuturesCollector(): ReturnType<typeof activeFuturesCollector> {
+  const g = globalThis as typeof globalThis & {
+    __binanceRadarFuturesActive?: ReturnType<typeof activeFuturesCollector>;
+  };
+  return g.__binanceRadarFuturesActive ?? activeFuturesCollector();
+}
+
 export class PaperError extends Error {}
 
 export class PaperEngine {
+  /** 账户名：default = 手动模拟盘（默认页签，行为与历史完全一致）；
+   *  Task 54 参数化后可创建隔离的自动账户（trend-auto-v1）——资金/持仓/流水
+   *  全部按 accountId 隔离，互不污染。引擎无内存状态，多实例安全。 */
+  constructor(private readonly accountName: string = 'default') {}
+
+  /** 拉起合约多源采集器（幂等 fire-and-forget）：模拟盘是默认页签，
+   *  用户可能不进异动交易页，但持仓计价/强平检查需要合约行情常驻 */
+  private kickFeeds(): void {
+    void activeFuturesCollector().ensureStarted();
+  }
+
   private async getAccount() {
-    let acc = await db.paperAccount.findUnique({ where: { name: ACCOUNT_NAME } });
+    let acc = await db.paperAccount.findUnique({ where: { name: this.accountName } });
     if (!acc) {
       acc = await db.paperAccount.create({
-        data: { name: ACCOUNT_NAME, balance: INITIAL_CAPITAL },
+        data: { name: this.accountName, balance: INITIAL_CAPITAL },
       });
     }
     return acc;
@@ -63,13 +84,19 @@ export class PaperEngine {
     return acc.id;
   }
 
+  /** 标记价：合约多源行情优先（异动交易页签与开仓入口都在合约），
+   *  现货 collector 兑底（Task 49 前遗留的现货符号持仓仍可正常计价/平仓） */
   private markPrice(symbol: string): number {
-    const row = activeCollector().getTickers().find((t) => t.symbol === symbol);
-    return row ? row.price : 0;
+    const fut = liveFuturesCollector().getTickers().find((t) => t.symbol === symbol);
+    if (fut) return fut.price;
+    const spot = activeCollector().getTickers().find((t) => t.symbol === symbol);
+    return spot ? spot.price : 0;
   }
 
-  /** 强平检查：标记价触及强平价 → 自动清算（每次查询/交易前执行） */
-  private async liquidationCheck(accountId: string): Promise<void> {
+  /** 强平检查：标记价触及强平价 → 自动清算。
+   *  Task 54 改为 public：自动交易服务的持续风险巡检任务（SCAN_MS 周期）复用同一实现，
+   *  避免无页面访问时持仓不更新强平状态（行为不变，仅可见性放宽）。 */
+  async liquidationCheck(accountId: string): Promise<void> {
     const open = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
     for (const p of open) {
       const mark = this.markPrice(p.symbol);
@@ -105,6 +132,7 @@ export class PaperEngine {
     history: PaperTradeDTO[];
     ts: number;
   }> {
+    this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
 
@@ -221,6 +249,7 @@ export class PaperEngine {
     leverage: number;
     margin: number;
   }): Promise<PaperPositionDTO> {
+    this.kickFeeds();
     const symbol = input.symbol.toUpperCase();
     const price = this.markPrice(symbol);
     if (price <= 0) throw new PaperError('未知交易对或行情未就绪');
@@ -381,6 +410,7 @@ export class PaperEngine {
   }
 
   async close(positionId: string): Promise<{ pnl: number; symbol: string; side: string; price: number }> {
+    this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
 
@@ -455,6 +485,7 @@ export class PaperEngine {
     totalPnl: number;
     results: { symbol: string; side: string; pnl: number }[];
   }> {
+    this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
 
@@ -495,10 +526,22 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
-  // v6: open() 的单仓上限比例放开为 1（几乎全仓，Task 49）。类方法闭包绑定创建时模块图的
-  // maxOpenableMargin——不 bump key 旧实例会继续按旧比例（0.5）拒绝开仓（本次 API 实测踩坑实证）。
-  // 本引擎无内存状态（全走 DB），重建安全。
-  __binanceRadarPaper_v6?: PaperEngine;
+  // v8（Task 54）：PaperEngine 构造参数化（accountName），支持趋势自动交易独立账户。
+  // 默认 'default' 路径行为逐字节不变；引擎无内存状态，重建安全。
+  // v7（Task 50）：markPrice 切换为「合约多源优先 + 现货兑底」。
+  // 类方法闭包绑定创建时模块图的取价函数，改取价链路必须 bump key。
+  __binanceRadarPaper_v7?: PaperEngine;
+  __binanceRadarPaper_v8?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v6 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v8 ??= new PaperEngine());
+
+/** 创建隔离账户的引擎实例（Task 54：趋势自动模拟交易 trend-auto-v1 用）。
+ *  同名实例全局单例（HMR 不重复创建）；与手动盘仅共享行情源，不共享资金/持仓。 */
+const gAuto = globalThis as typeof globalThis & {
+  __binanceRadarPaperAuto_v1?: PaperEngine;
+};
+export function paperEngineFor(accountName: string): PaperEngine {
+  if (accountName === 'default') return paperEngine;
+  return (gAuto.__binanceRadarPaperAuto_v1 ??= new PaperEngine(accountName));
+}

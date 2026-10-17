@@ -90,3 +90,144 @@ model HotPoolEntry {
   @@unique([date, symbol])
   @@index([date, rank])
 }
+
+// ---------- 趋势跟踪（TrendWatchService，Universal Trend Engine 集成） ----------
+// 只在入池/状态变化/新 K 线/生命周期变化时写入（不每轮扫描无条件落库）。
+// 重启后 loadActive() 恢复候选池与每个标的的 UTE 趋势确认历史（trendStateJson）。
+
+model TrendWatchSymbol {
+  id             String   @id @default(cuid())
+  symbol         String // 交易对，如 BTCUSDT
+  market         String   @default("futures") // 市场标识
+  interval       String   @default("1m") // K 线周期标识
+  // —— 候选池生命周期 ——
+  status         String   @default("WATCHING") // WATCHING=在池 | RETIRED=已退池
+  addedAt        DateTime // 入池时间
+  lastAnomalyAt  DateTime? // 最近一次异动时间（候选依据的事件时间）
+  expiresAt      DateTime? // 候选过期时间（超过且趋势 idle → 退池）
+  // —— Universal Trend Engine 状态 ——
+  trendStateJson String   @default("{}") // UTE TrendState 完整 JSON（恢复确认历史用）
+  lastSignalJson String? // 最近一次完整趋势信号 JSON（含 assessment 评分依据）
+  lastPhase      String   @default("idle") // idle | candidate | confirmed
+  lastDirection  String   @default("flat") // up | down | flat
+  lastScore      Float    @default(0)
+  // —— K 线状态 ——
+  lastBarTime    DateTime? // 最近已参与评估的已收盘 1m K 线开盘时间
+  lastKlineAt    DateTime? // 最近一次 K 线刷新时间
+  // —— Task 54 v2 生命周期（结束判定/趋势周期） ——
+  lifecycleStateJson String   @default("{}") // 生命周期状态机完整 JSON（END_PENDING 证据计数等）
+  trendCycleId   String? // 当前趋势周期标识（symbol:方向:确认时刻）
+  lastPhaseV2    String   @default("OBSERVING") // OBSERVING | CANDIDATE_* | CONFIRMED_* | END_PENDING | ENDED | DATA_UNAVAILABLE
+  endReason      String? // ENDED 时的结束原因
+  updatedAt      DateTime @updatedAt
+
+  @@unique([symbol, market, interval])
+  @@index([status])
+  @@index([lastPhase])
+}
+
+// ---------- 趋势自动模拟交易（Task 54，账户 trend-auto-v1） ----------
+// 资金账户复用 PaperAccount（name = 'trend-auto-v1'，与手动 default 完全隔离）；
+// 持仓复用 PaperPosition（accountId 指向自动账户）；下表保存趋势关联与幂等决策。
+
+// 自动交易运行配置/状态（单行，name 固定 'trend-auto-v1'）
+model TrendAutoConfig {
+  id             String   @id @default(cuid())
+  name           String   @unique // 固定 "trend-auto-v1"
+  mode           String   @default("RUNNING") // RUNNING | PAUSED | STOPPED
+  initialCapital Float // 初始资金（重置时回填；界面明确展示）
+  marginRatio    Float    @default(0.2) // 开仓目标保证金 = 开仓时账户权益 × 该比例
+  leverage       Float    @default(20) // 固定杠杆
+  maxPositions   Int      @default(3) // 最大同时持仓数（Task 56 默认 3）
+  slippageBps    Float    @default(2) // 滑点估算（基点，成交记录展示 + 净盈亏保守口径）
+  peakEquity     Float    @default(0) // 历史峰值权益（当前回撤计算基准；每次巡检更新）
+  strategyId     String? // Task 57：当前交易算法（strategy/registry 注册 id；默认 short-swing-v1）
+  strategyParamsJson String? // Task 57-c：策略参数覆盖 JSON（{ [strategyId]: { KEY: value } }；NULL = 代码默认）
+  waitBarConfirm Int      @default(1) // Task 57-c：待入场二次确认开关（1=等下一根收盘K线复核 / 0=达标当根直接开仓）
+  cooldownMs     Int? // Task 57-c：同币种平仓后冷却 ms（NULL = 用 TREND_TRADE.COOLDOWN_MS）
+  updatedAt      DateTime @updatedAt
+}
+
+// 自动持仓的趋势关联元数据（positionId = PaperPosition.id，一一对应）
+model TrendTradeMeta {
+  positionId       String    @id
+  trendCycleId     String // 开仓时的趋势周期（幂等：同周期不重复开仓）
+  symbol           String
+  side             String // LONG | SHORT
+  trendPhaseAtOpen String // 开仓时相位（CONFIRMED_UP/DOWN）
+  scoreAtOpen      Float     @default(0) // 开仓时 UTE 趋势评分
+  featuresAtOpen   String    @default("{}") // 开仓时特征快照 JSON（波动率/ER/HTF/异动上下文）
+  signalAtOpen     String    @default("{}") // 开仓时完整统一信号 JSON（决策还原用）
+  slippageEst      Float     @default(0) // 开仓滑点估算（USDT）
+  status           String    @default("OPEN") // OPEN | CLOSED
+  exitReason       String? // TREND_ENDED | REVERSE_CONFIRMED | LIQUIDATED | MANUAL
+  exitSignalJson   String? // 平仓时最后有效趋势信号 JSON
+  netPnlWithSlip   Float? // 含滑点估算的净盈亏（页面统计主口径，更保守）
+  openDecisionAt   DateTime?
+  closedAt         DateTime?
+  updatedAt        DateTime  @updatedAt
+  // ===== Task 56 扩展列（持仓结果采集 §七；由 ensureTrendTradeSchema 按 PRAGMA 幂等补列） =====
+  entryEr          Float? // 开仓时 1m 效率比（入场质量快照）
+  htf5mDir         String? // 开仓时 5m 方向（up/down/flat）
+  htf15mDir        String? // 开仓时 15m 方向
+  htfGate          String? // 开仓时高周期门控状态（ALIGNED/NEUTRAL/OPPOSED/INVALID）
+  entryNotional    Float? // 开仓名义仓位（保证金 × 杠杆）
+  entryBarTime     BigInt? // 开仓依据的已收盘 1m K线开盘时间（结束证据必须晚于此 bar）
+  mfe              Float? // 持仓期间最大有利浮盈（占保证金 %；按可用标记价增量更新）
+  mae              Float? // 持仓期间最大不利浮亏（占保证金 %）
+  mfeAt            BigInt? // MFE 出现时刻（ms）
+  mfeDrawdown      Float? // MFE 之后当前回撤幅度（百分点）
+  firstEndSignAt   BigInt? // 首次结束迹象（END_PENDING）时刻（ms）
+  exitEndReason    String? // 模型细分结束原因（DECAY/STRUCTURE_INVALIDATION/CONFIRMED_REVERSAL）
+  exitEvidenceBars Int? // 平仓时结束证据根数
+  closeNotional    Float? // 平仓名义仓位
+  entryRound       Int? // Task 57：开仓轮次（同 trendCycleId 第几轮；1=首次，2=走弱后走强再入场）
+
+  @@index([trendCycleId])
+  @@index([status])
+}
+
+// 待入场记录（Task 56 §5.3：首次确认后等待下一根已收盘 K 线复核；每周期至多一条）
+// Task 57：cycleId 轮次化 = `{cycleId}#R{round}`（同周期多轮开仓互不冲突）
+model TrendPendingEntry {
+  cycleId        String   @id // 趋势周期（每周期至多一条，重复创建被主键兜底）
+  symbol         String
+  side           String // LONG | SHORT
+  firstBarTime   BigInt // 首次确认时依据的已收盘 K 线开盘时间（ms，64 位）
+  firstSeenAt    BigInt // 首次确认时刻（ms；过期判定基准）
+  snapshotJson   String   @default("{}") // 首次确认时信号快照（审计）
+  status         String   @default("ACTIVE") // ACTIVE | CONVERTED | CANCELED
+  cancelReason   String?
+  openPositionId String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  @@index([status])
+  @@index([symbol])
+}
+
+// 幂等决策记录（同一趋势周期同一动作只允许一次；id = 决策键，唯一约束兜底）
+// Task 57：id 轮次化 = `{cycleId}#R{round}:OPEN|CLOSE`（同周期多轮各留独立审计）
+model TrendAutoDecision {
+  id         String   @id // `{cycleId}#R{round}:OPEN` / `{cycleId}#R{round}:CLOSE` 等
+  symbol     String
+  action     String // OPEN | CLOSE | REVERSE_CLOSE | SKIP
+  cycleId    String
+  positionId String?
+  detail     String   @default("{}") // 决策上下文（策略/模式/轮次/相位/评分/原因）
+  createdAt  DateTime @default(now())
+
+  @@index([cycleId])
+  @@index([createdAt(sort: Desc)])
+}
+
+// Task 57：策略每 symbol 状态（轮次/最近开平仓；重启恢复「同周期再入场」语义；
+// stateJson 结构由各策略自定义，向后兼容由策略自管）
+model TrendStrategyState {
+  strategyId String
+  symbol     String
+  stateJson  String   @default("{}")
+  updatedAt  DateTime @updatedAt
+
+  @@id([strategyId, symbol])
+}

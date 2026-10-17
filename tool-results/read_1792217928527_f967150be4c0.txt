@@ -1,0 +1,723 @@
+     1→// ---------- 趋势自动模拟交易 · 行为测试（bun test，独立测试库 + fake 注入） ----------
+     2→// 覆盖任务 §七 12 项要求中可自动化验证的全部场景（页面展示用截图人工核验）：
+     3→// 1) 手动账户隔离  2) 权益÷持仓数量均分开仓（余额不足 clamp 保护）+ 20x  3) 未确认不开仓  4) 短暂反向不提前平仓
+     4→// 5) 趋势结束/反向确认正确离场  6) 同一趋势信号不重复开仓（含重启）
+     5→// 7) 数据过期不开仓、不误判结束  8) 手续费/滑点/净盈亏口径
+     6→// 9) 暂停后不开新仓但持仓仍受监控（含强平）  10) 重启恢复持仓关联（reconcile）
+     7→// 11) 最大持仓数与保证金限制  12) 强平记录正确；附：先平后开独立性、人工平仓/全部平仓、
+     8→//     充值（Task 55）、持仓数量变更持久化（Task 55）、
+     9→//     结束迹象即自行平仓/残留持仓自行离场/重置账户（Task 55-2）；
+    10→//     滚动资金保护：余额被打穿后新仓 clamp 到可承受最大值而非跳过（Task 55-3）
+    11→
+    12→import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
+    13→import { execSync } from 'node:child_process';
+    14→
+    15→// ⚠️ 测试库隔离：bunfig.toml [test].preload（tests/preload-test-db.ts）在任何测试文件
+    16→// 加载前把 DATABASE_URL 指向独立测试库——@/lib/db 单例与本文件的 client 绑定同一库，
+    17→// 不触碰 db/custom.db。下方 beforeAll 用 prisma db push 同步完整 schema。
+    18→const TEST_DB_URL = 'file:/home/z/my-project/db/trend-trade-test.db';
+    19→
+    20→import { AutoPaperTrader } from '@/lib/market/trend-trade/auto-trader';
+    21→import { trendTradeRepo } from '@/lib/market/trend-trade/repo';
+    22→import { TREND_TRADE } from '@/lib/market/trend-trade/config';
+    23→import { PaperEngine, PaperError } from '@/lib/market/paper';
+    24→import { TAKER_FEE, liqPriceFor } from '@/lib/market/futures';
+    25→import { db as client } from '@/lib/db';
+    26→import type { PrismaClient } from '@prisma/client';
+    27→import type { UnifiedTrendSignal } from '@/lib/market/trend-watch/signal';
+    28→
+    29→beforeAll(() => {
+    30→  execSync('bunx prisma db push --skip-generate', {
+    31→    env: { ...process.env, DATABASE_URL: TEST_DB_URL },
+    32→    cwd: '/home/z/my-project',
+    33→    stdio: 'pipe',
+    34→  });
+    35→});
+    36→
+    37→// ============ 迷你模拟撮合引擎（费用/强平口径与生产一致；仅供测试驱动） ============
+    38→// db 即 client（同一测试库单例），FakePaperEngine 直接使用
+    39→
+    40→const db = client;
+    41→
+    42→class FakePaperEngine extends PaperEngine {
+    43→  marks = new Map<string, number>();
+    44→  constructor() {
+    45→    super(TREND_TRADE.ACCOUNT_NAME);
+    46→  }
+    47→  private priceOf(symbol: string): number {
+    48→    return this.marks.get(symbol) ?? 0;
+    49→  }
+    50→
+    51→  override async open(input: {
+    52→    symbol: string;
+    53→    side: 'LONG' | 'SHORT';
+    54→    leverage: number;
+    55→    margin: number;
+    56→  }) {
+    57→    const price = this.priceOf(input.symbol);
+    58→    if (price <= 0) throw new PaperError('未知交易对或行情未就绪');
+    59→    const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+    60→    if (!acc) throw new PaperError('账户未初始化');
+    61→    const fee = input.margin * input.leverage * TAKER_FEE;
+    62→    if (input.margin + fee > acc.balance) {
+    63→      throw new PaperError(`可用余额不足：需 ${input.margin.toFixed(2)} + 手续费 ${fee.toFixed(2)}`);
+    64→    }
+    65→    const notional = input.margin * input.leverage;
+    66→    const qty = notional / price;
+    67→    const liqPrice = liqPriceFor({
+    68→      symbol: input.symbol,
+    69→      side: input.side,
+    70→      entry: price,
+    71→      leverage: input.leverage,
+    72→      notional,
+    73→    });
+    74→    const [pos] = await db.$transaction([
+    75→      db.paperPosition.create({
+    76→        data: {
+    77→          accountId: acc.id,
+    78→          symbol: input.symbol,
+    79→          base: input.symbol.replace(/USDT$/, ''),
+    80→          side: input.side,
+    81→          leverage: input.leverage,
+    82→          margin: input.margin,
+    83→          qty,
+    84→          entryPrice: price,
+    85→          liqPrice,
+    86→          openFee: fee,
+    87→        },
+    88→      }),
+    89→      db.paperAccount.update({
+    90→        where: { id: acc.id },
+    91→        data: { balance: { decrement: input.margin + fee } },
+    92→      }),
+    93→      db.paperTrade.create({
+    94→        data: {
+    95→          accountId: acc.id,
+    96→          symbol: input.symbol,
+    97→          action: input.side === 'LONG' ? 'OPEN_LONG' : 'OPEN_SHORT',
+    98→          price,
+    99→          qty,
+   100→          fee,
+   101→          pnl: 0,
+   102→        },
+   103→      }),
+   104→    ]);
+   105→    return {
+   106→      id: pos.id,
+   107→      symbol: pos.symbol,
+   108→      base: pos.base,
+   109→      side: input.side,
+   110→      leverage: pos.leverage,
+   111→      margin: pos.margin,
+   112→      qty: pos.qty,
+   113→      entryPrice: pos.entryPrice,
+   114→      markPrice: price,
+   115→      liqPrice: pos.liqPrice,
+   116→      notional,
+   117→      unrealizedPnl: 0,
+   118→      roePct: 0,
+   119→      openedAt: pos.openedAt.toISOString(),
+   120→    };
+   121→  }
+   122→
+   123→  override async close(positionId: string) {
+   124→    const pos = await db.paperPosition.findUnique({ where: { id: positionId } });
+   125→    if (!pos || pos.status !== 'OPEN') throw new PaperError('该仓位已平仓或已清算');
+   126→    const mark = this.priceOf(pos.symbol);
+   127→    if (mark <= 0) throw new PaperError('行情暂不可用，请稍后再试');
+   128→    const sign = pos.side === 'LONG' ? 1 : -1;
+   129→    const gross = (mark - pos.entryPrice) * pos.qty * sign;
+   130→    const closeFee = mark * pos.qty * TAKER_FEE;
+   131→    const netPnl = gross - closeFee - pos.openFee;
+   132→    await db.$transaction([
+   133→      db.paperPosition.update({
+   134→        where: { id: pos.id },
+   135→        data: { status: 'CLOSED', exitPrice: mark, pnl: netPnl, closeFee, closedAt: new Date() },
+   136→      }),
+   137→      db.paperAccount.update({
+   138→        where: { id: pos.accountId },
+   139→        data: { balance: { increment: pos.margin + gross - closeFee } },
+   140→      }),
+   141→      db.paperTrade.create({
+   142→        data: {
+   143→          accountId: pos.accountId,
+   144→          positionId: pos.id,
+   145→          symbol: pos.symbol,
+   146→          action: pos.side === 'LONG' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
+   147→          price: mark,
+   148→          qty: pos.qty,
+   149→          fee: closeFee,
+   150→          pnl: netPnl,
+   151→        },
+   152→      }),
+   153→    ]);
+   154→    return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark };
+   155→  }
+   156→
+   157→  override async liquidationCheck(accountId: string): Promise<void> {
+   158→    const open = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
+   159→    for (const p of open) {
+   160→      const mark = this.priceOf(p.symbol);
+   161→      if (mark <= 0) continue;
+   162→      const hit = p.side === 'LONG' ? mark <= p.liqPrice : mark >= p.liqPrice;
+   163→      if (!hit) continue;
+   164→      await db.paperPosition.update({
+   165→        where: { id: p.id },
+   166→        data: { status: 'LIQUIDATED', exitPrice: p.liqPrice, pnl: -p.margin, closedAt: new Date() },
+   167→      });
+   168→      await db.paperTrade.create({
+   169→        data: {
+   170→          accountId,
+   171→          positionId: p.id,
+   172→          symbol: p.symbol,
+   173→          action: 'LIQUIDATE',
+   174→          price: p.liqPrice,
+   175→          qty: p.qty,
+   176→          fee: 0,
+   177→          pnl: -p.margin,
+   178→        },
+   179→      });
+   180→    }
+   181→  }
+   182→}
+   183→
+   184→// ============ 统一信号构造 ============
+   185→
+   186→let barClock = Date.now() - 300_000; // 近真实时钟（先平后开独立性用真实平仓时刻比较）
+   187→
+   188→function sig(partial: {
+   189→  symbol: string;
+   190→  phase: string;
+   191→  direction?: 'up' | 'down' | 'flat';
+   192→  cycleId?: string | null;
+   193→  dataFresh?: boolean;
+   194→  score?: number;
+   195→  lastBarTime?: number | null;
+   196→}): UnifiedTrendSignal {
+   197→  barClock += 60_000;
+   198→  const dir =
+   199→    partial.direction ??
+   200→    (partial.phase === 'CONFIRMED_UP' ? 'up' : partial.phase === 'CONFIRMED_DOWN' ? 'down' : 'flat');
+   201→  const cycleDir = partial.phase === 'CONFIRMED_UP' ? 'L' : partial.phase === 'CONFIRMED_DOWN' ? 'S' : 'X';
+   202→  return {
+   203→    symbol: partial.symbol,
+   204→    market: 'futures',
+   205→    interval: '1m',
+   206→    phase: partial.phase as UnifiedTrendSignal['phase'],
+   207→    direction: dir,
+   208→    trendCycleId:
+   209→      partial.cycleId !== undefined ? partial.cycleId : `${partial.symbol}:${cycleDir}:${barClock}`,
+   210→    trendStartedAt: partial.phase.startsWith('CONFIRMED') ? barClock : null,
+   211→    endPendingSince: null,
+   212→    endEvidenceBars: 0,
+   213→    endedAt: partial.phase === 'ENDED' ? barClock : null,
+   214→    endReason: partial.phase === 'ENDED' ? 'DECAY_CONFIRMED' : null,
+   215→    score: partial.score ?? 60,
+   216→    strength: 0.6,
+   217→    confirmCount: 3,
+   218→    features: {
+   219→      atr: 1, atrPct: 1.2, realizedVolPct: 40, volPercentile: 0.7, volRegime: 'HIGH',
+   220→      efficiencyRatio: 0.5, upperWickPct: 0.1, lowerWickPct: 0.1, breakout: 'none',
+   221→      falseBreakout: false, barsUsed: 480,
+   222→    },
+   223→    htf5m: { dir, efficiencyRatio: 0.5, returnPct: 1, valid: true, bars: 96 },
+   224→    htf15m: { dir, efficiencyRatio: 0.5, returnPct: 1, valid: true, bars: 32 },
+   225→    htfAgree: true,
+   226→    lastBarTime: partial.lastBarTime !== undefined ? partial.lastBarTime : barClock,
+   227→    lastKlineAt: barClock,
+   228→    dataFresh: partial.dataFresh ?? true,
+   229→    dataUnavailableReason: partial.dataFresh ?? true ? null : '测试：行情过期',
+   230→    anomaly: { dir: null, level: null, priority: null, active: false, lastAt: null },
+   231→    conflict: false,
+   232→    reason: '测试信号',
+   233→    changedAt: barClock,
+   234→  } as UnifiedTrendSignal;
+   235→}
+   236→
+   237→/** 保留原信号其余字段（测试内替换相位用） */
+   238→function keepSig(s: UnifiedTrendSignal): UnifiedTrendSignal {
+   239→  return { ...s };
+   240→}
+   241→
+   242→// ============ 测试 ============
+   243→
+   244→function makeTrader(signals: UnifiedTrendSignal[], engine: FakePaperEngine) {
+   245→  return new AutoPaperTrader(
+   246→    {
+   247→      getSignals: () => signals,
+   248→      markPrice: (symbol) => engine.marks.get(symbol) ?? 0,
+   249→    },
+   250→    { engine, noTimer: true },
+   251→  );
+   252→}
+   253→
+   254→async function resetDb(): Promise<void> {
+   255→  await client.$executeRawUnsafe(`DELETE FROM PaperTrade`);
+   256→  await client.$executeRawUnsafe(`DELETE FROM PaperPosition`);
+   257→  await client.$executeRawUnsafe(`DELETE FROM PaperAccount`);
+   258→  await client.$executeRawUnsafe(`DELETE FROM TrendAutoConfig`);
+   259→  await client.$executeRawUnsafe(`DELETE FROM TrendTradeMeta`);
+   260→  await client.$executeRawUnsafe(`DELETE FROM TrendAutoDecision`);
+   261→  await client.$executeRawUnsafe(`DELETE FROM TrendWatchSymbol`);
+   262→}
+   263→
+   264→async function openPositions() {
+   265→  return client.paperPosition.findMany({ where: { status: 'OPEN' } });
+   266→}
+   267→
+   268→beforeEach(async () => {
+   269→  await resetDb();
+   270→});
+   271→
+   272→afterAll(async () => {
+   273→  await client.$disconnect();
+   274→});
+   275→describe('AutoPaperTrader（趋势自动模拟交易）', () => {
+   276→  test('T1 账户隔离：独立账户 trend-auto-v1，不触碰手动 default 账户', async () => {
+   277→    const engine = new FakePaperEngine();
+   278→    engine.marks.set('BTCUSDT', 100);
+   279→    const trader = makeTrader([sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })], engine);
+   280→    await trader.ensureStarted();
+   281→    const accounts = await client.paperAccount.findMany();
+   282→    expect(accounts.map((a) => a.name)).toEqual(['trend-auto-v1']);
+   283→    expect(accounts[0]!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL); // 初始资金来自配置（可配）
+   284→  });
+   285→
+   286→  test('T2 开仓 sizing：每仓保证金 = 账户权益 ÷ 持仓数量（均分，预留手续费），杠杆 20x', async () => {
+   287→    const engine = new FakePaperEngine();
+   288→    engine.marks.set('BTCUSDT', 100);
+   289→    const trader = makeTrader([sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })], engine);
+   290→    await trader.ensureStarted();
+   291→    await trader.tick();
+   292→    const rows = await openPositions();
+   293→    expect(rows.length).toBe(1);
+   294→    // 权益 100 ÷ 4 仓 ÷ (1 + 20x×taker0.05%) 预留开仓手续费 → floor2（无持仓时权益=余额）
+   295→    const expectMargin = Math.floor((100 / 4 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
+   296→    expect(rows[0]!.margin).toBeCloseTo(expectMargin, 2);
+   297→    expect(rows[0]!.leverage).toBe(20);
+   298→    expect(rows[0]!.qty * rows[0]!.entryPrice).toBeCloseTo(expectMargin * 20, 1); // 保证金 × 20x 名义
+   299→  });
+   300→
+   301→  test('T3 未确认不开仓：CANDIDATE/OBSERVING/数据过期一律不触发', async () => {
+   302→    const engine = new FakePaperEngine();
+   303→    engine.marks.set('BTCUSDT', 100);
+   304→    engine.marks.set('ETHUSDT', 50);
+   305→    engine.marks.set('XRPUSDT', 2);
+   306→    const trader = makeTrader(
+   307→      [
+   308→        sig({ symbol: 'BTCUSDT', phase: 'CANDIDATE_UP' }),
+   309→        sig({ symbol: 'ETHUSDT', phase: 'OBSERVING' }),
+   310→        sig({ symbol: 'XRPUSDT', phase: 'CONFIRMED_UP', dataFresh: false }),
+   311→      ],
+   312→      engine,
+   313→    );
+   314→    await trader.ensureStarted();
+   315→    await trader.tick();
+   316→    expect((await openPositions()).length).toBe(0);
+   317→  });
+   318→
+   319→  test('T4 短暂反向不提前平仓：反向候选（candidate）不触发离场', async () => {
+   320→    const engine = new FakePaperEngine();
+   321→    engine.marks.set('BTCUSDT', 100);
+   322→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })];
+   323→    const trader = makeTrader(signals, engine);
+   324→    await trader.ensureStarted();
+   325→    await trader.tick();
+   326→    expect((await openPositions()).length).toBe(1);
+   327→    // 趋势转为反向候选（未确认）——持仓保持
+   328→    signals[0] = { ...keepSig(signals[0]!), phase: 'CANDIDATE_DOWN', direction: 'flat', trendCycleId: 'BTCUSDT:S:999' };
+   329→    await trader.tick();
+   330→    await trader.tick();
+   331→    expect((await openPositions()).length).toBe(1);
+   332→  });
+   333→
+   334→  test('T5 趋势确认结束 → 平仓 TREND_ENDED；滑点/手续费口径正确', async () => {
+   335→    const engine = new FakePaperEngine();
+   336→    engine.marks.set('BTCUSDT', 100);
+   337→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })];
+   338→    const trader = makeTrader(signals, engine);
+   339→    await trader.ensureStarted();
+   340→    await trader.tick();
+   341→    const [pos] = await openPositions();
+   342→    const meta0 = await trendTradeRepo.getMeta(pos!.id);
+   343→    expect(meta0?.status).toBe('OPEN');
+   344→    const openSlip = meta0!.slippageEst;
+   345→    const openNotional = pos!.margin * 20;
+   346→    expect(openSlip).toBeCloseTo(openNotional * (TREND_TRADE.SLIPPAGE_BPS / 10_000), 9); // 名义 × 2bp
+   347→
+   348→    // 价格变动后趋势确认结束（同一周期 id、新 K 线）
+   349→    engine.marks.set('BTCUSDT', 102);
+   350→    const endBar = barClock + 120_000;
+   351→    signals[0] = {
+   352→      ...keepSig(signals[0]!),
+   353→      phase: 'ENDED',
+   354→      endedAt: endBar,
+   355→      endReason: 'DECAY_CONFIRMED',
+   356→      trendCycleId: meta0!.trendCycleId,
+   357→      lastBarTime: endBar,
+   358→    };
+   359→    await trader.tick();
+   360→    const closed = await client.paperPosition.findUnique({ where: { id: pos!.id } });
+   361→    expect(closed?.status).toBe('CLOSED');
+   362→    const meta = await trendTradeRepo.getMeta(pos!.id);
+   363→    expect(meta?.exitReason).toBe('TREND_ENDED');
+   364→    // netPnlWithSlip = PaperEngine 净盈亏 − 开仓滑点 − 平仓滑点
+   365→    const closeSlip = 102 * pos!.qty * (TREND_TRADE.SLIPPAGE_BPS / 10_000);
+   366→    const expectedNet = (closed!.pnl ?? 0) - openSlip - closeSlip;
+   367→    expect(meta!.netPnlWithSlip ?? 0).toBeCloseTo(expectedNet, 6);
+   368→    // 手续费双边：开仓费（名义×taker）+ 平仓费（平仓名义×taker）
+   369→    const feeSum = await client.paperTrade.aggregate({ _sum: { fee: true } });
+   370→    expect(feeSum._sum.fee ?? 0).toBeCloseTo(openNotional * TAKER_FEE + 102 * pos!.qty * TAKER_FEE, 6);
+   371→  });
+   372→
+   373→  test('T6 幂等：同一趋势周期不重复开仓；重启后（新实例）仍不重复', async () => {
+   374→    const engine = new FakePaperEngine();
+   375→    engine.marks.set('BTCUSDT', 100);
+   376→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:777' })];
+   377→    const trader = makeTrader(signals, engine);
+   378→    await trader.ensureStarted();
+   379→    await trader.tick();
+   380→    await trader.tick();
+   381→    expect((await openPositions()).length).toBe(1);
+   382→    // 重启模拟：全新实例（同一 DB repo）
+   383→    const trader2 = makeTrader(signals, engine);
+   384→    await trader2.ensureStarted();
+   385→    await trader2.tick();
+   386→    expect((await openPositions()).length).toBe(1);
+   387→    const decisions = await trendTradeRepo.recentDecisions(10);
+   388→    expect(decisions.filter((d) => d.action === 'OPEN').length).toBe(1);
+   389→  });
+   390→
+   391→  test('T7 数据过期：不开新仓、不误判趋势结束（持仓保持）', async () => {
+   392→    const engine = new FakePaperEngine();
+   393→    engine.marks.set('BTCUSDT', 100);
+   394→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:888' })];
+   395→    const trader = makeTrader(signals, engine);
+   396→    await trader.ensureStarted();
+   397→    await trader.tick();
+   398→    // 数据不可用：新信号不开仓；持仓信号缺失也不误平
+   399→    signals.length = 0;
+   400→    signals.push(
+   401→      sig({ symbol: 'BTCUSDT', phase: 'DATA_UNAVAILABLE', direction: 'flat', cycleId: null, dataFresh: false }),
+   402→      sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_UP', dataFresh: false }),
+   403→    );
+   404→    engine.marks.set('ETHUSDT', 50);
+   405→    await trader.tick();
+   406→    const rows = await openPositions();
+   407→    expect(rows.length).toBe(1);
+   408→    expect(rows[0]!.symbol).toBe('BTCUSDT');
+   409→  });
+   410→
+   411→  test('T9 暂停：不开新仓；现有持仓仍受监控（趋势结束照常离场）', async () => {
+   412→    const engine = new FakePaperEngine();
+   413→    engine.marks.set('BTCUSDT', 100);
+   414→    engine.marks.set('ETHUSDT', 50);
+   415→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:999' })];
+   416→    const trader = makeTrader(signals, engine);
+   417→    await trader.ensureStarted();
+   418→    await trader.tick();
+   419→    await trader.pause();
+   420→    // 新确认信号在暂停下不开仓
+   421→    signals.push(sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_DOWN', cycleId: 'ETHUSDT:S:999' }));
+   422→    await trader.tick();
+   423→    let rows = await openPositions();
+   424→    expect(rows.length).toBe(1);
+   425→    // 原持仓趋势结束 → 暂停状态下仍离场
+   426→    const meta = (await trendTradeRepo.loadMetasByStatus('OPEN'))[0]!;
+   427→    signals[0] = { ...keepSig(signals[0]!), phase: 'ENDED', trendCycleId: meta.trendCycleId };
+   428→    await trader.tick();
+   429→    rows = await openPositions();
+   430→    expect(rows.length).toBe(0);
+   431→    const m = await trendTradeRepo.getMeta(meta.positionId);
+   432→    expect(m?.exitReason).toBe('TREND_ENDED');
+   433→    expect(await trader.mode()).toBe('PAUSED');
+   434→  });
+   435→
+   436→  test('T10 重启恢复：meta 丢失时 reconcile 从决策记录还原周期关联', async () => {
+   437→    const engine = new FakePaperEngine();
+   438→    engine.marks.set('BTCUSDT', 100);
+   439→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:111' })];
+   440→    const trader = makeTrader(signals, engine);
+   441→    await trader.ensureStarted();
+   442→    await trader.tick();
+   443→    const [pos] = await openPositions();
+   444→    // 模拟崩溃窗口：meta 未写 + 决策未绑定 positionId（attachPosition 之前崩溃）
+   445→    await client.$executeRawUnsafe(`DELETE FROM TrendTradeMeta WHERE positionId = ?`, pos!.id);
+   446→    await client.$executeRawUnsafe(`UPDATE TrendAutoDecision SET positionId = NULL WHERE cycleId = 'BTCUSDT:L:111'`);
+   447→    const trader2 = makeTrader(signals, engine);
+   448→    await trader2.ensureStarted(); // reconcile 修复
+   449→    const meta = await trendTradeRepo.getMeta(pos!.id);
+   450→    expect(meta).not.toBeNull();
+   451→    expect(meta!.trendCycleId).toBe('BTCUSDT:L:111'); // 从 OPEN 决策恢复
+   452→    expect(meta!.status).toBe('OPEN');
+   453→  });
+   454→
+   455→  test('T11 最大持仓数：maxPositions=4，第 5 个确认信号跳过', async () => {
+   456→    const engine = new FakePaperEngine();
+   457→    const symbols = ['AAA', 'BBB', 'CCC', 'DDD', 'EEE'].map((b) => `${b}USDT`);
+   458→    for (const s of symbols) engine.marks.set(s, 10);
+   459→    const signals = symbols.map((s) => sig({ symbol: s, phase: 'CONFIRMED_UP' }));
+   460→    const trader = makeTrader(signals, engine);
+   461→    await trader.ensureStarted();
+   462→    await trader.tick();
+   463→    const rows = await openPositions();
+   464→    expect(rows.length).toBe(TREND_TRADE.MAX_POSITIONS);
+   465→    expect(trader.recentSkips(10).some((s) => s.reason.includes('最大持仓数'))).toBe(true);
+   466→  });
+   467→
+   468→  test('T12 强平：标记价触及强平价 → LIQUIDATED，meta 终态如实记录', async () => {
+   469→    const engine = new FakePaperEngine();
+   470→    engine.marks.set('BTCUSDT', 100);
+   471→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:222' })];
+   472→    const trader = makeTrader(signals, engine);
+   473→    await trader.ensureStarted();
+   474→    await trader.tick();
+   475→    const [pos] = await openPositions();
+   476→    // 暴跌触及强平价
+   477→    engine.marks.set('BTCUSDT', pos!.liqPrice * 0.995);
+   478→    await trader.tick();
+   479→    const liq = await client.paperPosition.findUnique({ where: { id: pos!.id } });
+   480→    expect(liq?.status).toBe('LIQUIDATED');
+   481→    const meta = await trendTradeRepo.getMeta(pos!.id);
+   482→    expect(meta?.exitReason).toBe('LIQUIDATED');
+   483→    expect(meta?.netPnlWithSlip ?? 0).toBeLessThan(0);
+   484→  });
+   485→
+   486→  test('T13 反向确认：先平后开——同一根 K 线不反向开仓，下一根已收盘 K 线才允许', async () => {
+   487→    const engine = new FakePaperEngine();
+   488→    engine.marks.set('BTCUSDT', 100);
+   489→    // 时间基准用真实时钟（lastCloseAt=真实平仓时刻；bar 时间必须与同一时轴比较）：
+   490→    // openBar = 2 分钟前的已收盘 K 线；反向确认复用同一根 → +60s 仍早于平仓时刻 → 被守卫拦截
+   491→    const openBar = Date.now() - 120_000;
+   492→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:333', lastBarTime: openBar })];
+   493→    const trader = makeTrader(signals, engine);
+   494→    await trader.ensureStarted();
+   495→    await trader.tick();
+   496→    const [longPos] = await openPositions();
+   497→    // 反向趋势确认（新周期 S）——确认 bar 仍是同一根 → 平多后同 tick 不得开空
+   498→    signals[0] = {
+   499→      ...keepSig(signals[0]!),
+   500→      phase: 'CONFIRMED_DOWN',
+   501→      direction: 'down',
+   502→      trendCycleId: 'BTCUSDT:S:334',
+   503→      trendStartedAt: openBar,
+   504→      lastBarTime: openBar,
+   505→    };
+   506→    await trader.tick();
+   507→    // 反向确认 tick：多单已平、空单被独立性守卫拦截（同一根 K 线）→ 0 持仓
+   508→    let rows = await openPositions();
+   509→    expect(rows.length).toBe(0);
+   510→    const closed = await client.paperPosition.findUnique({ where: { id: longPos!.id } });
+   511→    expect(closed?.status).toBe('CLOSED');
+   512→    const closedMeta = await trendTradeRepo.getMeta(longPos!.id);
+   513→    expect(closedMeta?.exitReason).toBe('REVERSE_CONFIRMED');
+   514→    // 下一根已收盘 K 线（收盘时刻晚于平仓时刻）→ 允许反向开仓
+   515→    signals[0] = { ...signals[0]!, lastBarTime: Date.now() + 60_000 };
+   516→    await trader.tick();
+   517→    rows = await openPositions();
+   518→    expect(rows.length).toBe(1);
+   519→    expect(rows[0]!.side).toBe('SHORT');
+   520→  });
+   521→
+   522→  test('T14 人工平仓/全部平仓：MANUAL 语义，与暂停互不影响', async () => {
+   523→    const engine = new FakePaperEngine();
+   524→    engine.marks.set('BTCUSDT', 100);
+   525→    engine.marks.set('ETHUSDT', 50);
+   526→    const signals = [
+   527→      sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:444' }),
+   528→      sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_DOWN', cycleId: 'ETHUSDT:S:444' }),
+   529→    ];
+   530→    const trader = makeTrader(signals, engine);
+   531→    await trader.ensureStarted();
+   532→    await trader.tick();
+   533→    expect((await openPositions()).length).toBe(2);
+   534→    await trader.pause();
+   535→    const r = await trader.closeAllManual();
+   536→    expect(r.closed).toBe(2);
+   537→    expect((await openPositions()).length).toBe(0);
+   538→    const metas = await trendTradeRepo.loadMetasByStatus('CLOSED');
+   539→    expect(metas.every((m) => m.exitReason === 'MANUAL')).toBe(true);
+   540→  });
+   541→
+   542→  test('T15 保证金不足：跳过并记录原因（决策审计可查）', async () => {
+   543→    const engine = new FakePaperEngine();
+   544→    engine.marks.set('BTCUSDT', 100);
+   545→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:555' })];
+   546→    const trader = makeTrader(signals, engine);
+   547→    await trader.ensureStarted();
+   548→    // 掏空余额（模拟权益耗尽）
+   549→    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   550→    await client.paperAccount.update({ where: { id: acc!.id }, data: { balance: 1 } });
+   551→    await trader.tick();
+   552→    expect((await openPositions()).length).toBe(0);
+   553→    const decisions = await trendTradeRepo.recentDecisions(10);
+   554→    const skip = decisions.find((d) => d.action === 'SKIP');
+   555→    expect(skip).toBeDefined();
+   556→  });
+   557→
+   558→  test('T16 充值（Task 55）：机器人账户 balance/totalDeposited 同步增加，与手动盘隔离', async () => {
+   559→    const engine = new FakePaperEngine();
+   560→    engine.marks.set('BTCUSDT', 100);
+   561→    const trader = makeTrader([sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })], engine);
+   562→    await trader.ensureStarted(); // boot 建户（INITIAL_CAPITAL）
+   563→    // 充值走真实 PaperEngine.deposit（与手动盘同一实现、不同账户名）
+   564→    const realEngine = new PaperEngine(TREND_TRADE.ACCOUNT_NAME);
+   565→    const before = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   566→    expect(before!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL);
+   567→    const r = await realEngine.deposit(50);
+   568→    expect(r.balance).toBe(TREND_TRADE.INITIAL_CAPITAL + 50);
+   569→    expect(r.totalDeposited).toBe(50);
+   570→    // 手动盘 default 账户不受影响（本测试库从未创建）
+   571→    expect(await client.paperAccount.findUnique({ where: { name: 'default' } })).toBeNull();
+   572→    // 金额校验：低于下限拒绝
+   573→    expect(realEngine.deposit(5)).rejects.toBeInstanceOf(PaperError);
+   574→  });
+   575→
+   576→  test('T17 持仓数量可选（Task 55）：maxPositions 持久化 + 新口径均分开仓', async () => {
+   577→    // 播种配置并把持仓数量改为 2（控制端更换时自动平仓由 closeAllManual 承担，见 T14）
+   578→    await trendTradeRepo.seedConfig({
+   579→      name: TREND_TRADE.ACCOUNT_NAME,
+   580→      mode: 'RUNNING',
+   581→      initialCapital: 100,
+   582→      marginRatio: 0.2,
+   583→      leverage: 20,
+   584→      maxPositions: 4,
+   585→      slippageBps: 2,
+   586→      peakEquity: 0,
+   587→    });
+   588→    await trendTradeRepo.updateMaxPositions(TREND_TRADE.ACCOUNT_NAME, 2);
+   589→    expect((await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME))!.maxPositions).toBe(2);
+   590→
+   591→    const engine = new FakePaperEngine();
+   592→    engine.marks.set('BTCUSDT', 100);
+   593→    engine.marks.set('ETHUSDT', 50);
+   594→    const trader = makeTrader(
+   595→      [
+   596→        sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:801' }),
+   597→        sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_UP', cycleId: 'ETHUSDT:L:802' }),
+   598→      ],
+   599→      engine,
+   600→    );
+   601→    await trader.ensureStarted();
+   602→    await trader.tick();
+   603→    const rows = await openPositions();
+   604→    expect(rows.length).toBe(2);
+   605→    // 每仓 = 权益 ÷ 持仓数量（2）：首仓 100/2/1.01 = 49.50；次仓权益递减一笔手续费后重算
+   606→    const floor2 = (v: number) => Math.floor((v + 1e-9) * 100) / 100;
+   607→    const m1 = floor2(100 / 2 / (1 + 20 * TAKER_FEE));
+   608→    const m2 = floor2((100 - m1 * 20 * TAKER_FEE) / 2 / (1 + 20 * TAKER_FEE));
+   609→    const bySymbol = new Map(rows.map((r) => [r.symbol, r]));
+   610→    expect(bySymbol.get('BTCUSDT')!.margin).toBeCloseTo(m1, 2);
+   611→    expect(bySymbol.get('ETHUSDT')!.margin).toBeCloseTo(m2, 2);
+   612→    // 两仓金额几乎一致（差异仅为一笔手续费的权益递减，金额不随资金滚动漂移）
+   613→    expect(Math.abs(m1 - m2)).toBeLessThan(0.5);
+   614→    // 仓位数改小后不会超过新上限：第三笔同价新周期不应开仓
+   615→    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   616→    const openNow = await client.paperPosition.findMany({ where: { accountId: acc!.id, status: 'OPEN' } });
+   617→    expect(openNow.length).toBe(2);
+   618→  });
+   619→
+   620→  test('T21 滚动资金保护（Task 55-3）：余额被打穿后新仓 clamp 到可承受最大值，永不因「可用余额不足」跳过', async () => {
+   621→    const engine = new FakePaperEngine();
+   622→    engine.marks.set('BTCUSDT', 100);
+   623→    engine.marks.set('ETHUSDT', 50);
+   624→    const signals: UnifiedTrendSignal[] = [
+   625→      sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:921' }),
+   626→    ];
+   627→    const trader = makeTrader(signals, engine);
+   628→    await trader.ensureStarted();
+   629→    await trader.tick();
+   630→    let rows = await openPositions();
+   631→    expect(rows.length).toBe(1); // 首仓按 权益100÷4仓 开出
+   632→    // 模拟资金滚动变化（已实现亏损/强平损耗把余额打穿到 < 权益÷N 的目标保证金）：
+   633→    // 此时权益 = 5 + 24.75(占用) ≈ 29.75，目标 29.75/4/1.01 ≈ 7.36 > 余额可承受 5/1.01 ≈ 4.95
+   634→    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   635→    await client.paperAccount.update({ where: { id: acc!.id }, data: { balance: 5 } });
+   636→    // 新确认趋势（新周期）下一轮 tick 开仓
+   637→    signals.push(sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_UP', cycleId: 'ETHUSDT:L:922' }));
+   638→    await trader.tick();
+   639→    rows = await openPositions();
+   640→    expect(rows.length).toBe(2); // 第二笔照常开出（旧口径此处会跳过「可用余额不足」）
+   641→    const second = rows.find((r) => r.symbol === 'ETHUSDT')!;
+   642→    // clamp 到余额能承受的最大值（margin+fee ≤ 余额，与 PaperEngine.open 校验同源）
+   643→    const clamped = Math.floor((5 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
+   644→    expect(second.margin).toBeCloseTo(clamped, 2);
+   645→    expect(second.margin).toBeGreaterThanOrEqual(TREND_TRADE.MIN_MARGIN);
+   646→  });
+   647→
+   648→  test('T18 结束迹象即自行平仓（Task 55-2）：END_PENDING 不再等确认根数，机器人自行离场', async () => {
+   649→    const engine = new FakePaperEngine();
+   650→    engine.marks.set('BTCUSDT', 100);
+   651→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:918' })];
+   652→    const trader = makeTrader(signals, engine);
+   653→    await trader.ensureStarted();
+   654→    await trader.tick();
+   655→    expect((await openPositions()).length).toBe(1);
+   656→    // 同周期出现结束迹象（END_PENDING = 模型已判定趋势有问题：反向候选/深回撤/结构失效）
+   657→    const meta = (await trendTradeRepo.loadMetasByStatus('OPEN'))[0]!;
+   658→    signals[0] = {
+   659→      ...keepSig(signals[0]!),
+   660→      phase: 'END_PENDING',
+   661→      direction: 'up',
+   662→      endEvidenceBars: 1,
+   663→      endPendingSince: Date.now(),
+   664→      trendCycleId: meta.trendCycleId,
+   665→    };
+   666→    await trader.tick();
+   667→    expect((await openPositions()).length).toBe(0);
+   668→    const m = await trendTradeRepo.getMeta(meta.positionId);
+   669→    expect(m?.status).toBe('CLOSED');
+   670→    expect(m?.exitReason).toBe('TREND_ENDED');
+   671→    // 结束证据明细留存（exitSignalJson 含完整信号，可回溯结束报警上下文）
+   672→    expect(m?.exitSignalJson).toContain('END_PENDING');
+   673→  });
+   674→
+   675→  test('T19 残留持仓自行离场（Task 55-2）：ENDED 任意周期归属（周期回收/ORPHAN 漏配）也平仓', async () => {
+   676→    const engine = new FakePaperEngine();
+   677→    engine.marks.set('BTCUSDT', 100);
+   678→    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:919' })];
+   679→    const trader = makeTrader(signals, engine);
+   680→    await trader.ensureStarted();
+   681→    await trader.tick();
+   682→    const [pos] = await openPositions();
+   683→    expect(pos).toBeDefined();
+   684→    // 旧规则要求周期归属一致：周期回收/恢复场景漏配 → 残留持仓只能人工平；现应自行离场
+   685→    signals[0] = { ...keepSig(signals[0]!), phase: 'ENDED', trendCycleId: 'BTCUSDT:L:999-rebuilt' };
+   686→    await trader.tick();
+   687→    expect((await openPositions()).length).toBe(0);
+   688→    const m = await trendTradeRepo.getMeta(pos!.id);
+   689→    expect(m?.exitReason).toBe('TREND_ENDED');
+   690→  });
+   691→
+   692→  test('T20 重置账户（Task 55-2）：平掉持仓并清空流水/趋势关联/决策，资金回到 100 U、ROI 基准归零', async () => {
+   693→    const engine = new FakePaperEngine();
+   694→    engine.marks.set('BTCUSDT', 100);
+   695→    engine.marks.set('ETHUSDT', 50);
+   696→    const trader = makeTrader(
+   697→      [
+   698→        sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:920' }),
+   699→        sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_DOWN', cycleId: 'ETHUSDT:S:920' }),
+   700→      ],
+   701→      engine,
+   702→    );
+   703→    await trader.ensureStarted();
+   704→    await trader.tick();
+   705→    expect((await openPositions()).length).toBe(2);
+   706→    // 充值改变余额/totalDeposited 后重置：都应回到初始态
+   707→    await new PaperEngine(TREND_TRADE.ACCOUNT_NAME).deposit(500);
+   708→    const r = await trader.resetAccount();
+   709→    expect(r.closed).toBe(2);
+   710→    expect((await openPositions()).length).toBe(0);
+   711→    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   712→    expect(acc!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL);
+   713→    expect(acc!.totalDeposited).toBe(0); // ROI 本金基准 = initialCapital + totalDeposited = 100
+   714→    expect(await client.paperPosition.count()).toBe(0);
+   715→    expect(await client.paperTrade.count()).toBe(0);
+   716→    expect(await trendTradeRepo.loadMetasByStatus('OPEN')).toHaveLength(0);
+   717→    expect(await trendTradeRepo.loadMetasByStatus('CLOSED')).toHaveLength(0);
+   718→    expect(await trendTradeRepo.recentDecisions(10)).toHaveLength(0);
+   719→    const cfg = await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+   720→    expect(cfg!.peakEquity).toBe(0);
+   721→  });
+   722→});
+   723→

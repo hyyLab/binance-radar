@@ -3,7 +3,7 @@
 import { useMemo, useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
 import { Skeleton } from '@/components/ui/skeleton';
-import { useKlines, useTickers } from '@/hooks/use-market';
+import { useFuturesTickers, useKlines, useTickers } from '@/hooks/use-market';
 import { usePaperAccount, usePaperTrades } from '@/hooks/use-scanner';
 import { fmtPct, fmtPrice, fmtVol, pctClass } from '@/lib/format';
 import type { TickerSnapshot } from '@/lib/market/types';
@@ -32,18 +32,32 @@ function StatItem({ label, value, cls }: { label: string; value: string; cls?: s
 export function CoinDialog({
   symbol,
   onClose,
+  market = 'spot',
+  extraPriceLines,
+  extraMarkers,
 }: {
   symbol: string | null;
   onClose: () => void;
+  /** K 线市场：异动交易页签传 futures（合约多源），默认币安现货 */
+  market?: 'spot' | 'futures';
+  /** 外部附加价格线（Task 55：趋势自动持仓的成本/强平线——与手动账户线叠加展示） */
+  extraPriceLines?: ChartPriceLine[];
+  /** 外部附加成交标记（Task 55：自动开仓时点标注在 K 线上） */
+  extraMarkers?: ChartTradeMarker[];
 }) {
   const [interval, setInterval] = useState<string>('15m');
-  const { data: klines, isLoading } = useKlines(symbol, interval, !!symbol);
+  const { data: klines, isLoading } = useKlines(symbol, interval, !!symbol, market);
   const { data: tickersResp } = useTickers();
+  const { data: futuresResp } = useFuturesTickers();
   const { data: paper } = usePaperAccount();
   const { data: tradesResp } = usePaperTrades(symbol);
 
+  // 行情条：本市场优先，跨市场兑底
+  const primaryTickers = market === 'futures' ? futuresResp?.data ?? [] : tickersResp?.data ?? [];
+  const secondaryTickers = market === 'futures' ? tickersResp?.data ?? [] : futuresResp?.data ?? [];
   const ticker: TickerSnapshot | undefined = symbol
-    ? tickersResp?.data.find((t) => t.symbol === symbol)
+    ? (primaryTickers.find((t) => t.symbol === symbol) ??
+       secondaryTickers.find((t) => t.symbol === symbol))
     : undefined;
 
   const base = symbol ? symbol.replace(/USDT$/, '') : '';
@@ -70,10 +84,16 @@ export function CoinDialog({
         dashed: true,
       });
     }
+    // 外部附加线（趋势自动持仓等）：同价去重，外部线优先
+    for (const l of extraPriceLines ?? []) {
+      if (!lines.some((x) => Math.abs(x.price - l.price) < 1e-12 && x.title === l.title)) {
+        lines.push(l);
+      }
+    }
     return lines;
-  }, [myPositions]);
+  }, [myPositions, extraPriceLines]);
 
-  // 历史交易 → 简洁 B/S 标记（B=买入 绿色▲，S=卖出 红色▼）
+  // 历史交易 → 简洁 B/S 标记（B=买入 绿色▲，S=卖出 红色▼）+ 外部附加标记（自动开仓时点等）
   const tradeMarkers = useMemo<ChartTradeMarker[]>(() => {
     const list = tradesResp?.data ?? [];
     const out: ChartTradeMarker[] = [];
@@ -91,8 +111,8 @@ export function CoinDialog({
           break;
       }
     }
-    return out;
-  }, [tradesResp]);
+    return [...out, ...(extraMarkers ?? [])];
+  }, [tradesResp, extraMarkers]);
 
   return (
     <Dialog open={!!symbol} onOpenChange={(open) => !open && onClose()}>
@@ -112,7 +132,9 @@ export function CoinDialog({
         <DialogDescription className="text-xs">
           {last
             ? `K 线时间轴为 UTC+8 · 最新收盘 ${fmtPrice(last.c)}`
-            : '币安现货 K 线（服务端代理，缓存 20 秒）'}
+            : market === 'futures'
+              ? '合约 K 线（多源聚合，币安优先 · 服务端代理，缓存 20 秒）'
+              : '币安现货 K 线（服务端代理，缓存 20 秒）'}
         </DialogDescription>
 
         <div className="flex flex-wrap gap-1" role="tablist" aria-label="K 线周期">

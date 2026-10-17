@@ -27,6 +27,17 @@ export function useTickers() {
   });
 }
 
+/** 合约行情（USDT-M 永续，多源聚合币安优先）——异动交易页签专用 */
+export function useFuturesTickers() {
+  return useQuery({
+    queryKey: ['futures-tickers'],
+    queryFn: () => getJson<TickersResponse>('/api/enhanced/tickers'),
+    refetchInterval: 4000,
+    staleTime: 3000,
+    placeholderData: keepPreviousData,
+  });
+}
+
 export function useAnomalies() {
   return useQuery({
     queryKey: ['market-anomalies'],
@@ -47,12 +58,17 @@ export function useStats() {
   });
 }
 
-export function useKlines(symbol: string | null, interval: string, enabled: boolean) {
+export function useKlines(
+  symbol: string | null,
+  interval: string,
+  enabled: boolean,
+  market: 'spot' | 'futures' = 'spot',
+) {
   return useQuery({
-    queryKey: ['market-klines', symbol, interval],
+    queryKey: ['market-klines', market, symbol, interval],
     queryFn: () =>
       getJson<KlinesResponse>(
-        `/api/market/klines?symbol=${encodeURIComponent(symbol ?? '')}&interval=${interval}&limit=180`,
+        `/api/market/klines?symbol=${encodeURIComponent(symbol ?? '')}&interval=${interval}&limit=180&market=${market}`,
       ),
     enabled: enabled && !!symbol,
     refetchInterval: 30_000,

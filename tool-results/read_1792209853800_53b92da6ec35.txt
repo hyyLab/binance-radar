@@ -1,0 +1,643 @@
+     1→'use client';
+     2→
+     3→// ---------- 趋势自动模拟交易页（Task 54 §5 + Task 55 交互增强） ----------
+     4→// 与手动模拟盘完全隔离（独立账户 trend-auto-v1）：总览 + 当前持仓 + 历史明细 + 控制。
+     5→// Task 55：① 机器人充值按钮（独立账户余额/ROI 本金同步增加，不计盈亏）
+     6→//          ② 持仓数量可选（每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；
+     7→//             更换数量时自动平仓原有持仓，新仓按新口径开）
+     8→//          ③ 点击持仓卡片 → 打开该币种 K 线（叠加成本线/强平线/开仓时点标记）
+     9→// ⚠️ 纯模拟交易；趋势评分为启发式证据分；趋势确认 ≠ 买卖指令；强平如实统计。
+    10→
+    11→import { useMemo, useState } from 'react';
+    12→import {
+    13→  Bot,
+    14→  ChevronDown,
+    15→  CircleAlert,
+    16→  History,
+    17→  Pause,
+    18→  Play,
+    19→  Plus,
+    20→  Square,
+    21→  Wallet,
+    22→} from 'lucide-react';
+    23→import { cn } from '@/lib/utils';
+    24→import { fmtAgo, fmtPct, fmtPrice, fmtTime } from '@/lib/format';
+    25→import {
+    26→  useTrendTradeControl,
+    27→  useTrendTradeHistory,
+    28→  useTrendTrading,
+    29→  type TrendPositionRow,
+    30→  type TrendTradeRow,
+    31→} from '@/hooks/use-trend-trade';
+    32→import { CoinDialog } from '@/components/market/coin-dialog';
+    33→import type { ChartPriceLine, ChartTradeMarker } from '@/components/market/kline-chart';
+    34→import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+    35→import { Input } from '@/components/ui/input';
+    36→
+    37→/** 与服务端 TREND_TRADE.MAX_POSITIONS_OPTIONS 保持一致 */
+    38→const POSITION_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
+    39→/** 与手动盘充值预设一致 */
+    40→const DEPOSIT_PRESETS = [100, 500, 1000, 5000];
+    41→const MIN_DEPOSIT = 10;
+    42→const MAX_DEPOSIT = 1_000_000;
+    43→
+    44→const EXIT_REASON_LABEL: Record<string, string> = {
+    45→  TREND_ENDED: '趋势结束',
+    46→  REVERSE_CONFIRMED: '反向确认',
+    47→  LIQUIDATED: '强平',
+    48→  MANUAL: '人工平仓',
+    49→};
+    50→
+    51→const PHASE_V2_LABEL: Record<string, string> = {
+    52→  OBSERVING: '观察中',
+    53→  CANDIDATE_UP: '候选上涨',
+    54→  CANDIDATE_DOWN: '候选下跌',
+    55→  CONFIRMED_UP: '确认上涨',
+    56→  CONFIRMED_DOWN: '确认下跌',
+    57→  END_PENDING: '结束待确认',
+    58→  ENDED: '已结束',
+    59→  DATA_UNAVAILABLE: '数据不可用',
+    60→  CONFIRMED_RESTORED: '重启恢复',
+    61→};
+    62→
+    63→function pnlClass(v: number | null | undefined): string {
+    64→  if (v == null || v === 0) return 'text-muted-foreground';
+    65→  return v > 0 ? 'text-up' : 'text-down';
+    66→}
+    67→
+    68→function Stat({ label, value, cls }: { label: string; value: string; cls?: string }) {
+    69→  return (
+    70→    <div className="rounded-lg border border-border/60 bg-card px-3 py-2">
+    71→      <div className="text-[10px] text-muted-foreground">{label}</div>
+    72→      <div className={cn('mt-0.5 font-mono text-sm font-bold tabular-nums', cls)}>{value}</div>
+    73→    </div>
+    74→  );
+    75→}
+    76→
+    77→function ModeBadge({ mode }: { mode: string }) {
+    78→  if (mode === 'RUNNING')
+    79→    return <span className="rounded bg-up/15 px-2 py-0.5 text-[11px] font-bold text-up">运行中</span>;
+    80→  if (mode === 'PAUSED')
+    81→    return <span className="rounded bg-gold/15 px-2 py-0.5 text-[11px] font-bold text-gold">已暂停（持仓仍受监控）</span>;
+    82→  return <span className="rounded bg-secondary px-2 py-0.5 text-[11px] font-bold text-muted-foreground">已停止</span>;
+    83→}
+    84→
+    85→// ============ 当前持仓卡片（Task 55：整卡可点 → 查看对应 K 线） ============
+    86→
+    87→function PositionCard({
+    88→  p,
+    89→  onClose,
+    90→  onSelectSymbol,
+    91→  busy,
+    92→}: {
+    93→  p: TrendPositionRow;
+    94→  onClose: (positionId: string) => void;
+    95→  onSelectSymbol: (symbol: string) => void;
+    96→  busy: boolean;
+    97→}) {
+    98→  const long = p.side === 'LONG';
+    99→  return (
+   100→    <div
+   101→      className={cn(
+   102→        'cursor-pointer rounded-lg border bg-card p-2.5 transition-colors hover:border-gold/50',
+   103→        long ? 'border-up/30' : 'border-down/30',
+   104→      )}
+   105→      onClick={() => onSelectSymbol(p.symbol)}
+   106→      title="点击查看该币种 K 线（含持仓成本线 / 强平线 / 开仓时点标记）"
+   107→    >
+   108→      <div className="flex items-center gap-1.5">
+   109→        <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-bold', long ? 'bg-up/20 text-up' : 'bg-down/20 text-down')}>
+   110→          {long ? '做多' : '做空'} {p.leverage}x
+   111→        </span>
+   112→        <span className="font-mono text-xs font-bold">{p.base}<span className="text-muted-foreground">/USDT</span></span>
+   113→        <span className="ml-auto font-mono text-xs tabular-nums">{fmtPrice(p.markPrice)}</span>
+   114→        <button
+   115→          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-gold disabled:opacity-40"
+   116→          disabled={busy}
+   117→          onClick={(e) => {
+   118→            e.stopPropagation();
+   119→            onSelectSymbol(p.symbol);
+   120→          }}
+   121→          title="查看 K 线"
+   122→        >
+   123→          K线
+   124→        </button>
+   125→        <button
+   126→          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted-foreground hover:text-down disabled:opacity-40"
+   127→          disabled={busy}
+   128→          onClick={(e) => {
+   129→            e.stopPropagation();
+   130→            onClose(p.positionId);
+   131→          }}
+   132→        >
+   133→          平仓
+   134→        </button>
+   135→      </div>
+   136→
+   137→      <div className="mt-1.5 grid grid-cols-2 gap-x-3 gap-y-0.5 text-[10px] tabular-nums text-muted-foreground sm:grid-cols-4">
+   138→        <span>开仓 {fmtPrice(p.entryPrice)}</span>
+   139→        <span>保证金 {p.margin.toFixed(2)}</span>
+   140→        <span>名义 {p.notional.toFixed(1)}</span>
+   141→        <span>持仓 {p.holdMinutes}min</span>
+   142→        <span>强平价 {fmtPrice(p.liqPrice)}</span>
+   143→        <span>预计平仓费 {p.estCloseFee.toFixed(3)}</span>
+   144→        <span className={pnlClass(p.unrealizedGross)}>毛盈亏 {p.unrealizedGross.toFixed(3)}</span>
+   145→        <span className={pnlClass(p.netEst)}>净估算 {p.netEst.toFixed(3)}</span>
+   146→      </div>
+   147→
+   148→      {/* 趋势关联（消费统一信号，与趋势面板同源） */}
+   149→      {p.trend ? (
+   150→        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px]">
+   151→          <span
+   152→            className={cn(
+   153→              'rounded px-1 py-0.5 font-semibold',
+   154→              p.trend.phase === 'CONFIRMED_UP'
+   155→                ? 'bg-up/15 text-up'
+   156→                : p.trend.phase === 'CONFIRMED_DOWN'
+   157→                  ? 'bg-down/15 text-down'
+   158→                  : p.trend.phase === 'END_PENDING'
+   159→                    ? 'bg-gold/15 text-gold'
+   160→                    : 'bg-secondary text-muted-foreground',
+   161→            )}
+   162→          >
+   163→            {PHASE_V2_LABEL[p.trend.phase] ?? p.trend.phase} · {p.trend.score}分
+   164→          </span>
+   165→          {p.trend.phase === 'END_PENDING' && (
+   166→            <span className="text-gold">结束确认 {p.trend.endEvidenceBars}/3 根</span>
+   167→          )}
+   168→          {p.trend.htfAgree === false && <span className="text-gold">15m 方向不一致</span>}
+   169→          {p.trend.conflict && <span className="text-down">方向冲突</span>}
+   170→          {!p.trend.dataFresh && <span className="text-gold">数据不可用（不开新仓、不误判结束）</span>}
+   171→          <span className="truncate text-muted-foreground/80" title={p.trend.reason}>{p.trend.reason}</span>
+   172→        </div>
+   173→      ) : (
+   174→        <div className="mt-1.5 text-[10px] text-muted-foreground">趋势信号缺失（重启恢复/已退池，仅强平与人工管理）</div>
+   175→      )}
+   176→      {p.waitingEndConfirm && (
+   177→        <div className="mt-1 flex items-center gap-1 text-[10px] text-gold">
+   178→          <CircleAlert className="h-3 w-3" /> 持仓等待趋势结束确认（连续收盘 K 线判定，防插针误离场）
+   179→        </div>
+   180→      )}
+   181→    </div>
+   182→  );
+   183→}
+   184→
+   185→// ============ 历史明细行 ============
+   186→
+   187→function TradeRow({ t, onDetail }: { t: TrendTradeRow; onDetail: (id: string) => void }) {
+   188→  const exitLabel = EXIT_REASON_LABEL[t.exitReason ?? ''] ?? (t.exitReason ?? '—');
+   189→  const net = t.netPnlWithSlip;
+   190→  return (
+   191→    <button
+   192→      onClick={() => onDetail(t.positionId)}
+   193→      className="grid w-full grid-cols-[64px_60px_44px_1fr_1fr_70px_90px] items-center gap-1 rounded px-2 py-1 text-left text-[11px] tabular-nums hover:bg-secondary/40 sm:grid-cols-[80px_64px_52px_1fr_1fr_76px_96px]"
+   194→      title="点击查看开仓依据与趋势变化详情"
+   195→    >
+   196→      <span className="truncate text-muted-foreground">{fmtTime(t.closedAt)}</span>
+   197→      <span className="truncate font-mono font-semibold">{t.base}</span>
+   198→      <span className={cn('font-bold', t.side === 'LONG' ? 'text-up' : 'text-down')}>
+   199→        {t.side === 'LONG' ? '多' : '空'}
+   200→      </span>
+   201→      <span className="truncate text-muted-foreground">
+   202→        {fmtPrice(t.entryPrice)} → {t.exitPrice != null ? fmtPrice(t.exitPrice) : '—'}
+   203→      </span>
+   204→      <span className="truncate text-muted-foreground">
+   205→        费 {(t.openFee + t.closeFee).toFixed(3)} · 滑 {t.slippageEst.toFixed(3)}
+   206→      </span>
+   207→      <span className={cn('truncate font-semibold', exitLabel === '强平' ? 'text-down' : 'text-muted-foreground')}>
+   208→        {exitLabel}
+   209→      </span>
+   210→      <span className={cn('text-right font-bold', pnlClass(net))}>
+   211→        {net != null ? net.toFixed(3) : '—'}
+   212→      </span>
+   213→    </button>
+   214→  );
+   215→}
+   216→
+   217→// ============ 单笔详情（决策链还原） ============
+   218→
+   219→interface TradeDetail {
+   220→  meta: {
+   221→    trendCycleId: string;
+   222→    trendPhaseAtOpen: string;
+   223→    scoreAtOpen: number;
+   224→    signalAtOpen: string;
+   225→    exitSignalJson: string | null;
+   226→    exitReason: string | null;
+   227→  };
+   228→  position: {
+   229→    symbol: string;
+   230→    side: string;
+   231→    entryPrice: number;
+   232→    exitPrice: number | null;
+   233→    openFee: number;
+   234→    closeFee: number;
+   235→    pnl: number | null;
+   236→    openedAt: string;
+   237→    closedAt: string | null;
+   238→  } | null;
+   239→  decisions: { id: string; action: string; detail: string; createdAt: number }[];
+   240→}
+   241→
+   242→// ============ 主视图 ============
+   243→
+   244→export function TrendTradeView() {
+   245→  const { data, isLoading, isError } = useTrendTrading();
+   246→  const control = useTrendTradeControl();
+   247→  const [filterSymbol, setFilterSymbol] = useState('');
+   248→  const [sort, setSort] = useState<'time' | 'pnl'>('time');
+   249→  const [order, setOrder] = useState<'asc' | 'desc'>('desc');
+   250→  const history = useTrendTradeHistory(filterSymbol, sort, order);
+   251→  const [detailId, setDetailId] = useState<string | null>(null);
+   252→  const [detail, setDetail] = useState<TradeDetail | null>(null);
+   253→  // Task 55：充值弹窗 + K 线弹窗（点击持仓卡片）
+   254→  const [depositOpen, setDepositOpen] = useState(false);
+   255→  const [depositAmount, setDepositAmount] = useState('');
+   256→  const [klineSymbol, setKlineSymbol] = useState<string | null>(null);
+   257→
+   258→  const mode = data?.mode ?? 'RUNNING';
+   259→  const busy = control.isPending;
+   260→  const maxPositions = data?.config.maxPositions ?? 4;
+   261→  const totalDeposited = data?.account.totalDeposited ?? 0;
+   262→
+   263→  const depositVal = Number(depositAmount);
+   264→  const depositValid = Number.isFinite(depositVal) && depositVal >= MIN_DEPOSIT && depositVal <= MAX_DEPOSIT;
+   265→
+   266→  const act = (
+   267→    action: string,
+   268→    positionId?: string,
+   269→    value?: number,
+   270→    amount?: number,
+   271→    /** 配置变更类操作（换仓位数/充值）需要弹窗确认结果；常规操作由界面状态反馈 */
+   272→    alertNote?: boolean,
+   273→  ) =>
+   274→    control.mutate(
+   275→      { action, positionId, value, amount },
+   276→      {
+   277→        onSuccess: (r) => {
+   278→          if (!r.ok && r.error) window.alert(r.error);
+   279→          else if (alertNote && r.note) window.alert(r.note);
+   280→        },
+   281→        onError: (e) => window.alert(`操作失败：${e.message}`),
+   282→      },
+   283→    );
+   284→
+   285→  const submitDeposit = () => {
+   286→    if (!depositValid) return;
+   287→    act('deposit', undefined, undefined, depositVal, true);
+   288→    setDepositOpen(false);
+   289→    setDepositAmount('');
+   290→  };
+   291→
+   292→  const openDetail = async (positionId: string) => {
+   293→    if (detailId === positionId) {
+   294→      setDetailId(null);
+   295→      setDetail(null);
+   296→      return;
+   297→    }
+   298→    setDetailId(positionId);
+   299→    setDetail(null);
+   300→    try {
+   301→      const res = await fetch(`/api/trend-trading/trades?positionId=${positionId}`, { cache: 'no-store' });
+   302→      const j = (await res.json()) as { ok: boolean; detail?: TradeDetail };
+   303→      setDetail(j.ok && j.detail ? j.detail : null);
+   304→    } catch {
+   305→      setDetail(null);
+   306→    }
+   307→  };
+   308→
+   309→  // Task 55：K 线弹窗附加物——当前查看的自动持仓 → 成本线/强平线/开仓时点标记
+   310→  const klinePosition = useMemo(
+   311→    () => data?.positions.find((p) => p.symbol === klineSymbol) ?? null,
+   312→    [data, klineSymbol],
+   313→  );
+   314→  const klinePriceLines = useMemo<ChartPriceLine[] | undefined>(() => {
+   315→    if (!klinePosition) return undefined;
+   316→    const long = klinePosition.side === 'LONG';
+   317→    return [
+   318→      {
+   319→        price: klinePosition.entryPrice,
+   320→        color: long ? '#0ecb81' : '#f6465d',
+   321→        title: `自动${long ? '多' : '空'}成本 ${klinePosition.leverage}x`,
+   322→      },
+   323→      { price: klinePosition.liqPrice, color: '#f6465d', title: '强平', dashed: true },
+   324→    ];
+   325→  }, [klinePosition]);
+   326→  const klineMarkers = useMemo<ChartTradeMarker[] | undefined>(() => {
+   327→    if (!klinePosition) return undefined;
+   328→    const long = klinePosition.side === 'LONG';
+   329→    return [
+   330→      {
+   331→        timeMs: new Date(klinePosition.openedAt).getTime(),
+   332→        position: long ? 'belowBar' : 'aboveBar',
+   333→        shape: long ? 'arrowUp' : 'arrowDown',
+   334→        color: long ? '#0ecb81' : '#f6465d',
+   335→        text: '开',
+   336→      },
+   337→    ];
+   338→  }, [klinePosition]);
+   339→
+   340→  const changePositions = (v: number) => {
+   341→    if (v === maxPositions) return;
+   342→    if (
+   343→      window.confirm(
+   344→        `确认将持仓数量改为 ${v} 仓？\n\n· 将自动平仓当前全部 ${data?.positions.length ?? 0} 笔持仓（按标记价市价）\n· 每仓保证金改为「可用余额 ÷ 剩余仓位数」均分\n· 新确认趋势按新口径开仓`,
+   345→      )
+   346→    ) {
+   347→      act('setMaxPositions', undefined, v, undefined, true);
+   348→    }
+   349→  };
+   350→
+   351→  return (
+   352→    <div className="space-y-3">
+   353→      {/* 头部：标题 + 模式 + 控制 */}
+   354→      <div className="flex flex-wrap items-center gap-2">
+   355→        <Bot className="h-4 w-4 text-gold" />
+   356→        <h1 className="text-sm font-bold sm:text-base">趋势自动模拟交易</h1>
+   357→        <ModeBadge mode={mode} />
+   358→        <span className="hidden text-[10px] text-muted-foreground sm:inline">
+   359→          账户 {data?.config.accountName ?? 'trend-auto-v1'} · 初始 {data?.config.initialCapital ?? '—'} USDT
+   360→          {totalDeposited > 0 && <span className="text-gold"> · 累计充值 +{totalDeposited.toFixed(0)}</span>} · 每仓 =
+   361→          可用余额 ÷ 剩余仓位数 · {data?.config.leverage ?? 20}x · 无固定止盈止损（趋势结束离场）
+   362→        </span>
+   363→        <div className="ml-auto flex items-center gap-1.5">
+   364→          {/* Task 55：持仓数量可选——更换即自动平仓原有持仓 */}
+   365→          <label className="flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted-foreground" title="最大同时持仓数；每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；更换数量会自动平仓原有持仓">
+   366→            持仓
+   367→            <select
+   368→              value={maxPositions}
+   369→              disabled={busy}
+   370→              onChange={(e) => changePositions(Number(e.target.value))}
+   371→              className="rounded bg-background px-0.5 py-0.5 text-[11px] font-semibold text-foreground outline-none"
+   372→            >
+   373→              {POSITION_OPTIONS.map((n) => (
+   374→                <option key={n} value={n}>
+   375→                  {n} 仓
+   376→                </option>
+   377→              ))}
+   378→            </select>
+   379→          </label>
+   380→          {/* Task 55：机器人充值 */}
+   381→          <button
+   382→            className="inline-flex items-center gap-1 rounded border border-gold/50 bg-gold/10 px-2 py-1 text-[11px] font-bold text-gold hover:bg-gold/20 disabled:opacity-40"
+   383→            disabled={busy}
+   384→            onClick={() => setDepositOpen(true)}
+   385→            title="给机器人账户充值（增加可用余额，计入 ROI 本金基数，不算盈利）"
+   386→          >
+   387→            <Plus className="h-3 w-3" /> 充值
+   388→          </button>
+   389→          {mode === 'RUNNING' ? (
+   390→            <button
+   391→              className="inline-flex items-center gap-1 rounded border border-gold/50 px-2 py-1 text-[11px] font-semibold text-gold hover:bg-gold/10 disabled:opacity-40"
+   392→              disabled={busy}
+   393→              onClick={() => act('pause')}
+   394→              title="暂停新开仓；现有持仓继续监控"
+   395→            >
+   396→              <Pause className="h-3 w-3" /> 暂停开仓
+   397→            </button>
+   398→          ) : (
+   399→            <button
+   400→              className="inline-flex items-center gap-1 rounded border border-up/50 px-2 py-1 text-[11px] font-semibold text-up hover:bg-up/10 disabled:opacity-40"
+   401→              disabled={busy}
+   402→              onClick={() => act('resume')}
+   403→            >
+   404→              <Play className="h-3 w-3" /> 恢复交易
+   405→            </button>
+   406→          )}
+   407→          <button
+   408→            className="inline-flex items-center gap-1 rounded border border-down/50 px-2 py-1 text-[11px] font-semibold text-down hover:bg-down/10 disabled:opacity-40"
+   409→            disabled={busy || (data?.positions.length ?? 0) === 0}
+   410→            onClick={() => {
+   411→              if (window.confirm('确认按标记价市价平掉全部自动持仓？')) act('closeAll');
+   412→            }}
+   413→            title="全部平仓（不影响运行模式）"
+   414→          >
+   415→            <Square className="h-3 w-3" /> 全部平仓
+   416→          </button>
+   417→        </div>
+   418→      </div>
+   419→      <div className="text-[10px] text-muted-foreground/80">
+   420→        ⚠️ 纯模拟交易，不接入真实下单。趋势评分为启发式证据分（未经回放校准，非胜率/概率）；趋势确认 ≠ 买卖指令；强平为杠杆模拟执行结果，如实计入统计。
+   421→        {data && !data.service.on && <span className="ml-2 text-gold">服务尚未运行（访问本页自动拉起）</span>}
+   422→        {data?.service.lastError && <span className="ml-2 text-down">最近错误：{data.service.lastError}</span>}
+   423→      </div>
+   424→
+   425→      {isLoading && (
+   426→        <div className="rounded-lg border border-border/70 bg-card px-4 py-8 text-center text-sm text-muted-foreground">
+   427→          正在连接趋势自动交易服务（从数据库恢复持仓关联）…
+   428→        </div>
+   429→      )}
+   430→      {isError && (
+   431→        <div className="rounded-lg border border-down/40 bg-down/10 px-4 py-8 text-center text-sm text-down">
+   432→          服务加载失败，稍后自动重试
+   433→        </div>
+   434→      )}
+   435→
+   436→      {data && (
+   437→        <>
+   438→          {/* 总览卡（任务 §5.1 全字段） */}
+   439→          <div className="grid grid-cols-2 gap-2 sm:grid-cols-4 xl:grid-cols-6">
+   440→            <Stat label="账户权益" value={data.account.equity.toFixed(2)} />
+   441→            <Stat label="可用余额" value={data.account.balance.toFixed(2)} />
+   442→            <Stat label="占用保证金" value={data.account.marginUsed.toFixed(2)} />
+   443→            <Stat label="未实现盈亏" value={data.account.unrealizedPnl.toFixed(3)} cls={pnlClass(data.account.unrealizedPnl)} />
+   444→            <Stat label="已实现净收益（含滑点）" value={data.stats.realizedNetWithSlip.toFixed(3)} cls={pnlClass(data.stats.realizedNetWithSlip)} />
+   445→            <Stat label="累计手续费" value={data.stats.feePaid.toFixed(3)} />
+   446→            <Stat label="ROI" value={fmtPct(data.stats.roiPct)} cls={pnlClass(data.stats.roiPct)} />
+   447→            <Stat label="当前回撤" value={fmtPct(data.account.currentDrawdownPct)} cls={data.account.currentDrawdownPct > 5 ? 'text-down' : 'text-muted-foreground'} />
+   448→            <Stat label="持仓数" value={`${data.stats.openCount}/${data.config.maxPositions}`} />
+   449→            <Stat label="历史交易" value={String(data.stats.closedCount)} />
+   450→            <Stat label="胜率（含滑点口径）" value={fmtPct(data.stats.winRate)} />
+   451→            <Stat label="强平次数" value={String(data.stats.liquidatedCount)} cls={data.stats.liquidatedCount > 0 ? 'text-down' : 'text-muted-foreground'} />
+   452→          </div>
+   453→
+   454→          {/* 当前持仓（任务 §5.2 全字段；Task 55：点击卡片看 K 线） */}
+   455→          <div className="space-y-1.5">
+   456→            <div className="flex items-center gap-1.5 text-xs font-semibold">
+   457→              <Wallet className="h-3.5 w-3.5 text-muted-foreground" /> 当前持仓（{data.positions.length}）
+   458→              <span className="text-[10px] font-normal text-muted-foreground">
+   459→                点击持仓卡片查看对应 K 线（成本线/强平线/开仓时点）· 趋势信息与趋势面板同源
+   460→              </span>
+   461→            </div>
+   462→            {data.positions.length === 0 ? (
+   463→              <div className="rounded-lg border border-dashed border-border/60 px-4 py-3 text-center text-xs text-muted-foreground">
+   464→                暂无自动持仓 · 确认趋势（CONFIRMED）出现后按「可用余额 ÷ 剩余仓位数（当前 {data.config.maxPositions}）」均分 +{' '}
+   465→                {data.config.leverage}x 自动开仓；候选趋势/数据过期/暂停状态一律不开仓
+   466→              </div>
+   467→            ) : (
+   468→              <div className="grid grid-cols-1 gap-2 lg:grid-cols-2">
+   469→                {data.positions.map((p) => (
+   470→                  <PositionCard
+   471→                    key={p.positionId}
+   472→                    p={p}
+   473→                    onClose={(id) => act('close', id)}
+   474→                    onSelectSymbol={setKlineSymbol}
+   475→                    busy={busy}
+   476→                  />
+   477→                ))}
+   478→              </div>
+   479→            )}
+   480→          </div>
+   481→
+   482→          {/* 历史明细（任务 §5.3：筛选/排序/详情还原） */}
+   483→          <div className="space-y-1.5">
+   484→            <div className="flex flex-wrap items-center gap-2 text-xs font-semibold">
+   485→              <History className="h-3.5 w-3.5 text-muted-foreground" /> 历史交易（{history.data?.trades.length ?? 0}）
+   486→              <input
+   487→                value={filterSymbol}
+   488→                onChange={(e) => setFilterSymbol(e.target.value.toUpperCase())}
+   489→                placeholder="币种筛选"
+   490→                className="w-24 rounded border border-border bg-background px-2 py-0.5 text-[11px] outline-none focus:border-gold/60"
+   491→              />
+   492→              <select
+   493→                value={sort}
+   494→                onChange={(e) => setSort(e.target.value as 'time' | 'pnl')}
+   495→                className="rounded border border-border bg-background px-1 py-0.5 text-[11px] outline-none"
+   496→              >
+   497→                <option value="time">按平仓时间</option>
+   498→                <option value="pnl">按净盈亏</option>
+   499→              </select>
+   500→              <select
+   501→                value={order}
+   502→                onChange={(e) => setOrder(e.target.value as 'asc' | 'desc')}
+   503→                className="rounded border border-border bg-background px-1 py-0.5 text-[11px] outline-none"
+   504→              >
+   505→                <option value="desc">降序</option>
+   506→                <option value="asc">升序</option>
+   507→              </select>
+   508→            </div>
+   509→            {history.data && history.data.trades.length > 0 && (
+   510→              <div className="space-y-0.5">
+   511→                {history.data.trades.map((t) => (
+   512→                  <div key={t.positionId}>
+   513→                    <TradeRow t={t} onDetail={openDetail} />
+   514→                    {detailId === t.positionId && detail && (
+   515→                      <div className="mb-1 rounded border border-border/60 bg-secondary/20 px-3 py-2 text-[10px] leading-relaxed">
+   516→                        <div className="font-semibold">决策链还原（趋势周期 {detail.meta.trendCycleId}）</div>
+   517→                        <div className="mt-1 text-muted-foreground">
+   518→                          开仓时相位：{PHASE_V2_LABEL[detail.meta.trendPhaseAtOpen] ?? detail.meta.trendPhaseAtOpen}
+   519→                          {' '}· 开仓评分：{detail.meta.scoreAtOpen}
+   520→                          {detail.meta.signalAtOpen && detail.meta.signalAtOpen !== '{}' && (
+   521→                            <>
+   522→                              {' '}· 开仓依据：{(JSON.parse(detail.meta.signalAtOpen) as { reason?: string })?.reason ?? '—'}
+   523→                              {' '}· 波动状态：{(JSON.parse(detail.meta.signalAtOpen) as { features?: { volRegime?: string; atrPct?: number } })?.features?.volRegime ?? '—'}
+   524→                              {' '}· ATR%：{(JSON.parse(detail.meta.signalAtOpen) as { features?: { atrPct?: number } })?.features?.atrPct?.toFixed(2) ?? '—'}
+   525→                            </>
+   526→                          )}
+   527→                        </div>
+   528→                        {detail.meta.exitSignalJson && detail.meta.exitSignalJson !== '{}' && (
+   529→                          <div className="text-muted-foreground">
+   530→                            退出时信号：{(JSON.parse(detail.meta.exitSignalJson) as { reason?: string })?.reason ?? '—'}
+   531→                          </div>
+   532→                        )}
+   533→                        <div className="mt-1 space-y-0.5">
+   534→                          {detail.decisions.map((d) => (
+   535→                            <div key={d.id} className="text-muted-foreground">
+   536→                              <span className="font-mono">{fmtTime(d.createdAt)}</span> [{d.action}] {d.detail}
+   537→                            </div>
+   538→                          ))}
+   539→                        </div>
+   540→                      </div>
+   541→                    )}
+   542→                    {detailId === t.positionId && !detail && (
+   543→                      <div className="mb-1 rounded border border-border/60 bg-secondary/20 px-3 py-2 text-[10px] text-muted-foreground">
+   544→                        加载详情中…
+   545→                      </div>
+   546→                    )}
+   547→                  </div>
+   548→                ))}
+   549→              </div>
+   550→            )}
+   551→            {history.data && history.data.trades.length === 0 && (
+   552→              <div className="rounded-lg border border-dashed border-border/60 px-4 py-3 text-center text-xs text-muted-foreground">
+   553→                暂无已平仓交易
+   554→              </div>
+   555→            )}
+   556→          </div>
+   557→
+   558→          {/* 决策与跳过审计（可折叠） */}
+   559→          <details className="rounded-lg border border-border/60 bg-card px-3 py-2">
+   560→            <summary className="flex cursor-pointer items-center gap-1.5 text-xs font-semibold">
+   561→              <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+   562→              决策/跳过审计（为什么开/为什么没开）
+   563→            </summary>
+   564→            <div className="mt-2 grid grid-cols-1 gap-3 text-[10px] lg:grid-cols-2">
+   565→              <div>
+   566→                <div className="mb-1 font-semibold">最近跳过</div>
+   567→                {data.recentSkips.length === 0 && <div className="text-muted-foreground">无</div>}
+   568→                {data.recentSkips.slice(0, 15).map((s, i) => (
+   569→                  <div key={i} className="text-muted-foreground">
+   570→                    <span className="font-mono">{fmtAgo(s.t)}</span> {s.symbol} — {s.reason}
+   571→                  </div>
+   572→                ))}
+   573→              </div>
+   574→              <div>
+   575→                <div className="mb-1 font-semibold">最近决策（幂等键）</div>
+   576→                {data.recentDecisions.length === 0 && <div className="text-muted-foreground">无</div>}
+   577→                {data.recentDecisions.slice(0, 15).map((d) => (
+   578→                  <div key={d.id} className="truncate text-muted-foreground" title={d.detail}>
+   579→                    <span className="font-mono">{fmtAgo(d.createdAt)}</span> [{d.action}] {d.symbol} · {d.cycleId}
+   580→                  </div>
+   581→                ))}
+   582→              </div>
+   583→            </div>
+   584→          </details>
+   585→        </>
+   586→      )}
+   587→
+   588→      {/* Task 55：机器人充值弹窗（与手动盘同规则：10 ~ 1,000,000 USDT） */}
+   589→      <Dialog open={depositOpen} onOpenChange={setDepositOpen}>
+   590→        <DialogContent className="w-[min(400px,95vw)]">
+   591→          <DialogTitle className="text-lg font-bold">给机器人充值</DialogTitle>
+   592→          <DialogDescription className="text-xs">
+   593→            充值直接增加「{data?.config.accountName ?? 'trend-auto-v1'}」可用余额，同步计入 ROI 本金基数（充值不算盈利）；
+   594→            与手动模拟盘账户完全隔离
+   595→          </DialogDescription>
+   596→          <div className="grid grid-cols-4 gap-1.5">
+   597→            {DEPOSIT_PRESETS.map((v) => (
+   598→              <button
+   599→                key={v}
+   600→                onClick={() => setDepositAmount(String(v))}
+   601→                className={cn(
+   602→                  'rounded border py-1.5 text-xs font-semibold transition-colors',
+   603→                  depositAmount === String(v)
+   604→                    ? 'border-gold/60 bg-gold/15 text-gold'
+   605→                    : 'border-border text-muted-foreground hover:text-foreground',
+   606→                )}
+   607→              >
+   608→                +{v.toLocaleString('en-US')}
+   609→              </button>
+   610→            ))}
+   611→          </div>
+   612→          <Input
+   613→            value={depositAmount}
+   614→            onChange={(e) => setDepositAmount(e.target.value.replace(/[^\d.]/g, ''))}
+   615→            placeholder={`自定义金额（${MIN_DEPOSIT} ~ ${MAX_DEPOSIT.toLocaleString('en-US')} USDT）`}
+   616→            inputMode="decimal"
+   617→            aria-label="机器人充值金额"
+   618→          />
+   619→          <button
+   620→            onClick={submitDeposit}
+   621→            disabled={!depositValid || busy}
+   622→            className="w-full rounded-md bg-gold py-2.5 text-sm font-bold text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+   623→          >
+   624→            {busy ? '到账中…' : depositValid ? `确认充值 +${depositVal.toFixed(2)} U` : '请输入充值金额'}
+   625→          </button>
+   626→          <p className="text-center text-[11px] text-muted-foreground">
+   627→            纯模拟充值 · 无真实资金流动 · 当前可用 {data?.account.balance.toFixed(2) ?? '—'} U
+   628→          </p>
+   629→        </DialogContent>
+   630→      </Dialog>
+   631→
+   632→      {/* Task 55：持仓 K 线弹窗（合约多源 K 线 + 自动持仓成本线/强平线/开仓时点标记） */}
+   633→      <CoinDialog
+   634→        symbol={klineSymbol}
+   635→        onClose={() => setKlineSymbol(null)}
+   636→        market="futures"
+   637→        extraPriceLines={klinePriceLines}
+   638→        extraMarkers={klineMarkers}
+   639→      />
+   640→    </div>
+   641→  );
+   642→}
+   643→

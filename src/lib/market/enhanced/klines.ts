@@ -1,9 +1,11 @@
-// ---------- 升级版异动交易 · 1m K 线仓库 ----------
+// ---------- 升级版异动交易 · 1m K 线仓库（Task 50 起为合约 K 线） ----------
 // 滚动 24h 基线只用「已收盘」1m K 线——修复规格书点名的基准漂移，
 // 绝不用含当前价快照的 24hr 统计覆盖旧基准（§四）。
 // 请求预算：冷启动 2 req/标的（并发由引擎控制），稳态轮换 1 req/标的/5min。
+// 数据源：合约多源（币安 > Bybit > Gate），经 activeFuturesCollector 动态解析
+//（Task 44 规则：不依赖模块图捕获的旧绑定），且同一标的取数与其供价同源。
 
-import { bFetch } from '../binance';
+import { activeFuturesCollector } from '../futures-collector';
 import { STORE } from './config';
 
 export interface Candle1m {
@@ -13,10 +15,6 @@ export interface Candle1m {
   l: number;
   c: number;
   qv: number; // quote volume
-}
-
-interface KlineRow extends Array<unknown> {
-  length: number;
 }
 
 interface SymbolKlines {
@@ -53,6 +51,8 @@ function pctAbs(a: number, b: number): number {
 }
 
 export class KlineStore {
+  /** 市场标签：热重置携带仓库时用（现货/合约 K 线绝不可混用） */
+  readonly market = 'futures' as const;
   outbound = 0; // 本仓库出站请求计数（独立统计）
   private map = new Map<string, SymbolKlines>();
 
@@ -162,18 +162,15 @@ export class KlineStore {
   async backfill(symbol: string): Promise<void> {
     try {
       this.outbound++;
-      const rows = await bFetch<KlineRow[]>('/api/v3/klines', { symbol, interval: '1m', limit: 1000 });
-      let list = rows.map(mapRow);
-      if (rows.length >= 1000) {
+      let list = await activeFuturesCollector().fetchKlinesFor(symbol, '1m', { limit: 1000 });
+      if (list.length >= 1000) {
         this.outbound++;
-        const firstOpen = rows[0][0] as number;
-        const older = await bFetch<KlineRow[]>('/api/v3/klines', {
-          symbol,
-          interval: '1m',
+        const firstOpen = list[0].t;
+        const older = await activeFuturesCollector().fetchKlinesFor(symbol, '1m', {
           limit: 1000,
-          endTime: firstOpen - 1,
+          endMs: firstOpen - 1,
         });
-        list = [...older.map(mapRow), ...list];
+        list = [...older, ...list];
       }
       if (list.length === 0) return;
       const now = Date.now();
@@ -198,14 +195,11 @@ export class KlineStore {
     try {
       const lastT = s.candles.length > 0 ? s.candles[s.candles.length - 1].t : now - 3_600_000;
       this.outbound++;
-      const rows = await bFetch<KlineRow[]>('/api/v3/klines', {
-        symbol,
-        interval: '1m',
+      const fresh = await activeFuturesCollector().fetchKlinesFor(symbol, '1m', {
         limit: 120,
-        startTime: lastT + 1,
+        startMs: lastT + 1,
       });
-      if (rows.length > 0) {
-        const fresh = rows.map(mapRow);
+      if (fresh.length > 0) {
         const seen = new Set(s.candles.map((c) => c.t));
         for (const c of fresh) if (!seen.has(c.t)) s.candles.push(c);
       }
@@ -283,13 +277,4 @@ export class KlineStore {
   }
 }
 
-function mapRow(r: KlineRow): Candle1m {
-  return {
-    t: r[0] as number,
-    o: Number(r[1]),
-    h: Number(r[2]),
-    l: Number(r[3]),
-    c: Number(r[4]),
-    qv: Number(r[7]),
-  };
-}
+

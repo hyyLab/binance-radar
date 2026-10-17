@@ -1,0 +1,1048 @@
+     1→// ---------- AutoPaperTrader：趋势自动模拟交易服务（Task 54 §3/§四 / Task 56 用户定版） ----------
+     2→// 消费 TrendWatchService 输出的统一趋势信号（UnifiedTrendSignal，单一趋势来源——
+     3→// 本服务绝不另行计算趋势方向），按固定规则开仓/持仓/平仓；纯模拟，不接入真实下单。
+     4→//
+     5→// 交易规则（Task 56 用户定版）：
+     6→// - 独立账户 trend-auto-v1（PaperAccount.name 隔离；手动 default 盘完全不受影响）
+     7→// - 开仓：确认趋势（CONFIRMED_UP/DOWN）+ 质量门槛（score/ER）+ 高周期过滤 + 二次确认
+     8→//   （首次确认只建待入场记录，等下一根已收盘 K 线复核后开仓）+ 同币种冷却 5 分钟；
+     9→//   每仓保证金 = 开仓时账户权益 × 20%（marginRatio），杠杆固定 20x；保证金+手续费超出
+    10→//   可用余额直接跳过并记录（不变相提高比例/杠杆）；同一趋势周期只允许一笔（决策键幂等），
+    11→//   不允许加仓摊平
+    12→// - 离场：不设固定止盈止损——趋势结束必须满足「连续 END_CONFIRM_BARS 根不同且有效的
+    13→//   已收盘 K 线持续出现结束证据」并由 lifecycle 判定 ENDED 后才离场，且 ENDED 必须
+    14→//   归属于持仓绑定的同一 trendCycleId（旧周期 ENDED 不得误杀新周期持仓，§2.2）、
+    15→//   证据 K 线必须晚于开仓依据的 K 线（§2.3）；END_PENDING 仅记录首次报警时刻，不平仓；
+    16→//   反向趋势独立确认（dataFresh）可立即平掉原方向持仓；保留强平机制（独立巡检任务）
+    17→// - 数据不可用（DATA_UNAVAILABLE/过期）：不新开仓、不伪装趋势结束、继续按标记价
+    18→//   管理强平；暂停模式：只停新开仓（含待入场转换），继续退出管理与强平巡检
+    19→// - 成本口径：开/平仓手续费按 PaperEngine Taker 0.05% 双边；滑点按可配基点估算，
+    20→//   成交记录展示；统计主口径 = 含滑点净盈亏（更保守，不省略成本）
+    21→// - 持仓结果采集（Task 56 §七）：MFE/MAE 按主循环可用标记价增量更新并持久化，
+    22→//   绝不用事后最高/最低价构造决策时不存在的数据
+    23→// - 成交假设：以决策时刻标记价成交（非信号 K 线收盘价），绝不使用未来行情
+    24→//
+    25→// 生命周期：绑定 EnhancedEngine（boot 拉起 / stop 停表）；单例由引擎单例保证；
+    26→// 重启后从 DB 恢复持仓关联（TrendTradeMeta）、待入场记录（TrendPendingEntry）并 reconcile。
+    27→
+    28→import { db } from '@/lib/db';
+    29→import { PaperError, PaperEngine, paperEngineFor } from '../paper';
+    30→import { TAKER_FEE } from '../futures';
+    31→import type { UnifiedTrendSignal } from '../trend-watch/signal';
+    32→import { TREND_WATCH } from '../trend-watch/config';
+    33→import {
+    34→  TREND_TRADE,
+    35→  type HtfGateState,
+    36→  type TrendAutoMode,
+    37→  type TrendExitReason,
+    38→} from './config';
+    39→import {
+    40→  createTrendTradeRepo,
+    41→  ensureTrendTradeSchema,
+    42→  type TrendAutoConfigRow,
+    43→  type TrendPendingEntryRow,
+    44→  type TrendTradeMetaRow,
+    45→  type TrendTradeRepo,
+    46→} from './repo';
+    47→
+    48→export interface AutoTraderDeps {
+    49→  /** 统一趋势信号（trendWatch.latestSignals——唯一趋势来源） */
+    50→  getSignals(): UnifiedTrendSignal[];
+    51→  /** 标记价（合约多源供价） */
+    52→  markPrice(symbol: string): number;
+    53→}
+    54→
+    55→interface SkipRecord {
+    56→  t: number;
+    57→  symbol: string;
+    58→  reason: string;
+    59→  cycleId?: string;
+    60→}
+    61→
+    62→function floor2(v: number): number {
+    63→  return Math.floor((v + 1e-9) * 100) / 100;
+    64→}
+    65→
+    66→function isTransientOpenError(e: unknown): boolean {
+    67→  if (!(e instanceof PaperError)) return false;
+    68→  // 行情未就绪/未知交易对 = 暂时性（下轮重试）；保证金/上限类 = 永久跳过
+    69→  return e.message.includes('行情') || e.message.includes('未知交易对');
+    70→}
+    71→
+    72→/** 结构化决策日志（§2.4：可还原一次误平仓/误开仓的完整过程） */
+    73→function logDecision(msg: string): void {
+    74→  console.log(`[trend-auto] ${msg}`);
+    75→}
+    76→
+    77→/** 高周期方向分级（§5.2：与 1m 趋势方向比较） */
+    78→function classifyHtf(
+    79→  dir: 'up' | 'down' | 'flat',
+    80→  valid: boolean,
+    81→  trendDir: 'up' | 'down',
+    82→): HtfGateState {
+    83→  if (!valid) return 'INVALID';
+    84→  if (dir === trendDir) return 'ALIGNED';
+    85→  if (dir === 'flat') return 'NEUTRAL';
+    86→  return 'OPPOSED';
+    87→}
+    88→
+    89→export class AutoPaperTrader {
+    90→  private readonly deps: AutoTraderDeps;
+    91→  private readonly repo: TrendTradeRepo;
+    92→  private readonly engine: PaperEngine;
+    93→
+    94→  private started = false;
+    95→  private starting: Promise<void> | null = null;
+    96→  private stopped = false;
+    97→  private timer: ReturnType<typeof setInterval> | null = null;
+    98→  /** 引擎启动时刻（engine.stats 摘要用；0 = 未启动） */
+    99→  startedAt = 0;
+   100→  private lastTickAt = 0;
+   101→  private lastError: string | null = null;
+   102→
+   103→  /** 跳过记录（内存审计；接口可见最近 50 条） */
+   104→  private skips: SkipRecord[] = [];
+   105→  opens = 0;
+   106→  closes = 0;
+   107→
+   108→  constructor(deps: AutoTraderDeps, opts?: { repo?: TrendTradeRepo; engine?: PaperEngine; noTimer?: boolean }) {
+   109→    this.deps = deps;
+   110→    this.repo = opts?.repo ?? createTrendTradeRepo();
+   111→    this.engine = opts?.engine ?? paperEngineFor(TREND_TRADE.ACCOUNT_NAME);
+   112→    this.noTimer = opts?.noTimer ?? false;
+   113→  }
+   114→
+   115→  private readonly noTimer: boolean;
+   116→
+   117→  // ============ 生命周期 ============
+   118→
+   119→  async ensureStarted(): Promise<void> {
+   120→    if (this.started) return;
+   121→    if (this.starting) {
+   122→      await Promise.race([this.starting, new Promise((r) => setTimeout(r, 6000))]);
+   123→      return;
+   124→    }
+   125→    this.started = true;
+   126→    this.stopped = false;
+   127→    this.startedAt = Date.now();
+   128→    this.starting = this.boot().finally(() => {
+   129→      this.starting = null;
+   130→    });
+   131→    await Promise.race([this.starting, new Promise((r) => setTimeout(r, 6000))]);
+   132→  }
+   133→
+   134→  private async boot(): Promise<void> {
+   135→    // 1) 建表（幂等，含 Task 56 扩展列/待入场表）+ 播种配置 + 独立账户初始化
+   136→    await ensureTrendTradeSchema();
+   137→    const seeded = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+   138→    if (!seeded) {
+   139→      await this.repo.seedConfig({
+   140→        name: TREND_TRADE.ACCOUNT_NAME,
+   141→        mode: 'RUNNING',
+   142→        initialCapital: TREND_TRADE.INITIAL_CAPITAL,
+   143→        marginRatio: TREND_TRADE.MARGIN_RATIO,
+   144→        leverage: TREND_TRADE.LEVERAGE,
+   145→        maxPositions: TREND_TRADE.MAX_POSITIONS,
+   146→        slippageBps: TREND_TRADE.SLIPPAGE_BPS,
+   147→        peakEquity: 0,
+   148→      });
+   149→    }
+   150→    const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   151→    if (!acc) {
+   152→      await db.paperAccount.create({
+   153→        data: { name: TREND_TRADE.ACCOUNT_NAME, balance: TREND_TRADE.INITIAL_CAPITAL },
+   154→      });
+   155→    }
+   156→    // 2) reconcile：修复崩溃窗口（开仓成功但 meta 未写 / 平仓成功但 meta 未关）
+   157→    await this.reconcile();
+   158→    // 3) 主循环（独立持续风险检查任务：无页面访问也照常巡检强平与管理持仓）
+   159→    if (!this.noTimer) this.timer = setInterval(() => void this.tick(), TREND_TRADE.SCAN_MS);
+   160→  }
+   161→
+   162→  stop(): void {
+   163→    this.stopped = true;
+   164→    this.started = false;
+   165→    if (this.timer) clearInterval(this.timer);
+   166→    this.timer = null;
+   167→  }
+   168→
+   169→  /**
+   170→   * 崩溃窗口修复（任务 §七：服务重启后必须恢复持仓关联信息）：
+   171→   * a) 自动账户 OPEN 持仓缺 TrendTradeMeta → 从最近一条已抢占未绑定的 OPEN 决策恢复
+   172→   *    cycleId；找不到则标 ORPHAN 周期（保守：只受强平/人工/反向确认管理——ORPHAN 周期
+   173→   *    无从与 ENDED 事件做周期匹配，按 §2.2 不再「仅凭 symbol」离场）。
+   174→   * b) meta OPEN 但 PaperPosition 已 CLOSED/LIQUIDATED → 补写平仓终态。
+   175→   */
+   176→  private async reconcile(): Promise<void> {
+   177→    try {
+   178→      const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   179→      if (!acc) return;
+   180→      const openPositions = await db.paperPosition.findMany({
+   181→        where: { accountId: acc.id, status: 'OPEN' },
+   182→      });
+   183→      for (const p of openPositions) {
+   184→        const meta = await this.repo.getMeta(p.id);
+   185→        if (!meta) {
+   186→          const claimed = await db.$queryRawUnsafe<{ cycleId: string; createdAt: Date }[]>(
+   187→            `SELECT cycleId, createdAt FROM TrendAutoDecision
+   188→             WHERE symbol = ? AND action = 'OPEN' AND positionId IS NULL
+   189→             ORDER BY createdAt DESC LIMIT 1`,
+   190→            p.symbol,
+   191→          );
+   192→          const cycleId = claimed[0]?.cycleId ?? `ORPHAN:${p.symbol}:${p.openedAt.getTime()}`;
+   193→          await this.repo.upsertMeta({
+   194→            positionId: p.id,
+   195→            trendCycleId: cycleId,
+   196→            symbol: p.symbol,
+   197→            side: p.side,
+   198→            trendPhaseAtOpen: 'CONFIRMED_RESTORED',
+   199→            scoreAtOpen: 0,
+   200→            featuresAtOpen: JSON.stringify({ restored: true, recoveredAt: Date.now() }),
+   201→            signalAtOpen: '{}',
+   202→            slippageEst: p.qty * p.entryPrice * (TREND_TRADE.SLIPPAGE_BPS / 10_000),
+   203→            status: 'OPEN',
+   204→            exitReason: null,
+   205→            exitSignalJson: null,
+   206→            netPnlWithSlip: null,
+   207→            openDecisionAt: claimed[0]?.createdAt ?? p.openedAt,
+   208→            closedAt: null,
+   209→          });
+   210→        }
+   211→      }
+   212→      // meta OPEN 但仓位已终态 → 补写
+   213→      const openMetas = await this.repo.loadMetasByStatus('OPEN');
+   214→      for (const m of openMetas) {
+   215→        const pos = await db.paperPosition.findUnique({ where: { id: m.positionId } });
+   216→        if (!pos) {
+   217→          await this.repo.upsertMeta({ ...m, status: 'CLOSED', exitReason: 'MANUAL', closedAt: new Date() });
+   218→          continue;
+   219→        }
+   220→        if (pos.status === 'LIQUIDATED') {
+   221→          await this.finalizeLiquidated(m, pos.margin, pos.pnl ?? -pos.margin);
+   222→        } else if (pos.status === 'CLOSED') {
+   223→          await this.repo.upsertMeta({
+   224→            ...m,
+   225→            status: 'CLOSED',
+   226→            exitReason: 'MANUAL',
+   227→            netPnlWithSlip: (pos.pnl ?? 0) - m.slippageEst,
+   228→            closedAt: pos.closedAt ?? new Date(),
+   229→          });
+   230→        }
+   231→      }
+   232→    } catch (e) {
+   233→      this.lastError = e instanceof Error ? e.message : String(e);
+   234→      console.warn('[trend-auto] reconcile 失败：', this.lastError);
+   235→    }
+   236→  }
+   237→
+   238→  // ============ 主循环 ============
+   239→
+   240→  /** 单步主循环：public 以便测试/回放驱动（生产由 SCAN_MS 定时器调用） */
+   241→  // 重入保护：setInterval 不等待异步完成——上一轮 tick 未跑完（行情/DB 慢）时下一轮并发
+   242→  // 执行，会按同一份旧余额重复开仓。60s 僵死兜底：异常挂起时不永久卡死主循环。
+   243→  private ticking = false;
+   244→  private tickStartedAt = 0;
+   245→
+   246→  async tick(): Promise<void> {
+   247→    if (this.stopped) return;
+   248→    if (this.ticking && Date.now() - this.tickStartedAt < 60_000) return;
+   249→    this.ticking = true;
+   250→    this.tickStartedAt = Date.now();
+   251→    try {
+   252→      const now = Date.now();
+   253→      this.lastTickAt = now;
+   254→      const cfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+   255→      if (!cfg) return;
+   256→      const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   257→      if (!acc) return;
+   258→      const accId = acc.id;
+   259→
+   260→      // ① 持续风险巡检（任何模式都执行——强平不因暂停/数据不可用而缺席）
+   261→      await this.engine.liquidationCheck(accId);
+   262→      await this.finalizeNewLiquidations();
+   263→
+   264→      // ② 持仓结果采集（§七：MFE/MAE 按当前可用标记价增量更新——任何模式都执行）
+   265→      await this.updateOpenStats();
+   266→
+   267→      // ③ 退出管理（暂停模式也执行：趋势结束/反向确认照常离场）
+   268→      const signals = this.deps.getSignals();
+   269→      const bySymbol = new Map(signals.map((s) => [s.symbol, s]));
+   270→      await this.manageExits(bySymbol);
+   271→
+   272→      // ④ 权益峰值（回撤基准；任何模式都更新）
+   273→      const eq = await this.accountEquity(accId);
+   274→      if (eq.equity > cfg.peakEquity) {
+   275→        await this.repo.updatePeakEquity(TREND_TRADE.ACCOUNT_NAME, eq.equity);
+   276→      }
+   277→
+   278→      // ⑤ 开仓（仅 RUNNING 且数据新鲜；暂停/停止只停新开仓与待入场转换）
+   279→      if (cfg.mode === 'RUNNING') {
+   280→        await this.managePendings(bySymbol, cfg, eq); // 先转换已到期的待入场（等一根 K 线复核）
+   281→        await this.manageEntries(cfg, signals, eq); // 再为新的确认趋势创建待入场记录
+   282→      }
+   283→      this.lastError = null;
+   284→    } catch (e) {
+   285→      this.lastError = e instanceof Error ? e.message : String(e);
+   286→      console.warn('[trend-auto] tick 失败：', this.lastError);
+   287→    } finally {
+   288→      this.ticking = false;
+   289→    }
+   290→  }
+   291→
+   292→  // ============ 持仓结果采集（Task 56 §七） ============
+   293→
+   294→  /**
+   295→   * MFE/MAE 增量更新：只用当前 tick 可得的标记价（多源供价的当前快照），逐 tick 维护
+   296→   * 「持仓期间」的最大有利/不利浮动盈亏（占初始保证金 %）——绝不使用事后才知道的
+   297→   * 最高/最低价构造当时不存在的数据。MFE 更新时刻与峰值后回撤一并落库。
+   298→   */
+   299→  private async updateOpenStats(): Promise<void> {
+   300→    const openMetas = await this.repo.loadMetasByStatus('OPEN');
+   301→    for (const meta of openMetas) {
+   302→      try {
+   303→        const pos = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
+   304→        if (!pos || pos.status !== 'OPEN' || !(pos.margin > 0)) continue;
+   305→        const mark = this.deps.markPrice(meta.symbol);
+   306→        if (!(mark > 0)) continue; // 标记价不可用：跳过本 tick（不用过期价格虚构统计）
+   307→        const sign = meta.side === 'LONG' ? 1 : -1;
+   308→        const pnlPct = (((mark - pos.entryPrice) * pos.qty * sign) / pos.margin) * 100;
+   309→        const prevMfe = meta.mfe ?? null;
+   310→        const mfe = prevMfe != null ? Math.max(prevMfe, pnlPct) : pnlPct;
+   311→        const mae = meta.mae != null ? Math.min(meta.mae, pnlPct) : pnlPct;
+   312→        const isNewPeak = prevMfe == null || pnlPct > prevMfe;
+   313→        const mfeAt = isNewPeak ? Date.now() : (meta.mfeAt ?? null);
+   314→        const mfeDrawdown = mfe - pnlPct;
+   315→        if (
+   316→          prevMfe == null ||
+   317→          meta.mae == null ||
+   318→          Math.abs(mfe - prevMfe) > 1e-9 ||
+   319→          Math.abs(mae - meta.mae) > 1e-9
+   320→        ) {
+   321→          await this.repo.updateTradeStats(meta.positionId, { mfe, mae, mfeAt, mfeDrawdown });
+   322→        }
+   323→      } catch {
+   324→        // 单笔统计失败不影响主循环
+   325→      }
+   326→    }
+   327→  }
+   328→
+   329→  // ============ 退出管理 ============
+   330→
+   331→  /**
+   332→   * 退出管理 v3（Task 56 用户定版：三根独立收盘 K 线结束确认 + 周期匹配 + 证据时序）：
+   333→   * ① ENDED（lifecycle 已按「连续 N 根不同已收盘 K 线持续证据」确认）→ 平仓，但必须：
+   334→   *    a) 信号携带的 trendCycleId 与持仓绑定周期一致（§2.2——旧周期 ENDED 不杀新周期持仓，
+   335→   *       也不仅凭 symbol 平仓）；
+   336→   *    b) 信号最近 K 线晚于开仓依据的 K 线（§2.3——开仓所在 K 线不得作为该持仓的结束证据）。
+   337→   * ② END_PENDING（同周期出现结束迹象）→ 只记录首次报警时刻（firstEndSignAt），不平仓；
+   338→   *    等 lifecycle 按三根 K 线确认。条件恢复时 lifecycle 自动清零重计（迟滞）。
+   339→   * ③ 反向趋势已确认（CONFIRMED_*，方向与持仓相反，dataFresh）→ 立即平仓
+   340→   *    （§3.2：独立确认的反向趋势可立即离场；反向候选/单根反向 K 线不够格）。
+   341→   * 数据缺失（DATA_UNAVAILABLE）永不触发离场；信号缺失（退池）不误平仓，仅强平/人工管理。
+   342→   */
+   343→  private async manageExits(bySymbol: Map<string, UnifiedTrendSignal>): Promise<void> {
+   344→    const openMetas = await this.repo.loadMetasByStatus('OPEN');
+   345→    for (const meta of openMetas) {
+   346→      const signal = bySymbol.get(meta.symbol);
+   347→      if (!signal) continue; // 信号缺失（标的退池/未评估）：不误平仓，仅强平/人工管理
+   348→      const favorable = meta.side === 'LONG' ? signal.direction === 'up' : signal.direction === 'down';
+   349→
+   350→      // ① 趋势已结束（ENDED）→ 周期匹配 + 证据时序校验后自行平仓
+   351→      if (signal.phase === 'ENDED') {
+   352→        if (!signal.trendCycleId || signal.trendCycleId !== meta.trendCycleId) {
+   353→          // §2.2：ENDED 归属于其他（旧）周期——不得据此平掉本周期持仓
+   354→          logDecision(
+   355→            `离场跳过 ENDED 周期不匹配 symbol=${meta.symbol} posCycle=${meta.trendCycleId} ` +
+   356→              `signalCycle=${signal.trendCycleId ?? '-'} positionId=${meta.positionId}`,
+   357→          );
+   358→          continue;
+   359→        }
+   360→        const entryBar = this.entryBarTimeOf(meta);
+   361→        if (entryBar != null && signal.lastBarTime != null && signal.lastBarTime <= entryBar) {
+   362→          // §2.3：结束证据未出现「开仓之后的新收盘 K 线」——不得平仓
+   363→          logDecision(
+   364→            `离场跳过 证据K线未晚于开仓K线 symbol=${meta.symbol} posCycle=${meta.trendCycleId} ` +
+   365→              `entryBar=${entryBar} signalBar=${signal.lastBarTime} positionId=${meta.positionId}`,
+   366→          );
+   367→          continue;
+   368→        }
+   369→        await this.closePosition(meta, 'TREND_ENDED', signal);
+   370→        continue;
+   371→      }
+   372→
+   373→      // ② 本周期出现结束迹象（模型已报警）→ 只记录首次报警时刻，等 N 根 K 线确认
+   374→      if (signal.phase === 'END_PENDING' && signal.trendCycleId === meta.trendCycleId) {
+   375→        if (signal.endPendingSince != null && meta.firstEndSignAt == null) {
+   376→          await this.repo.markFirstEndSign(meta.positionId, signal.endPendingSince);
+   377→          logDecision(
+   378→            `结束迹象首次报警（不平仓，等待 ${TREND_WATCH.END_CONFIRM_BARS} 根收盘 K 线确认） ` +
+   379→              `symbol=${meta.symbol} posCycle=${meta.trendCycleId} ev=${signal.endEvidenceBars} ` +
+   380→              `positionId=${meta.positionId}`,
+   381→          );
+   382→        }
+   383→        continue;
+   384→      }
+   385→
+   386→      // ③ 反向趋势已确认（独立确认 + 数据新鲜）→ 自行平仓（反手开仓见 manageEntries 守卫）
+   387→      if (
+   388→        (signal.phase === 'CONFIRMED_UP' || signal.phase === 'CONFIRMED_DOWN') &&
+   389→        !favorable &&
+   390→        signal.dataFresh
+   391→      ) {
+   392→        await this.closePosition(meta, 'REVERSE_CONFIRMED', signal);
+   393→      }
+   394→    }
+   395→  }
+   396→
+   397→  /** 开仓依据的已收盘 K 线（§2.3 守卫用；旧数据缺列时回退到 signalAtOpen.lastBarTime） */
+   398→  private entryBarTimeOf(meta: TrendTradeMetaRow): number | null {
+   399→    if (meta.entryBarTime != null) return meta.entryBarTime;
+   400→    try {
+   401→      const s = JSON.parse(meta.signalAtOpen) as { lastBarTime?: number | null };
+   402→      return typeof s.lastBarTime === 'number' ? s.lastBarTime : null;
+   403→    } catch {
+   404→      return null;
+   405→    }
+   406→  }
+   407→
+   408→  /** 平仓（幂等护栏 = 仓位状态本身；决策行事后审计记录） */
+   409→  private async closePosition(
+   410→    meta: TrendTradeMetaRow,
+   411→    reason: TrendExitReason,
+   412→    signal: UnifiedTrendSignal | null,
+   413→  ): Promise<void> {
+   414→    try {
+   415→      const pos = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
+   416→      if (!pos || pos.status !== 'OPEN') {
+   417→        // 已终态（并发/重启窗口）：补写 meta 终态
+   418→        await this.repo.upsertMeta({
+   419→          ...meta,
+   420→          status: 'CLOSED',
+   421→          exitReason: pos?.status === 'LIQUIDATED' ? 'LIQUIDATED' : reason,
+   422→          netPnlWithSlip: (pos?.pnl ?? 0) - meta.slippageEst,
+   423→          closedAt: pos?.closedAt ?? new Date(),
+   424→        });
+   425→        return;
+   426→      }
+   427→      const r = await this.engine.close(meta.positionId);
+   428→      const mark = r.price;
+   429→      const closeSlip = mark * pos.qty * (TREND_TRADE.SLIPPAGE_BPS / 10_000);
+   430→      const netWithSlip = r.pnl - meta.slippageEst - closeSlip;
+   431→      await this.repo.upsertMeta({
+   432→        ...meta,
+   433→        status: 'CLOSED',
+   434→        exitReason: reason,
+   435→        exitSignalJson: signal ? JSON.stringify(signal) : null,
+   436→        netPnlWithSlip: netWithSlip,
+   437→        closedAt: new Date(),
+   438→        exitEndReason: signal?.endReason ?? meta.exitEndReason ?? null,
+   439→        exitEvidenceBars: signal?.endEvidenceBars ?? meta.exitEvidenceBars ?? null,
+   440→        closeNotional: mark * pos.qty,
+   441→      });
+   442→      await this.repo.claimDecision({
+   443→        id: `${meta.trendCycleId}:CLOSE`,
+   444→        symbol: meta.symbol,
+   445→        action: reason === 'REVERSE_CONFIRMED' ? 'REVERSE_CLOSE' : 'CLOSE',
+   446→        cycleId: meta.trendCycleId,
+   447→        positionId: meta.positionId,
+   448→        detail: JSON.stringify({
+   449→          reason,
+   450→          exitEndReason: signal?.endReason ?? null,
+   451→          exitEvidenceBars: signal?.endEvidenceBars ?? null,
+   452→          exitPrice: r.price,
+   453→          netPnl: r.pnl,
+   454→          netPnlWithSlip: netWithSlip,
+   455→          mfe: meta.mfe ?? null,
+   456→          mae: meta.mae ?? null,
+   457→          endReason: signal?.endReason ?? null,
+   458→        }),
+   459→      });
+   460→      this.closes++;
+   461→      logDecision(
+   462→        `平仓 reason=${reason} endReason=${signal?.endReason ?? '-'} symbol=${meta.symbol} ` +
+   463→          `side=${meta.side} posCycle=${meta.trendCycleId} positionId=${meta.positionId} ` +
+   464→          `ev=${signal?.endEvidenceBars ?? '-'} exitPrice=${mark} netPnl=${r.pnl.toFixed(4)} ` +
+   465→          `netWithSlip=${netWithSlip.toFixed(4)} mfe=${meta.mfe?.toFixed(1) ?? '-'}% mae=${meta.mae?.toFixed(1) ?? '-'}%`,
+   466→      );
+   467→    } catch (e) {
+   468→      // 平仓暂时性失败（行情不可用等）：下一轮重试（决策行未写，不烧掉本周期）
+   469→      if (!(e instanceof PaperError)) {
+   470→        this.pushSkip(meta.symbol, `平仓异常：${e instanceof Error ? e.message : e}`, meta.trendCycleId);
+   471→      }
+   472→    }
+   473→  }
+   474→
+   475→  /** 强平巡检后的 meta 终态补写（强平是执行结果，如实记录、不伪装模型止损） */
+   476→  private async finalizeNewLiquidations(): Promise<void> {
+   477→    const openMetas = await this.repo.loadMetasByStatus('OPEN');
+   478→    for (const m of openMetas) {
+   479→      const pos = await db.paperPosition.findUnique({ where: { id: m.positionId } });
+   480→      if (pos && pos.status === 'LIQUIDATED') {
+   481→        await this.finalizeLiquidated(m, pos.margin, pos.pnl ?? -pos.margin);
+   482→      }
+   483→    }
+   484→  }
+   485→
+   486→  private async finalizeLiquidated(m: TrendTradeMetaRow, margin: number, pnl: number): Promise<void> {
+   487→    await this.repo.upsertMeta({
+   488→      ...m,
+   489→      status: 'CLOSED',
+   490→      exitReason: 'LIQUIDATED',
+   491→      netPnlWithSlip: pnl - m.slippageEst,
+   492→      closedAt: new Date(),
+   493→    });
+   494→    await this.repo.claimDecision({
+   495→      id: `${m.trendCycleId}:CLOSE`,
+   496→      symbol: m.symbol,
+   497→      action: 'CLOSE',
+   498→      cycleId: m.trendCycleId,
+   499→      positionId: m.positionId,
+   500→      detail: JSON.stringify({ reason: 'LIQUIDATED', netPnlWithSlip: pnl - m.slippageEst, margin }),
+   501→    });
+   502→    this.closes++;
+   503→    logDecision(
+   504→      `强平 symbol=${m.symbol} side=${m.side} posCycle=${m.trendCycleId} positionId=${m.positionId} ` +
+   505→        `margin=${margin.toFixed(2)} pnl=${pnl.toFixed(4)}`,
+   506→    );
+   507→  }
+   508→
+   509→  // ============ 入场质量门槛（Task 56 §5.1/§5.2） ============
+   510→
+   511→  /**
+   512→   * 入场门槛（创建待入场与转换开仓共用同一判定；创建时初检、转换时全量复核）：
+   513→   * - score ≥ ENTRY_MIN_SCORE 且 1m ER ≥ ENTRY_MIN_ER（§5.1）
+   514→   * - 高周期过滤（§5.2）：5m 反对 → 拒绝；5m 中性或 15m 反对 → 严格门槛
+   515→   *   （score ≥ 85 且 ER ≥ 0.5）；高周期数据不足（INVALID）→ 拒绝（不得当作同向支持）
+   516→   * 返回 null = 通过；字符串 = 拒绝原因（审计/跳过记录用）。
+   517→   */
+   518→  private entryGateCheck(signal: UnifiedTrendSignal): string | null {
+   519→    const trendDir = signal.direction;
+   520→    if (trendDir !== 'up' && trendDir !== 'down') return '趋势方向缺失';
+   521→    const score = signal.score;
+   522→    const er = signal.features.efficiencyRatio;
+   523→    if (score < TREND_TRADE.ENTRY_MIN_SCORE) {
+   524→      return `评分 ${score.toFixed(0)} < ${TREND_TRADE.ENTRY_MIN_SCORE}`;
+   525→    }
+   526→    if (er < TREND_TRADE.ENTRY_MIN_ER) {
+   527→      return `ER ${er.toFixed(2)} < ${TREND_TRADE.ENTRY_MIN_ER}`;
+   528→    }
+   529→    const g5 = classifyHtf(signal.htf5m.dir, signal.htf5m.valid, trendDir);
+   530→    const g15 = classifyHtf(signal.htf15m.dir, signal.htf15m.valid, trendDir);
+   531→    if (g5 === 'INVALID' || g15 === 'INVALID') {
+   532→      return `高周期数据不足（5m=${g5}/15m=${g15}），不作同向支持`;
+   533→    }
+   534→    const strictOk = score >= TREND_TRADE.ENTRY_HTF_STRICT_SCORE && er >= TREND_TRADE.ENTRY_HTF_STRICT_ER;
+   535→    if (g5 === 'OPPOSED') {
+   536→      return '5m 方向反对 1m 趋势';
+   537→    }
+   538→    if (g5 === 'NEUTRAL') {
+   539→      if (g15 === 'OPPOSED') return '15m 方向反对且 5m 中性';
+   540→      if (!strictOk) {
+   541→        return `5m 中性未达严格门槛（score ${score.toFixed(0)}/${TREND_TRADE.ENTRY_HTF_STRICT_SCORE}，ER ${er.toFixed(2)}/${TREND_TRADE.ENTRY_HTF_STRICT_ER}）`;
+   542→      }
+   543→      return null;
+   544→    }
+   545→    // g5 === 'ALIGNED'
+   546→    if (g15 === 'OPPOSED' && !strictOk) {
+   547→      return `15m 反对且未达严格门槛（score ${score.toFixed(0)}/${TREND_TRADE.ENTRY_HTF_STRICT_SCORE}，ER ${er.toFixed(2)}/${TREND_TRADE.ENTRY_HTF_STRICT_ER}）`;
+   548→    }
+   549→    return null;
+   550→  }
+   551→
+   552→  /** 开仓时高周期门控状态标签（快照存档用；与 entryGateCheck 同口径） */
+   553→  private htfGateLabel(signal: UnifiedTrendSignal): HtfGateState {
+   554→    const trendDir = signal.direction === 'down' ? 'down' : 'up';
+   555→    const g5 = classifyHtf(signal.htf5m.dir, signal.htf5m.valid, trendDir);
+   556→    const g15 = classifyHtf(signal.htf15m.dir, signal.htf15m.valid, trendDir);
+   557→    if (g5 === 'INVALID' || g15 === 'INVALID') return 'INVALID';
+   558→    if (g5 === 'OPPOSED') return 'OPPOSED';
+   559→    if (g5 === 'NEUTRAL') return g15 === 'OPPOSED' ? 'OPPOSED' : 'NEUTRAL';
+   560→    return g15; // 5m ALIGNED：标签反映 15m 状态（ALIGNED/NEUTRAL/OPPOSED）
+   561→  }
+   562→
+   563→  // ============ 开仓决策 ============
+   564→
+   565→  /**
+   566→   * 待入场管理（§5.3 二次确认）：每个 ACTIVE 待入场记录在出现「更新的已收盘 K 线」后
+   567→   * 全量复核（相位/周期/数据/质量门槛/冷却/容量/资金），通过才开仓；趋势失效、数据过期、
+   568→   * 门槛不再满足或记录过期 → 取消并记录原因。每周期至多一条记录、只允许成功开仓一次
+   569→   * （决策键 `{cycleId}:OPEN` 数据库唯一约束兜底）。
+   570→   */
+   571→  private async managePendings(
+   572→    bySymbol: Map<string, UnifiedTrendSignal>,
+   573→    cfg: TrendAutoConfigRow,
+   574→    eq: { balance: number; marginUsed: number; unrealized: number; equity: number; openCount: number },
+   575→  ): Promise<void> {
+   576→    const pendings = await this.repo.loadActivePendings();
+   577→    for (const p of pendings) {
+   578→      const signal = bySymbol.get(p.symbol);
+   579→      const cancel = async (reason: string): Promise<void> => {
+   580→        await this.repo.markPendingCanceled(p.cycleId, reason);
+   581→        logDecision(
+   582→          `待入场取消 cycle=${p.cycleId} symbol=${p.symbol} reason=${reason} ` +
+   583→            `ageMs=${Date.now() - p.firstSeenAt}`,
+   584→        );
+   585→      };
+   586→      // ① 记录过期（等待超时——趋势确认后长期未出现合格的新 K 线）
+   587→      if (Date.now() - p.firstSeenAt > TREND_TRADE.PENDING_EXPIRE_MS) {
+   588→        await cancel('待入场超时（等待新收盘 K 线复核超限）');
+   589→        continue;
+   590→      }
+   591→      // ② 信号缺失/数据过期/相位失效/周期变化 → 取消（§5.3：趋势失效或数据过期取消记录）
+   592→      if (!signal) {
+   593→        await cancel('信号缺失（标的退池/未评估）');
+   594→        continue;
+   595→      }
+   596→      if (!signal.dataFresh) {
+   597→        await cancel(`数据过期（${signal.dataUnavailableReason ?? '未知'}）`);
+   598→        continue;
+   599→      }
+   600→      if (
+   601→        !(TREND_TRADE.CONFIRMED_PHASES as readonly string[]).includes(signal.phase) ||
+   602→        signal.trendCycleId !== p.cycleId
+   603→      ) {
+   604→        await cancel(`趋势失效（phase=${signal.phase}，cycle=${signal.trendCycleId ?? '-'}）`);
+   605→        continue;
+   606→      }
+   607→      // ③ 还没等到「新的已收盘 K 线」→ 继续等待（§5.3 核心等待条件）
+   608→      if (signal.lastBarTime == null || signal.lastBarTime <= p.firstBarTime) continue;
+   609→      // ④ 冷却复核（§5.4：冷却以 symbol 为单位，不因周期变化绕过）
+   610→      const lastClose = await this.repo.lastCloseAt(p.symbol);
+   611→      if (lastClose != null && Date.now() - lastClose < TREND_TRADE.COOLDOWN_MS) {
+   612→        await cancel('转换时进入同币种冷却期');
+   613→        continue;
+   614→      }
+   615→      // ⑤ 质量门槛全量复核（趋势方向/阶段/评分/ER/高周期过滤）
+   616→      const gateReason = this.entryGateCheck(signal);
+   617→      if (gateReason) {
+   618→        await cancel(`复核未过门槛：${gateReason}`);
+   619→        continue;
+   620→      }
+   621→      // ⑥ 容量守卫（不满足时保留记录，等下轮复核直到过期）
+   622→      if (eq.openCount >= cfg.maxPositions) {
+   623→        this.pushSkip(p.symbol, `待入场转换等待容量（已达最大持仓数 ${cfg.maxPositions}）`, p.cycleId);
+   624→        continue;
+   625→      }
+   626→      // ⑦ 同 symbol 已有持仓（防御；正常由周期决策键保证）
+   627→      const dup = await db.paperPosition.findFirst({
+   628→        where: { accountId: await this.autoAccountId(), symbol: p.symbol, status: 'OPEN' },
+   629→      });
+   630→      if (dup) {
+   631→        await cancel('同币种已有持仓');
+   632→        continue;
+   633→      }
+   634→      // ⑧ 仓位测算（§六：每仓保证金 = 开仓时账户权益 × 20%；超出可用余额直接跳过）
+   635→      const feeFactor = 1 + cfg.leverage * TAKER_FEE;
+   636→      const targetMargin = floor2(eq.equity * cfg.marginRatio);
+   637→      const fee = targetMargin * cfg.leverage * TAKER_FEE;
+   638→      if (targetMargin + fee > eq.balance) {
+   639→        await this.recordSkipDb(
+   640→          p.symbol,
+   641→          p.cycleId,
+   642→          `权益 20% 保证金 ${targetMargin.toFixed(2)} + 手续费 ${fee.toFixed(2)} 超出可用余额 ${eq.balance.toFixed(2)}（跳过不变通）`,
+   643→        );
+   644→        await cancel('资金不足（权益 20% 保证金 + 手续费超出可用余额）');
+   645→        continue;
+   646→      }
+   647→      if (targetMargin < TREND_TRADE.MIN_MARGIN) {
+   648→        await this.recordSkipDb(
+   649→          p.symbol,
+   650→          p.cycleId,
+   651→          `权益 20% 保证金 ${targetMargin} 低于最小保证金 ${TREND_TRADE.MIN_MARGIN}`,
+   652→        );
+   653→        await cancel('目标保证金低于最小值');
+   654→        continue;
+   655→      }
+   656→      // ⑨ 幂等守卫（数据库唯一约束兜底）：抢占 `{cycleId}:OPEN` 决策
+   657→      const claimed = await this.repo.claimDecision({
+   658→        id: `${p.cycleId}:OPEN`,
+   659→        symbol: p.symbol,
+   660→        action: 'OPEN',
+   661→        cycleId: p.cycleId,
+   662→        detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg)),
+   663→      });
+   664→      if (!claimed) {
+   665→        await cancel('本趋势周期已决策过（幂等）');
+   666→        continue;
+   667→      }
+   668→      try {
+   669→        const pos = await this.engine.open({
+   670→          symbol: p.symbol,
+   671→          side: p.side as 'LONG' | 'SHORT',
+   672→          leverage: cfg.leverage,
+   673→          margin: targetMargin,
+   674→        });
+   675→        const slippageEst = targetMargin * cfg.leverage * (cfg.slippageBps / 10_000);
+   676→        await this.repo.upsertMeta({
+   677→          positionId: pos.id,
+   678→          trendCycleId: p.cycleId,
+   679→          symbol: p.symbol,
+   680→          side: p.side,
+   681→          trendPhaseAtOpen: signal.phase,
+   682→          scoreAtOpen: signal.score,
+   683→          featuresAtOpen: JSON.stringify({
+   684→            vol: signal.features,
+   685→            htf5m: signal.htf5m,
+   686→            htf15m: signal.htf15m,
+   687→            htfAgree: signal.htfAgree,
+   688→            strength: signal.strength,
+   689→            anomaly: signal.anomaly,
+   690→            conflict: signal.conflict,
+   691→          }),
+   692→          signalAtOpen: JSON.stringify(signal),
+   693→          slippageEst,
+   694→          status: 'OPEN',
+   695→          exitReason: null,
+   696→          exitSignalJson: null,
+   697→          netPnlWithSlip: null,
+   698→          openDecisionAt: new Date(),
+   699→          closedAt: null,
+   700→          // Task 56 §七：开仓快照（可查询列）
+   701→          entryEr: signal.features.efficiencyRatio,
+   702→          htf5mDir: signal.htf5m.dir,
+   703→          htf15mDir: signal.htf15m.dir,
+   704→          htfGate: this.htfGateLabel(signal),
+   705→          entryNotional: targetMargin * cfg.leverage,
+   706→          entryBarTime: signal.lastBarTime,
+   707→          mfe: null,
+   708→          mae: null,
+   709→          mfeAt: null,
+   710→          mfeDrawdown: null,
+   711→          firstEndSignAt: null,
+   712→          exitEndReason: null,
+   713→          exitEvidenceBars: null,
+   714→          closeNotional: null,
+   715→        });
+   716→        await this.repo.markPendingConverted(p.cycleId, pos.id);
+   717→        await this.attachPosition(`${p.cycleId}:OPEN`, pos.id);
+   718→        this.opens++;
+   719→        eq.openCount += 1;
+   720→        eq.marginUsed += targetMargin;
+   721→        eq.balance -= targetMargin + fee;
+   722→        eq.equity -= fee; // equity = balance + marginUsed + unrealized 自洽（开仓瞬时浮亏≈0）
+   723→        logDecision(
+   724→          `开仓（二次确认通过）symbol=${p.symbol} side=${p.side} posCycle=${p.cycleId} ` +
+   725→            `positionId=${pos.id} margin=${targetMargin}(${Math.round(cfg.marginRatio * 100)}%权益) ` +
+   726→            `leverage=${cfg.leverage}x entryBar=${signal.lastBarTime} waitedMs=${Date.now() - p.firstSeenAt} ` +
+   727→            `score=${signal.score.toFixed(0)} er=${signal.features.efficiencyRatio.toFixed(2)} ` +
+   728→            `htf5m=${signal.htf5m.dir} htf15m=${signal.htf15m.dir}`,
+   729→        );
+   730→      } catch (e) {
+   731→        if (isTransientOpenError(e)) {
+   732→          // 行情暂时不可用：释放决策与待入场记录（下轮同周期可重建待入场重试）
+   733→          await this.releaseDecision(`${p.cycleId}:OPEN`);
+   734→          await this.repo.deletePending(p.cycleId);
+   735→          this.pushSkip(p.symbol, `开仓暂时失败（将重试）：${e instanceof Error ? e.message : e}`, p.cycleId);
+   736→        } else {
+   737→          // 永久跳过（保证金/上限类）：决策保留防重入，取消待入场并记录原因
+   738→          await this.repo.markPendingCanceled(p.cycleId, `开仓跳过：${e instanceof Error ? e.message : e}`);
+   739→          this.pushSkip(p.symbol, `开仓跳过：${e instanceof Error ? e.message : e}`, p.cycleId);
+   740→        }
+   741→      }
+   742→    }
+   743→  }
+   744→
+   745→  /**
+   746→   * 新信号扫描（§5.3）：首次满足「确认相位 + 数据新鲜 + 质量门槛 + 冷却结束 + 容量 +
+   747→   * 独立性」的确认趋势，只创建待入场记录（等待下一根已收盘 K 线），不立即下单。
+   748→   */
+   749→  private async manageEntries(
+   750→    cfg: TrendAutoConfigRow,
+   751→    signals: UnifiedTrendSignal[],
+   752→    eq: { balance: number; marginUsed: number; unrealized: number; equity: number; openCount: number },
+   753→  ): Promise<void> {
+   754→    // 容量核算：已开仓 + 待入场（其 symbol 无持仓者，复核后将各占一仓）共同计入上限——
+   755→    // 防止待入场批量创建超过 maxPositions（转换层另有二次守卫）
+   756→    const accountId = await this.autoAccountId();
+   757→    const openRows = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
+   758→    const openSymbols = new Set(openRows.map((p) => p.symbol));
+   759→    const activePendings = await this.repo.loadActivePendings();
+   760→    const pendingSymbols = new Set(
+   761→      activePendings.filter((p) => !openSymbols.has(p.symbol)).map((p) => p.symbol),
+   762→    );
+   763→
+   764→    for (const signal of signals) {
+   765→      if (!(TREND_TRADE.CONFIRMED_PHASES as readonly string[]).includes(signal.phase)) continue; // 候选趋势不开仓
+   766→      if (!signal.dataFresh) {
+   767→        this.pushSkip(signal.symbol, '数据不可用/过期（不开新仓）', signal.trendCycleId ?? undefined);
+   768→        continue;
+   769→      }
+   770→      const cycleId = signal.trendCycleId;
+   771→      if (!cycleId) continue;
+   772→      const side = signal.phase === 'CONFIRMED_UP' ? 'LONG' : 'SHORT';
+   773→
+   774→      // 幂等守卫 1：同 symbol 已有 OPEN 关联持仓（防御；正常由周期决策键保证）
+   775→      if (openSymbols.has(signal.symbol)) continue;
+   776→
+   777→      // 本周期已存在待入场记录（ACTIVE/CONVERTED/CANCELED 任一）：不重复创建
+   778→      const existing = await this.repo.getPendingByCycle(cycleId);
+   779→      if (existing) continue;
+   780→
+   781→      // 容量守卫（跳过不烧周期：仓位/待入场释放后同一确认趋势仍可创建待入场）
+   782→      if (eq.openCount + pendingSymbols.size >= cfg.maxPositions) {
+   783→        this.recordSkip(signal.symbol, `已达最大持仓数 ${cfg.maxPositions}`, cycleId);
+   784→        continue;
+   785→      }
+   786→
+   787→      // 同币种冷却（§5.4）：平仓后 5 分钟内新信号只记录不执行；到期后重走完整门槛
+   788→      const lastClose = await this.repo.lastCloseAt(signal.symbol);
+   789→      if (lastClose != null && Date.now() - lastClose < TREND_TRADE.COOLDOWN_MS) {
+   790→        this.recordSkip(
+   791→          signal.symbol,
+   792→          `同币种冷却中（距上次平仓 ${Math.ceil((Date.now() - lastClose) / 1000)}s / ${TREND_TRADE.COOLDOWN_MS / 1000}s）`,
+   793→          cycleId,
+   794→        );
+   795→        continue;
+   796→      }
+   797→
+   798→      // 「先平后开」独立性：确认评估包含的已收盘 K 线必须晚于该 symbol 上一笔平仓
+   799→      // （同一根 K 线不既触发平仓又触发反向开仓；首笔无平仓记录直接放行）
+   800→      if (TREND_TRADE.REVERSE_INDEPENDENT_BARS && lastClose != null) {
+   801→        if (signal.lastBarTime != null && signal.lastBarTime + 60_000 <= lastClose) {
+   802→          this.recordSkip(signal.symbol, '等待平仓后下一根已收盘 K 线确认（先平后开）', cycleId);
+   803→          continue;
+   804→        }
+   805→      }
+   806→
+   807→      // 入场质量门槛（评分/ER/高周期过滤）——不满足只记录原因，不创建待入场
+   808→      const gateReason = this.entryGateCheck(signal);
+   809→      if (gateReason) {
+   810→        this.recordSkip(signal.symbol, `入场门槛未过：${gateReason}`, cycleId);
+   811→        continue;
+   812→      }
+   813→
+   814→      // 创建待入场记录（每周期一条，数据库主键兜底幂等）；等待下一根已收盘 K 线复核
+   815→      const claimed = await this.repo.claimPending({
+   816→        cycleId,
+   817→        symbol: signal.symbol,
+   818→        side,
+   819→        firstBarTime: signal.lastBarTime ?? Date.now(),
+   820→        firstSeenAt: Date.now(),
+   821→        snapshotJson: JSON.stringify(signal),
+   822→        status: 'ACTIVE',
+   823→        cancelReason: null,
+   824→        openPositionId: null,
+   825→        createdAt: Date.now(),
+   826→        updatedAt: Date.now(),
+   827→      });
+   828→      if (claimed) {
+   829→        pendingSymbols.add(signal.symbol); // 同轮循环内容量即时收紧
+   830→        logDecision(
+   831→          `待入场创建（首次确认，等待下一根已收盘 K 线复核）symbol=${signal.symbol} side=${side} ` +
+   832→            `posCycle=${cycleId} firstBar=${signal.lastBarTime} score=${signal.score.toFixed(0)} ` +
+   833→            `er=${signal.features.efficiencyRatio.toFixed(2)} htf5m=${signal.htf5m.dir} htf15m=${signal.htf15m.dir}`,
+   834→        );
+   835→      }
+   836→    }
+   837→  }
+   838→
+   839→  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow) {
+   840→    return {
+   841→      phase: signal.phase,
+   842→      direction: signal.direction,
+   843→      score: signal.score,
+   844→      strength: signal.strength,
+   845→      confirmCount: signal.confirmCount,
+   846→      trendStartedAt: signal.trendStartedAt,
+   847→      lastBarTime: signal.lastBarTime,
+   848→      margin,
+   849→      leverage: cfg.leverage,
+   850→      /** Task 56：sizing = 开仓时账户权益 × 20%（保证金 + 手续费超出余额则跳过） */
+   851→      marginBasis: `equity × ${cfg.marginRatio} (skip if unaffordable)`,
+   852→      entryEr: signal.features.efficiencyRatio,
+   853→      htf5mDir: signal.htf5m.dir,
+   854→      htf15mDir: signal.htf15m.dir,
+   855→      htfGate: this.htfGateLabel(signal),
+   856→      volRegime: signal.features.volRegime,
+   857→      atrPct: signal.features.atrPct,
+   858→      efficiencyRatio: signal.features.efficiencyRatio,
+   859→      htfAgree: signal.htfAgree,
+   860→    };
+   861→  }
+   862→
+   863→  // ============ 账户/统计 ============
+   864→
+   865→  private autoAccountIdCache: string | null = null;
+   866→  private async autoAccountId(): Promise<string> {
+   867→    if (this.autoAccountIdCache) return this.autoAccountIdCache;
+   868→    const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+   869→    if (!acc) throw new Error('趋势自动账户未初始化');
+   870→    this.autoAccountIdCache = acc.id;
+   871→    return acc.id;
+   872→  }
+   873→
+   874→  private async accountEquity(accId: string): Promise<{
+   875→    balance: number;
+   876→    marginUsed: number;
+   877→    unrealized: number;
+   878→    equity: number;
+   879→    openCount: number;
+   880→  }> {
+   881→    const acc = await db.paperAccount.findUnique({ where: { id: accId } });
+   882→    const open = await db.paperPosition.findMany({ where: { accountId: accId, status: 'OPEN' } });
+   883→    let marginUsed = 0;
+   884→    let unrealized = 0;
+   885→    for (const p of open) {
+   886→      const mark = this.deps.markPrice(p.symbol);
+   887→      const m = mark > 0 ? mark : p.entryPrice;
+   888→      marginUsed += p.margin;
+   889→      unrealized += (m - p.entryPrice) * p.qty * (p.side === 'LONG' ? 1 : -1);
+   890→    }
+   891→    const balance = acc?.balance ?? 0;
+   892→    return {
+   893→      balance,
+   894→      marginUsed,
+   895→      unrealized,
+   896→      equity: balance + marginUsed + unrealized,
+   897→      openCount: open.length,
+   898→    };
+   899→  }
+   900→
+   901→  private pushSkip(symbol: string, reason: string, cycleId?: string): void {
+   902→    this.skips.unshift({ t: Date.now(), symbol, reason, cycleId });
+   903→    if (this.skips.length > 200) this.skips.length = 200;
+   904→  }
+   905→
+   906→  /** 内存审计（容量/独立性/冷却/门槛等轻量跳过） */
+   907→  private recordSkip(symbol: string, reason: string, cycleId: string): void {
+   908→    this.pushSkip(symbol, reason, cycleId);
+   909→  }
+   910→
+   911→  /** DB 审计（余额/权益类硬性跳过：`{cycleId}:SKIP` 决策行，不阻断后续重试） */
+   912→  private async recordSkipDb(symbol: string, cycleId: string, reason: string): Promise<void> {
+   913→    this.pushSkip(symbol, reason, cycleId);
+   914→    try {
+   915→      await this.repo.claimDecision({
+   916→        id: `${cycleId}:SKIP`,
+   917→        symbol,
+   918→        action: 'SKIP',
+   919→        cycleId,
+   920→        detail: JSON.stringify({ reason, t: Date.now() }),
+   921→      });
+   922→    } catch {
+   923→      // 审计失败不影响决策
+   924→    }
+   925→  }
+   926→
+   927→  private async releaseDecision(id: string): Promise<void> {
+   928→    try {
+   929→      await db.$executeRawUnsafe(`DELETE FROM TrendAutoDecision WHERE id = ? AND positionId IS NULL`, id);
+   930→    } catch {
+   931→      // 释放失败保守处理：该周期不再开仓（幂等优先于重试）
+   932→    }
+   933→  }
+   934→
+   935→  private async attachPosition(decisionId: string, positionId: string): Promise<void> {
+   936→    try {
+   937→      await db.$executeRawUnsafe(
+   938→        `UPDATE TrendAutoDecision SET positionId = ? WHERE id = ?`,
+   939→        positionId,
+   940→        decisionId,
+   941→      );
+   942→    } catch {
+   943→      // 绑定失败不影响交易（meta 已建立关联）
+   944→    }
+   945→  }
+   946→
+   947→  // ============ 控制操作（任务 §5.3：开启/暂停/恢复/全部平仓语义分离） ============
+   948→
+   949→  async pause(): Promise<void> {
+   950→    await this.repo.updateMode(TREND_TRADE.ACCOUNT_NAME, 'PAUSED');
+   951→  }
+   952→
+   953→  async resume(): Promise<void> {
+   954→    await this.repo.updateMode(TREND_TRADE.ACCOUNT_NAME, 'RUNNING');
+   955→  }
+   956→
+   957→  async closeOne(positionId: string): Promise<{ ok: boolean; message: string }> {
+   958→    const meta = await this.repo.getMeta(positionId);
+   959→    if (!meta || meta.status !== 'OPEN') return { ok: false, message: '持仓不存在或已平仓' };
+   960→    const signal = this.deps.getSignals().find((s) => s.symbol === meta.symbol) ?? null;
+   961→    await this.closePosition(meta, 'MANUAL', signal);
+   962→    return { ok: true, message: '已提交平仓' };
+   963→  }
+   964→
+   965→  async closeAllManual(): Promise<{ closed: number; skipped: number; totalPnlWithSlip: number }> {
+   966→    const openMetas = await this.repo.loadMetasByStatus('OPEN');
+   967→    const signals = this.deps.getSignals();
+   968→    let closed = 0;
+   969→    let skipped = 0;
+   970→    let total = 0;
+   971→    for (const meta of openMetas) {
+   972→      const signal = signals.find((s) => s.symbol === meta.symbol) ?? null;
+   973→      const before = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
+   974→      if (!before || before.status !== 'OPEN') {
+   975→        skipped++;
+   976→        continue;
+   977→      }
+   978→      await this.closePosition(meta, 'MANUAL', signal);
+   979→      const after = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
+   980→      if (after && after.status !== 'OPEN') {
+   981→        closed++;
+   982→        total += after.pnl ?? 0;
+   983→      } else {
+   984→        skipped++;
+   985→      }
+   986→    }
+   987→    return { closed, skipped, totalPnlWithSlip: total };
+   988→  }
+   989→
+   990→  /**
+   991→   * 重置机器人账户（重置后资金回到 100 USDT）：
+   992→   * ① 先按标记价正常平掉全部 OPEN 持仓（走引擎平仓：释放保证金、记录流水与 MANUAL 审计）；
+   993→   * ② 清空该账户全部持仓与成交流水（PaperPosition/PaperTrade）；
+   994→   * ③ 清空趋势关联与决策审计（TrendTradeMeta/TrendAutoDecision/TrendPendingEntry——
+   995→   *    仅趋势自动账户使用，不带账户维度，全表清空安全）；
+   996→   * ④ 余额 = initialCapital（100）、totalDeposited = 0（ROI 本金基准 = initialCapital +
+   997→   *    totalDeposited，回到 100）、权益峰值归零；
+   998→   * ⑤ 运行模式与持仓数量等配置保持不变。手动盘 default 账户完全不受影响。
+   999→   */
+  1000→  async resetAccount(): Promise<{ closed: number }> {
+  1001→    const r = await this.closeAllManual();
+  1002→    const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+  1003→    if (acc) {
+  1004→      await db.paperPosition.deleteMany({ where: { accountId: acc.id } });
+  1005→      await db.paperTrade.deleteMany({ where: { accountId: acc.id } });
+  1006→    }
+  1007→    await db.$executeRawUnsafe(`DELETE FROM TrendTradeMeta`);
+  1008→    await db.$executeRawUnsafe(`DELETE FROM TrendAutoDecision`);
+  1009→    await db.$executeRawUnsafe(`DELETE FROM TrendPendingEntry`);
+  1010→    const cfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+  1011→    const capital = cfg?.initialCapital ?? TREND_TRADE.INITIAL_CAPITAL;
+  1012→    if (acc) {
+  1013→      await db.paperAccount.update({
+  1014→        where: { id: acc.id },
+  1015→        data: { balance: capital, totalDeposited: 0 },
+  1016→      });
+  1017→    }
+  1018→    await this.repo.resetPeakEquity(TREND_TRADE.ACCOUNT_NAME);
+  1019→    return { closed: r.closed };
+  1020→  }
+  1021→
+  1022→  mode(): Promise<TrendAutoMode | null> {
+  1023→    return this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME).then((c) => (c?.mode as TrendAutoMode) ?? null);
+  1024→  }
+  1025→
+  1026→  // ============ 对外查询（/api/trend-trading 用） ============
+  1027→
+  1028→  /** 标记价（合约多源供价；外部路由展示持仓用） */
+  1029→  markPriceOf(symbol: string): number {
+  1030→    return this.deps.markPrice(symbol);
+  1031→  }
+  1032→
+  1033→  /** 最近一次主循环时间（ms；0 = 尚未运行） */
+  1034→  get lastTick(): number {
+  1035→    return this.lastTickAt;
+  1036→  }
+  1037→
+  1038→  /** 最近一次主循环错误（null = 正常） */
+  1039→  get lastErr(): string | null {
+  1040→    return this.lastError;
+  1041→  }
+  1042→
+  1043→  /** 最近跳过记录（审计：为什么没开仓/为什么跳过） */
+  1044→  recentSkips(limit = 50): SkipRecord[] {
+  1045→    return this.skips.slice(0, limit);
+  1046→  }
+  1047→}
+  1048→

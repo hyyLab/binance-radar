@@ -14,7 +14,7 @@
 
 import { bFetch, type KlineRow } from './binance';
 import { collector } from './collector';
-import { isExcludedBase } from './scanner';
+import { isExcludedBase } from './excluded';
 import type { TickerSnapshot } from './types';
 
 export const MA7_TFS = ['1m', '3m', '5m', '15m', '30m', '1h'] as const;

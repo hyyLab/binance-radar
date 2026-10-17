@@ -1,476 +1,312 @@
-# 项目工作日志
-
 ---
-Task ID: 1
-Agent: Super Z (main agent)
-Task: 开发「币安热点雷达」网站 —— 跟踪币安热门交易币种（24h 涨跌幅、突时异动监控）
-
-Work Log:
-- 初始化全栈环境（Next.js 16 + TS + Tailwind 4 + shadcn/ui + Prisma/SQLite）
-- 验证币安 API 连通性：api.binance.com 主域名可用，实现 4 域名容灾轮换（含 data-api.binance.vision）
-- Prisma schema 定义 AnomalyEvent 模型（含 symbol/type/severity/price/changePct/volumeMultiple 索引），db push 完成
-- 核心引擎 src/lib/market/collector.ts（globalThis 单例，HMR 安全）：
-  · 每 5s 拉全市场最新价，维护价格滚动窗口（20 分钟 5s 精度 + 更早 1 分钟精度，总量 75 分钟）
-  · 每 30s 拉 24hr ticker，差分计算每分钟成交额 → 量比（vs 过去 20 分钟均值）
-  · 启动回填 Top120 币种 1m K 线（6 并发），短时涨跌即刻可用
-  · 异动检测：1 分钟 ≥1% / 5 分钟 ≥2% 拉升跳水（MAJOR 分级）、量比 ≥6 倍放量、突破/跌破 24h 高低点；同币种同类型 5 分钟冷却去重；事件落 SQLite
-- API 路由：/api/market/tickers、/anomalies（DB+内存合并去重）、/stats、/klines（20s 缓存 + 参数校验），全部 force-dynamic + no-store
-- 前端：币安风格深色主题（#0b0e11 / 涨 #0ecb81 / 跌 #f6465d / 品牌金 #f0b90b），绿涨红跌
-  · 总览条：BTC/ETH/总成交额/涨跌家数条形图/近1h异动数（可点击跳转）
-  · 三 Tab：热门币种表格（搜索+排序+价格闪烁动画）、涨跌幅榜（双栏 Top20）、异动监控（类型过滤徽章流）
-  · 币种详情弹窗：lightweight-charts v5 蜡烛图+成交量，6 周期切换，时轴 UTC+8
-  · TanStack Query 轮询（tickers 4s / anomalies 5s / stats 8s）
-- ESLint 通过（修复 3 处：effect 内 setState、Pct 未导入）
-- Agent Browser 端到端自验：桌面+移动端截图、K 线弹窗、周期切换、搜索、Tab 切换全部通过，控制台/服务端零错误
-
-Stage Summary:
-- 产出：完整可运行的币安行情监控网站（单页 / + 4 个 API）
-- 实测：649 个交易对实时监测，异动引擎上线即捕获真实信号（AAVE/AVAX 突破新高、ONDO 放量 10.8 倍、IUP 放量 29.7 倍）
-- 关键决策：REST 轮询（4s）替代 WebSocket 直连（网关更稳）；异常事件 SQLite 持久化（服务重启不丢历史）；红涨绿跌遵循币安配色习惯
-- 文件结构：src/lib/market/{types,binance,collector}.ts、src/app/api/market/{tickers,anomalies,stats,klines}/route.ts、src/components/market/{shared,stats-bar,hot-table,movers,anomaly-feed,kline-chart,coin-dialog}.tsx、src/hooks/use-market.ts
-
----
-Task ID: 2
-Agent: Super Z (main agent)
-Task: 新增「机会扫描 · 模拟盘」专题页 —— 均线支撑位多空机会 + 大级别支撑位 + 模拟建仓系统
-
-Work Log:
-- Prisma 新增 PaperAccount / PaperPosition / PaperTrade 三模型并 db push（首次运行后重启 dev server 以加载新 Prisma Client）
-- src/lib/market/indicators.ts：SMA 计算、analyzeMa（3m/5m/15m 回踩 MA5/10/20 企稳做多 / 反抽受阻做空，趋势背景过滤 + 5 维评分≥3 星输出）、analyzeLevels（4h 分形极值聚类成大级别 S/R 区域）
-- src/lib/market/scanner.ts：MarketScanner 单例，Top120 币种每 2 分钟扫均线信号（8 并发 ~10s）、每 5 分钟扫 4h 支撑压力；修复首轮 levels 扫描未立即执行的问题（改为信号扫描完成后链式触发）
-- src/lib/market/paper.ts：PaperEngine —— 1000 USDT 初始资金、最高 20x、Taker 0.05% 双边手续费、维持保证金率 0.5% 估算强平价、自动强平检查、同币种同方向去重、余额校验；快照含实时盯市盈亏/ROE/胜率/ROI
-- 6 个 API：/api/scanner/signals、/api/scanner/levels、/api/paper/{account,open,close,reset}（zod 风格手动校验 + PaperError 业务错误分类）
-- 前端：顶栏双视图导航（行情雷达 / 机会扫描·模拟盘）；信号列表（方向+周期过滤、星级评分、买卖按钮）、大级别支撑/压力双卡片（距离排序 + 做多/做空按钮）、模拟盘面板（5 卡片总览 + 持仓表实时盈亏 + 一键平仓 + 平仓流水 + AlertDialog 重置）、一键交易弹窗（币种推荐、多空切换、杠杆滑块、保证金比例/自定义、开仓前预估名义价值/手续费/强平价）
-- 用 key 重挂载模式替代 effect 预填（通过 react-hooks/set-state-in-effect 检查）；lint 零错误
-- Agent Browser E2E：专题页渲染 ✓、从信号一键开多 BTC 10x ✓（Toast 确认、余额 948.50→710.19）、一键平仓 ✓（净盈亏 -1.19 U 入流水）、API 风控测试（重复开仓/超额保证金/25x 杠杆均正确拒绝）、移动端响应式 ✓、控制台与服务端零错误
-
-Stage Summary:
-- 实测数据：60 个均线信号（3m 33 / 5m 24 / 15m 3）、117 个币种大级别 S/R（XAUT 5 点压力聚类）、模拟盘完整交易闭环
-- 关键决策：REST 轮询方案沿用；评分制过滤低质量信号（≥3 星）；同币种同方向单仓限制避免仓位叠加混乱；强平检查挂在账户查询/交易前（3 秒轮询内触发）
-
----
-Task ID: 3
-Agent: Super Z (main agent)
-Task: K 线成本线标注 + 每日热门池（涨幅/跌幅/成交量榜综合选币）+ 扫描范围扩展
-
-Work Log:
-- Prisma 新增 HotPoolEntry（date+symbol 唯一，tags JSON，rank）并 db push；重启 dev server 加载新 Prisma Client
-- collector 新增热门池引擎：每日 00:00 (UTC+8) 重建，24h 成交额 Top80(VOL) + 涨幅榜 Top40(UP) + 跌幅榜 Top40(DOWN) + 实时放量 Top20(SURGE，量比≥4)，去重后约 130-180 个；当日每 30 分钟随 24h 滚动窗口轻度刷新；服务重启后量能就绪自动补 SURGE 标签（每分钟重试最多 10 次）；名单 best-effort 持久化 SQLite
-- getTickers() 每行携带 hotTags；stats 接口返回 hotPool 摘要（date/total/tags 计数）
-- scanner topSymbols 改为热门池优先 + 成交额补足，SCAN_TOP 提至 150 —— 涨跌幅小币种进入 3m/5m/15m 信号与大级别支撑扫描范围
-- kline-chart 新增 priceLines prop（lightweight-charts createPriceLine，key 比对避免轮询闪烁）；coin-dialog 自动标注该币种模拟持仓的多/空成本线（绿/红实线 + 杠杆标注）与强平价虚线，底部金色持仓摘要条
-- hot-table：币对列入选徽章（额/涨/跌/爆）、「仅看热门池」开关（默认开）、金色热门池构成说明条；行数上限提升
-- 修复：coin-dialog 误从 use-market 导入 usePaperAccount 导致整站 500；React Compiler lint 报错（ref 渲染期访问 / memo 依赖不匹配）改为 key 比较模式
-- 浏览器验证：热门池说明条 134 个（额80/涨40/跌40/爆3）、徽章显示、ALGO K 线成本线 0.11620 + 持仓摘要、扫描器覆盖 144 且出现 GRAM/MORPHO 等小币信号（DOT 带爆标签）、控制台与服务端零错误
-
-Stage Summary:
-- 热门池实测：134 个币种（DOT/ZK 三标签 VOL+UP+SURGE）；扫描范围从纯成交额 Top120 → 热门池优先，信号覆盖面显著扩大
-- K 线弹窗现在同时展示：K 线 + 成本线 + 强平线 + 持仓摘要，闭环「扫描 → 开仓 → 图上看持仓」
-
----
-Task ID: 4
-Agent: Super Z (main agent)
-Task: K 线图记录并标注开仓位置与平仓位置
-
-Work Log:
-- 新增 GET /api/paper/trades?symbol=&limit=：按币种查询模拟交易流水（PaperEngine 补公开 getAccountId 方法）
-- kline-chart 接入 lightweight-charts v5 标记插件 createSeriesMarkers；ChartTradeMarker（timeMs/position/shape/color/text）由图表二分对齐到事件时刻（或之前最近）的 K 线，+8h 时区偏移与蜡烛一致
-- coin-dialog：usePaperTrades 拉取该币种流水 → 构建标记（开多▲绿/开空▼红标开仓价；平多/平空箭头按盈亏绿红着色标净盈亏；强平单独红标）→ 传入图表；底部新增「该币种已记录 N 笔交易 · ▲开仓 ▼平仓」说明条
-- 运维：发现重复重启导致双 next dev 进程争抢资源（命令超时），清理后单实例启动恢复；确认 dev.sh 方式启动可跨会话存活
-- 验证：trades API 返回 BTC 4 笔（2 开 2 平）；浏览器确认图上「开多 82,794.43 / 开多 82,728.64 / 平多 -1.19 / 平多 -0.50」箭头精确定位；控制台与 lint 零错误
-
-Stage Summary:
-- 复盘闭环完成：扫描 → 一键开仓 → K 线看成本线/强平线 → 平仓后图上永久保留开/平仓箭头（含盈亏），SQLite 流水支撑
-
----
-Task ID: 5
-Agent: Super Z (main agent)
-Task: 交易标记简化为 B/S 样式
-
-Work Log:
-- 按用户要求将 K 线交易标记从长文字（开多 xx / 平多 +x.xx）简化为交易所经典 B/S 样式
-- 映射：OPEN_LONG 与 CLOSE_SHORT（买入）→ 绿色 ▲ B；OPEN_SHORT、CLOSE_LONG、LIQUIDATE（卖出）→ 红色 ▼ S
-- 弹窗说明条同步改为「B = 买入 · S = 卖出」
-- 浏览器验证：BTC 4 笔交易显示 2 个绿色 B + 2 个红色 S，零报错；lint 通过
-
-Stage Summary:
-- K 线标记极简化：B 买 / S 卖，绿买红卖，视觉干净
-
----
-Task ID: 6
-Agent: Super Z (main agent)
-Task: 机会扫描范围聚焦涨幅榜 / 跌幅榜 / 异动币种
-
-Work Log:
-- collector 新增 getHotPoolEntries()（symbol+标签明细）
-- scanner 重构 topSymbols → buildUniverse：24h 涨幅榜 Top40 + 跌幅榜 Top40 + 近 4h 异动币种（内存异动事件 + 热门池 SURGE 放量兜底），每 30s 重建候选池，去掉按成交额铺开的逻辑；ScannerStatus 新增 universe 构成明细（gainers/losers/anomalies）
-- UI：状态条改为「聚焦涨幅榜 X · 跌幅榜 Y · 异动 Z（共 N 个）」；信号空态说明同步更新
-- 运维：本次重启出现 dev.sh 60s 就绪窗口不够与进程被会话回收的情况；清理双实例后以 dev.sh 方式重启并在同会话完成验证，服务跨会话存活
-- 验证：覆盖 81 = 涨幅 40 + 跌幅 40 + 异动 3（去重），信号 60 个且集中在 STRK/CHIP/GRAM/AUDIO/CETUS 等动量小币；lint 与控制台零错误
-
-Stage Summary:
-- 扫描哲学从「覆盖面」转向「聚焦度」：只扫机会密集区（涨跌榜 + 异动），信号质量与相关性与用户交易场景对齐
-
----
-Task ID: 7
-Agent: Super Z (main agent)
-Task: 机会扫描仅保留交易最活跃 Top20 虚拟币并剔除股票代币
-
-Work Log:
-- 基于实测数据确认股票代币命名规律：股票代码+B 后缀（CRCLB/MSTRB/SPCXB/SNDKB/SOXLB），另有贵金属 XAUT/PAXG、稳定币 RLUSD 混入
-- scanner 重构 topSymbols：24h 成交额 Top20 + isExcludedBase 剔除（STOCK_TICKERS 股票代码表 + B 后缀规则 + 贵金属/稳定币黑名单），动态覆盖未来新上市股票代币；移除涨幅/跌幅/异动 universe 逻辑与相关状态字段
-- collector STABLE_BASES 补充 RLUSD（稳定币全站剔除）
-- UI 文案：状态条「仅扫描交易最活跃 Top20 虚拟币（已剔除股票/商品代币）」；空态说明同步
-- 运维：多轮重启遇 .next 陈旧缓存卡死编译（rm -rf .next 解决）与会话回收问题（改用平台 init-fullstack.sh 官方路径重启，稳定存活）
-- 验证：覆盖恰好 20 个，信号涉及 ATOM/BNB/AVAX/UNI/SUI/ENA/STRK/NEAR/WLD/ZEC/RLC/KAIA/MAGIC，股票/商品/稳定币零混入；RLUSD 全站剔除；lint 与控制台零错误
-
-Stage Summary:
-- 扫描范围最终形态：最活跃 Top20 纯虚拟币，信号干净聚焦主流币
-
----
-Task ID: 8
+Task ID: 51-b
 Agent: Super Z (main)
-Task: 机会扫描范围改回「涨幅榜 + 跌幅榜」，榜单每 10 分钟刷新（新反抽币及时纳入），并把异动监控币种加入扫描；保留股票代币排除
+Task: 按用户要求 K 线同样按分片分配、不全走币安（承接 Task 51 分片架构）
 
 Work Log:
-- 重写 src/lib/market/scanner.ts：SCAN_TOP=20 活跃币模式 → 宇宙成员制（Map<symbol, {tags, joinedAt}>）
-  - 宇宙 = 24h 涨幅榜 Top40（UP）+ 跌幅榜 Top40（DOWN）+ 近 4h 异动币种（ANOM，多标签可叠加）
-  - UNIVERSE_REFRESH_MS=10min 全量重建；两次重建之间 boards 增量比对，新进榜/新异动币种实时并入且不驱逐旧成员（保证信号生命周期完整）
-  - anomalySeen 记忆化：collector 异动环形缓冲仅 300 条，按币种记 4h 防高频期遗漏；MAX_UNIVERSE=200 防膨胀
-  - 保留股票代币排除（STOCK_TICKERS + B 后缀规则 MSTRB/CRCLB 等）与商品/稳定币排除
-- types.ts：ScannerStatusDTO.universe 扩展 total / refreshIntervalMin / lastRefreshAt / nextRefreshAt
-- scanner-view.tsx 状态条与 signal-list.tsx 空态文案同步新范围与刷新机制
-- bun run lint 零错误；dev server 重启（注：本会话环境后台进程跨工具调用会被清理，改为「单条命令内启动+等待+验证」模式）
-- curl 验证 /api/scanner/signals：universe {gainers:40, losers:40, total:80, refreshIntervalMin:10}，signals 60 个
-- agent-browser 端到端：切到「机会扫描·模拟盘」视图，状态条显示「覆盖 81 个（涨 40 / 跌 40 / 异动 1）」，异动币种已实时纳入，控制台零错误
+- 审计 K 线链路残留的币安偏向，修两处：
+  ① futures-collector klineSourceOrder 兜底顺序重排——归属源优先后，补位顺序改为「非币安源优先、币安永远末位」（旧逻辑 bybit 失败会先试币安再试 gate）；币安只承接它归属分片的 K 线 + 两所同时不可用时的末位兜底
+  ② 引擎冷启动回填按归属源轮流排序（bybit→gate→binance 交替发牌）——旧逻辑按 qv 排序取前 125，恰好全是币安分片，冷启动突发全打币安；现在 Bybit/Gate 先就绪，币安那份被令牌桶二次限速；bootBackfillCap 125→220（=maxTracked 全量覆盖），并加 isSharded 门控（分片未分配完不启动回填，防 shardOf 空置期偏币安）
+- 可观测性：SourceState 加 klineReqs 计数（fetchKlinesFrom 每次实际派发时累计），getSourcesHealth 暴露，状态条 tooltip 显示「K 线已承接 N req」——分配效果从此可实测验证
+- 单例纪律再执行：futures-collector bump v2→v3（改行为必 bump，否则热重载后旧实例仍用旧 klineSourceOrder）；enhanced engine bump v2→v3（回填排序变更），两者均停表遗留实例 + 状态/K线仓库交接（封禁期重建不丢白名单、不重复回填）；collector 交接链已支持 v2（有分片）→v3 与 v1（无分片，shards 兜底空 Map）两种来源
+- 被动验证（45s，未发 reset）：引擎 v3 接管（tracked 191 携带仓库）；klineReqs = Bybit 23 / Gate 1 / 币安 0（封禁挂起中 K 线完全绕行）✓；分片归属维持 143/208/171；供价 0/333/171（币安挂起，Bybit 代供）✓；eslint 全绿
+- 预期解封后稳态：币安 K 线仅其 143 归属品种（回填 ~1250 权重一次性 + 轮换 ~34/min），轮换大头在 Bybit/Gate（宽松限额）；币安总出站被令牌桶压在 ≤480/min
 
 Stage Summary:
-- 扫描范围回归涨跌幅榜 + 异动币种，榜单 10 分钟全量重建 + 新币秒级并入，直接满足「刚开始反抽的新币及时覆盖」诉求
-- 涨跌幅榜/异动币种均过滤代币化股票与商品代币；扫描宇宙元数据（重建周期/上次/下次重建时间）已暴露至 API 供前端展示
+- K 线分配与行情分片同构：归属源供价 + 归属源 K 线 + 非币安优先兜底 + 令牌桶硬帽，四层把币安锁在其 125 份配额内
+- klineReqs 计数器让「分配是否真的均匀」从口头承诺变成可实测数字（状态条悬停可见）
+- 单例 bump 纪律（改行为必 bump + 状态交接）第三次实战执行，交接链已覆盖 v1/v2→v3 全路径
 
 ---
-Task ID: 9
+Task ID: 52
 Agent: Super Z (main)
-Task: 涨跌幅榜 40+40 改为 涨20+跌20，且涨幅榜只出做多信号、跌幅榜只出做空信号（异动币种双向）；修复网站打不开（dev server 掉线重启）
+Task: GitHub 推送——新建私有仓库 hyyLab/binance-radar，全量推送 main（worklog 仅保留最新条目）
 
 Work Log:
-- scanner.ts：GAINERS_TOP/LOSERS_TOP 40→20；scanSignals worker 内按宇宙来源标签过滤信号方向（UP→仅 LONG_MA_SUPPORT、DOWN→仅 SHORT_MA_RESIST、ANOM→双向；成员暂时查不到时宽松放行防整轮清空）
-- scanner-view.tsx / signal-list.tsx 文案更新（Top20 + 方向映射说明）
-- bun run lint 零错误
-- 修复打不开：上一轮后台进程被环境回收导致 3000 端口无服务；本次用 setsid nohup bash .zscripts/dev.sh 标准方式重启成功，验证进程跨工具调用存活（连续两次 curl 200）
-- curl 验证：universe {gainers:20, losers:20→21(增量并入不驱逐), anomalies:4, total:43, refreshIntervalMin:10}；signals 45 个（多 23/空 22），levels 41 个全宇宙覆盖
-- agent-browser 截图：跌榜币（0G/SNXXB/SENT/SKL，24h -3%~-9%）全部只出「做空」信号，方向过滤正确；控制台零错误
+- 用户更换新 token（fine-grained，账号 hyyLab）后重试验证：GET /user 通过，login=hyyLab；GET /user/repos 确认用户已手动建仓 binance-radar（private=True、size=0 空仓、default_branch=main，与建议一致）
+- 推送前 git 检查：main 工作区干净，最新提交 efaa448（环境自动快照，仅 db/custom.db 运行时数据，无代码改动）；da40c7b worklog 已精简至仅保留 Task 51-b 一条；此前已用 git grep 复查无敏感信息（token/密钥/密码）
+- remote 添加 origin（URL 临时携带 token）→ git push -u origin main 成功（new branch main → main，上游已跟踪）
+- 推送后立即 git remote set-url 清除 URL 中的 token；git config 复查 0 处 token 残留
+- 验证：API 确认远程 main 顶端 = efaa448 与本地一致；rev-list 本地 42 = API Link header 远程 42，全量完整；私有仓库 fetch 需认证（token 已从 config 清除，本地 fetch 匿名不可用属预期）
+- worklog 追加本条记录（仅追加不覆盖）
 
 Stage Summary:
-- 扫描宇宙收窄为 涨20+跌20+异动，信号方向顺势映射：强币回踩做多、弱币反抽做空，逻辑更聚焦
-- dev server 恢复运行，预览可访问
+- 代码已全量推送至 https://github.com/hyyLab/binance-radar（私有，42 commits，main）
+- 安全收尾：token 不落地——remote URL 已还原为无凭证形式，.git/config 无 token；两个曾出现在聊天中的 token 均建议用户在 GitHub 后台轮换/吊销
+- 后续如需再次 push：因 config 无凭证，直接 git push 会要求认证；届时可用 git-credential 管理（如 gh auth login 或 credential store），避免 token 明文进 config
 
 ---
-Task ID: 10
+Task ID: 53
 Agent: Super Z (main)
-Task: 机会扫描页新增「异动监控 · 一键交易」板块：实时异动 + 建议做多/做空方向 + 直接模拟开仓
+Task: universal-trend-engine 集成——趋势跟踪服务（第一阶段：只跟踪展示，无自动交易，不动模拟盘）
 
 Work Log:
-- 新建 src/components/scanner/anomaly-monitor.tsx：自包含组件（useAnomalies 5s 轮询，取最近 30 条）
-  - 建议方向映射：SPIKE_UP→做多（短时急拉动量顺势）、SPIKE_DOWN→做空、BREAKOUT_HIGH→做多（突破新高）、BREAKOUT_LOW→做空（跌破新低）、VOLUME_SURGE 按 changePct 正负（放量上攻做多/放量下杀做空）
-  - 每条异动：时间 + TypeBadge(强) + 币种(点开K线弹窗) + 详情/触发价/量比/1分钟额 + 「建议做多/做空 · 理由」徽章 + 双按钮（建议方向实心高亮，反向描边）
-- scanner-view.tsx：板块置于信号列表/大级别支撑下方、模拟建仓系统上方，复用 openTrade 与 CoinDialog
-- lint 零错误；组件层改动 HMR 生效，server 未重启
-- 浏览器端到端验证：板块渲染正常（LTC 突破新高行显示「建议做多 · 破位顺势做多」）；点击异动行「买入做多」→ TradeModal 预填 LTC/USDT + 做多方向 → 确认开仓 → toast「买入做多已成交 LTC/USDT · 10x · 开仓价 64.31」；控制台零错误
+- 实施前核对：Radar 侧 engine/aggregate/klines/futures-collector/excluded/schema/enhanced-view 全读；UTE 侧 index/watch-monitor/scanner/engine/state-machine/config 全读。确认市场=币安白名单 USDT-M 合约（多源分片供价）、排除规则 isExcludedBase 内建于 collector、KlineStore 轮换 ~5min 不能作 1m 引擎刷新（按任务要求绕开）
+- vendor 接入：clone hyyLab/universal-trend-engine @755d9a6 → bun install + tsc build（typecheck OK，自带测试 7/7 过）→ vendor/universal-trend-engine/（package.json+dist/+README+VENDOR.md 同步说明）；Radar package.json file: 依赖 + bun install；不依赖未构建 GitHub 包，不复制不改写 UTE 算法，只 import 公开 API
+- Prisma：新增 TrendWatchSymbol 模型（symbol/market/interval 唯一键 + status/addedAt/lastAnomalyAt/expiresAt + trendStateJson/lastSignalJson/lastPhase/lastDirection/lastScore + lastBarTime/lastKlineAt）；db push 仅建表（模拟盘数据完好），generate
+- TrendWatchService（src/lib/market/trend-watch/{config,types,repo,service}.ts）：
+  · 候选来源=EnhancedEngine.events() 活跃+衰减期内已结束事件；候选选择分=P1 40/P2 25/P3 10 + MAJOR 20/MINOR 8 + 独立证据×8 + 有效突破15 + 放量倍数×4(封顶20) + 活跃10/ended 线性衰减；入池 ≥40 分
+  · 流动性门槛（用户定版）：qv24≥500万正常竞争；100~500万仅 MAJOR+（有效突破或≥3 种独立证据）例外通道
+  · 迟滞：在池保留下限 = 入池分 -15（防排名抖动频繁进出）；退池=idle+过期后宽限15min / candidate 过期后再给一个完整 TTL / confirmed 不因事件结束退池（回落 idle 后宽限15min）/ 数据断供15min 任何相位都退
+  · 上限 20（confirmed>candidate>分数>入池时间的保留序）；K 线仅对池内标的 1m/60s/并发≤3/inflight 去重；fetchKlinesFor 走 collector 归属分片+令牌桶；行情有效期 10s 门控（无效不发 K 线请求）
+  · UTE 调用：candle→WatchOhlcvSeries（qv=计价成交额）→scanAnomalyCandidates（toClosedBars 剔未收盘/非法 bar，绝不用 close 造 high/low）；同根 K 线只计一次确认（UTE lastObservationKey + 服务层 lastBarTime 双保险）；方向由价格序列独立判断，与异动方向冲突时快照标 conflict
+  · 持久化：仅入池/新 bar/相位变化/方向变化/退池时写库；boot 时 loadActive 恢复池+确认历史（trendStateJson 含 lastObservationKey，重启后同根去重仍生效）
+- 引擎绑定：EnhancedEngine 构造器创建 trendWatch（deps 箭头函数延迟绑定 events/getTickers/fetchKlinesFor+prisma repo）；boot 拉起、stop 停表；单例 bump v3→v4（stopLegacyEngine 链覆盖）；EnhancedStats.trendWatch 摘要（pool/confirmed/candidate/klineReqs/dbErrors）
+- API：GET /api/enhanced/trends → {ok,ts,interval,market,pool:TrendWatchRow[],stats}；UI：trend-panel.tsx（相位徽章 观察中/候选趋势/已确认趋势 + 方向箭头 up/down/flat + 评分条 + 确认 n/3 + UTE 依据 + 异动上下文 + 冲突红标 + K线过期/数据缺失黄标 + 点击开 CoinDialog 复用 K 线交互），插在事件池与模拟盘之间；useTrendWatch 5s 轮询
+- 测试（bun test 零新依赖，tests/trend-watch/）：service.test.ts 12 用例（候选排序/去重/上限20/过期退池/confirmed 保留/未收盘与非法 bar/行情过期不发请求/同根重复不累计确认/上行下行反转/重复启动幂等/回放指标=确认延迟3bar+请求数核算）+ repo.test.ts 3 用例（独立测试库 beforeAll db push，往返保真/重复 upsert/retire 不复活）——15/15 全绿
+- 修复过程中的关键决策：
+  ① repo 改 raw SQL（$executeRawUnsafe/$queryRawUnsafe）——dev server 进程缓存 schema 变更前旧 PrismaClient（无新模型属性），raw SQL 对新旧 client 一致可用，不重启 3000 端口解决；实验确认 Prisma 6 SQLite DateTime=毫秒整数存储、$queryRaw 读回自动转 Date
+  ② src/lib/db.ts 单例 bump v1→v2（同纪律）；旧实例不 disconnect（老模块图在用）
+  ③ service ensureStarted 的 starting promise 完成后清理（stop→重入可安全重启）
+  ④ ma7.ts 历史遗留 import（从 ./scanner 导入未导出的 isExcludedBase）改 ./excluded——next build 门槛修复，一行
+- 验证：eslint 全绿；next build 成功（standalone chunk 含 UTE 代码）；运行时闭环实测：候选池 7 标的/candidate 4 个（W 76 分、BERA 71 分确认 2/3 等真实推进）/dbWrites 17/dbErrors 0；桌面 1440x900 + 移动 390x844 截图渲染正常
 
 Stage Summary:
-- 异动监控在扫描页可直接交易，方向建议与一键开仓联动，形成「发现异动→判断方向→立即建仓」闭环
+- 交付：vendor/universal-trend-engine（@755d9a6 本地构建包）+ trend-watch 四件套 + engine v4 + trends API + TrendPanel UI + 15 个测试
+- 请求预算：≤20 标的 × 1req/60s ≈ 20 req/min（多源分片自动承接，Bybit/Gate 为主），不扫全市场
+- 参数集中于 trend-watch/config.ts（入池分/迟滞/TTL/宽限/并发/UTE lookbackBars=12/minMovePct=0.35/confirmObservations=3），全部为初始工程参数，未经回放校准
+- ⚠️ 未验证假设：趋势评分盈利能力未验证（UTE score 是启发式证据分）；未做数周级历史回放对比假阳/漏检/确认延迟分布；confirmed→idle 的 changedAt 语义依赖 UTE 内部行为；趋势确认≠买卖指令，第一版无自动交易，模拟盘逻辑零改动
 
 ---
-Task ID: 11
-Agent: Super Z (main)
-Task: 一键平仓所有交易对按钮 + 修复 100% 买入无法成交（改为最大可买入量直接拉满）
+Task ID: 53-b（回滚恢复）
+Agent: main
+Task: 网站被平台回滚到 10-13 快照（Task 49 时代），从 GitHub 恢复全部工作并验证
 
 Work Log:
-- paper.ts 新增 closeAll()：逐仓复用 close()（各自事务互不影响），返回 {closed, skipped, totalPnl, 逐仓明细}；行情不可用的仓位安全跳过
-- types.ts 新增 PaperCloseAllResponse；新建 POST /api/paper/close-all 路由
-- use-scanner.ts 新增 useCloseAllPositions：toast 汇总「共平仓 N 个仓位 · 总净盈亏 ±X USDT」
-- paper-panel.tsx 持仓卡片头部新增红色「一键平仓全部」按钮（仅持仓>0 显示 + 仓位计数徽章），AlertDialog 确认弹窗展示仓位数与预估未实现盈亏（未含平仓手续费）
-- trade-modal.tsx 修复 100% 问题：根因是 margin=balance 时 margin+手续费>余额 永远被拒；新增 maxMargin = floor(余额/(1+杠杆×0.0005)×100)/100（随杠杆联动），100% 档改名「最大」取 min(余额×p, maxMargin)，校验与提交均按 maxMargin，标签行显示「可用 X · 最大可开 Y」，错误文案提示超限需预留手续费
-- bun run lint 零错误；dev server 多次被环境回收，全部采用「单命令内重启+等待就绪+验证」模式
+- 核查发现本地 HEAD=155242e（Task 49，34 commits），丢失 Task 50~53 共 10 个提交；运行中 dev server 仍是旧代码
+- 备份回滚快照的 db/custom.db → db/custom.db.rollback-backup-10170050（含 10-13 时期 3 个旧模拟持仓）
+- 一次性 token URL fetch GitHub；发现远程比预期多一个提交：439aafb（Task 53 UTE 集成已完成并推送）
+- git reset --hard 439aafb 恢复全部代码；bun install 装回 vendor/universal-trend-engine（file: 依赖）
+- bunx prisma generate 重新生成含 TrendWatchSymbol 的 client；验证 /api/enhanced/trends 200、restoredFromDb:13、趋势池已开始评估（1 个 candidate）；首页 200
+- 核实评分实现：UTE 趋势分公式（vendor dist/engine.js）+ 入池候选分（trend-watch/config.ts、service.ts scoreOf）
 
 Stage Summary:
-- API 实测：close-all 6 仓全平（closed:6 skipped:0，逐仓明细正确，账目自洽 206.15+965.43-28.22=1143.37）
-- UI 端到端：一键平仓全部按钮→确认弹窗→toast「共平仓 2 个仓位 · 总净盈亏 -0.23 USDT」→持仓清空资金回笼
-- 最大可开实测：余额 1142.98/10x → 前端显示最大可开 1137.29（与理论值一致），以 1137.29 开仓成功后余额剩 0.0082（真·拉满）；超 1 分钱 1137.30 被正确拒绝
-- 测试仓已清理，最终 持仓 0 / 可用 1131.61（测试损耗约 11.4 U 模拟手续费）
+- 工作区恢复至 439aafb（=远程 main），网站功能完整恢复；趋势候选池从 DB 恢复 13 标的
+- 模拟盘账户现为 10-16 状态（余额 10.00、无持仓，与推送前一致）；10-13 快照含 3 个旧持仓，已备份可回取
+- 未验证假设：无（恢复性操作，未改任何业务代码）
 
 ---
-Task ID: 12
-Agent: Super Z (main)
-Task: 排查「又打不开」+ 尽可能保证持续在线
+Task ID: 54
+Agent: main
+Task: 高波动虚拟货币趋势识别与自动模拟交易一体化（任务规格书 §一~§八）
 
 Work Log:
-- 诊断：dev server 进程被沙箱平台回收（page 000）；环境无 cron/at/pm2/supervisord，用户无 sudo，PID1 为 tini
-- 三种启动方式实测全部被平台清理：setsid nohup、nohup+disown、以及 keepalive 守护脚本本身
-- 编写 .zscripts/keepalive.sh：每 20s 健康检查 localhost:3000，掉线自动 pkill+重启+等待就绪，日志记录 DOWN/RECOVERED
-- keepalive 实测自愈有效（两次 DOWN→RECOVERED 各约 6 秒），但守护进程自身也会在工具调用间隙被平台回收，无法实现跨轮次保活
-- 结论：后台进程回收是沙箱平台层硬约束，应用侧无法彻底对抗；彻底在线需正式部署到外部托管
-- 每轮结束前手动拉起 server 确认 200，保证当轮用户可访问
+- 实施前核对：trend-watch 全部代码、paper.ts（无状态全走 DB，可参数化）、engine.ts（单例 v4）、repo raw SQL 模式、fetchKlinesFor（支持 1m/5m/15m）、futures.ts（强平/费率公式）、页面/测试结构
+- 趋势识别层（§二）：新增 indicators.ts（ATR/ATR%、日化实现波动率+历史分位→NORMAL/HIGH/EXTREME、Kaufman ER、影线占比、假突破标记、1m→5m/15m 聚合，15m 需 ≥16 根已收盘 bar 否则 valid=false 不冒充确认）；signal.ts（UnifiedTrendSignal 统一信封：相位/方向/周期 id/评分/强度/特征/HTF/数据新鲜度/异动上下文/冲突）；lifecycle.ts（状态机 v2：OBSERVING/CANDIDATE_*/CONFIRMED_*/END_PENDING/ENDED/DATA_UNAVAILABLE；结束证据 A 反向候选 B 深回撤(minMovePct×2.5 容忍带) C 结构失效(ER/一致性)；连续 3 根不同已收盘 K 线才 ENDED；反向确认立即 ENDED；同根去重；数据断供冻结不伪装结束）
+- service v2：KLINE_BARS 60→480（聚合 15m 用，币安权重仍 2）；主动探针通道（每 30s 最多 4 个未入池高成交额标的，ER/一致性/量比/区间扩张达标且未走完才入池，deps.probe 开关）；确认趋势满员保护；快照/持久化扩展 v2 字段
+- 持久化（§七）：TrendWatchSymbol 加 4 列（lifecycleStateJson/trendCycleId/lastPhaseV2/endReason，ALTER TABLE 幂等迁移）；新表 TrendAutoConfig/TrendTradeMeta/TrendAutoDecision（raw SQL CREATE IF NOT EXISTS，与 schema.prisma 同步）
+- 交易层（§三/§四）：paper.ts 构造参数化 accountName（bump v8，default 路径行为不变）+ paperEngineFor('trend-auto-v1')；AutoPaperTrader（SCAN_MS 10s 独立任务：强平巡检→退出管理→权益峰值→开仓；开仓=CONFIRMED_*+dataFresh+20%权益+20x+max4+周期决策键幂等(INSERT OR IGNORE)+先平后开独立性(确认 bar 晚于上笔平仓)；退出=lifecycle ENDED/反向确认；滑点 2bp 单边估算入净盈亏口径；PAUSED 只停新开仓）；engine.ts 集成（v5，后 v6）
+- API/UI（§五）：/api/trend-trading（总览/持仓/统计/审计）、/trades（历史+单笔决策链还原）、/control（start/pause/resume/closeAll/close 语义分离）；/trend-trading 独立页面（总览 12 卡+持仓卡+历史表筛选排序+决策链展开+控制按钮）；trend-panel v2 展示（相位/波动状态/ER/15m/通道/冲突/结束证据）；enhanced-view 导航
+- 测试（§七）：tests/trend-trade/auto-trader.test.ts 15 用例（账户隔离/20%20x/未确认不开/反向候选不平/ENDED 离场+口径/幂等含重启/数据过期/暂停含强平/reconcile/max4/强平/先平后开/全平 MANUAL/保证金不足审计）；tests/trend-watch/lifecycle.test.ts 7 用例；bunfig preload 固定测试库顺序；全量 37/37 绿
+- 生产构建通过（/trend-trading + 3 API 在列）；agent-browser 桌面+移动截图核验
+- 回放（§六）：scripts/replay/fetch-history.ts（仅 Bybit/Gate 拉 3 天×12 标的 1m，不碰币安防 418）+ run-replay.ts（严格时序、下一根开盘成交、双边费+滑点、强平公式；v1 基线/v2/v2h 三策略同源 UTE）；**回放发现生产 bug：lifecycle 状态未写回 map（END_PENDING/ENDED 永不推进）→ 修复 + engine bump v6**，线上验证 END_PENDING 3 例、证据计数推进
+- 回放结果（72h）：v1 446 笔净-82.39 假确认 78.9%；v2 493 笔净-82.22 假确认 73.4% 胜率 26.6%；v2h(+15m 方向门控) 291 笔净-49.66 假确认 67.4% 回撤 90.5%→58.7%——两套 1m 参数均亏损（手续费磨损），v2h 为明确校准方向（未验证假设）
 
 Stage Summary:
-- 网站代码无问题；掉线根因是平台沙箱周期回收后台进程
-- keepalive.sh 常驻尽力自愈（存活期间 20s 内恢复）；平台清理守护时需对话侧重新拉起
-- 已向用户说明彻底方案：部署到 Vercel/自有服务器等正式托管
+- 交付：趋势识别 v2（指标/多周期/生命周期/统一信号）+ AutoPaperTrader（独立账户 trend-auto-v1，纯模拟）+ 独立页面/API + 37 测试 + 回放框架与 72h 对比报告（scripts/replay/report.md）
+- 红线遵守：全程未声称盈利能力；趋势确认≠买卖指令；强平如实统计；所有阈值为未校准工程参数
+- 未验证假设（待回放校准）：END_CONFIRM_BARS=3、END_IDLE_TOL_MUL=2.5、ER/一致性门槛、探针判准、15m 门控（v2h）——均标注在 config.ts
+- 数据缺口：回放仅 3 天×12 标的（Bybit/Gate 历史），未覆盖极端行情周与更多山寨；无法复现运行期分片供价差异
 
 ---
-Task ID: 13
-Agent: Super Z (main)
-Task: 默认杠杆 20x + 充值按钮（增加总权益）+ 异动做空建议加入 24h 趋势过滤（强多头急杀提示低吸）
+Task ID: 55
+Agent: main
+Task: 趋势自动交易页交互增强——机器人充值按钮 + 可选持仓数量（更换自动平仓）+ 持仓卡片点击看 K 线
 
 Work Log:
-- trade-modal.tsx：默认杠杆 10→20x（滑块/预填联动最大可开保证金自动跟随）
-- schema.prisma：PaperAccount 新增 totalDeposited 字段（db push 同步）
-- paper.ts：新增 deposit(amount)（校验 10~1,000,000，balance 与 totalDeposited 同步增加）；snapshot ROI 本金基数改为 初始资金+累计充值（充值不计入盈利）；reset 时 totalDeposited 归零
-- 新增 POST /api/paper/deposit + useDeposit hook（toast 显示到账/累计充值）
-- paper-panel.tsx：头部新增金色「+充值」按钮 → Dialog 弹窗（快速 100/500/1000/5000 + 自定义金额）；可用余额卡显示「累计充值 +N」；徽章动态显示本金基数（含充值）
-- anomaly-monitor.tsx：suggest() 引入 24h 趋势过滤（useTickers 构建 chg24Map）
-  - SPIKE_DOWN 且 24h≥+3% → 做多（保守·低吸）：「急杀疑似插针洗盘，破位前不宜追空」，金色徽章标注
-  - VOLUME_SURGE 放量下杀且 24h≥+3% → 同上低吸处理
-  - SPIKE_UP 且 24h≤-2% → 做空：「急拉疑似反抽出货，追多需谨慎」（对称保守）
-  - BREAKOUT_LOW（跌破 24h 新低，24h 必为负）→ 保持顺势做空
-- bun run lint 零错误
-- API 实测：充值 1000 → balance/totalDeposited 正确、ROI (2149.51-2000)/2000=7.48% ✓；金额 5 被拒绝 ✓
-- 逻辑用例 8/8 通过（强多头急杀低吸/中性急杀做空/弱空头急拉反抽/破位顺趋势等）
-- 浏览器截图：默认杠杆 20× ✓、充值按钮+本金徽章「2,000 USDT（含充值）」✓、异动监控新文案生效 ✓
+- 需求澄清：用户先说「可选开仓数量」（已实现 marginRatio 方案），随后更正为「可选持仓数量」——每仓保证金由持仓数量决定平均分配，更换数量时自动平仓原有持仓；已按更正需求重做（移除 setMarginRatio，改为 setMaxPositions）
+- 后端：config.ts 增 MAX_POSITIONS_OPTIONS=[1,2,3,4,5,6,8]（MARGIN_RATIO 降级为遗留播种字段）；repo.ts 增 updateMaxPositions；control API 增 deposit（复用 PaperEngine.deposit，余额/totalDeposited 原子递增、ROI 本金同步、与手动盘同规则 10~100万）与 setMaxPositions（白名单校验→closeAllManual 自动平仓→持久化；同值 no-op）
+- auto-trader sizing 重写（用户定版）：每仓目标保证金 = 可用余额 ÷ 剩余仓位数 ÷ (1+杠杆×taker)（分子预留开仓手续费，否则最后一仓永远开不出；分母用剩余仓位数使每次开仓天然填满一个槽位）；openDetail 审计改记 positionSlots/marginBasis
+- 跨模块图坑：control 路由 catch instanceof PaperError 失效（引擎单例由其它路由图创建，类身份不同）——deposit 错误分支改按消息含「USDT」判校验类错误，curl 验证上下限文案正确返回
+- 前端 trend-trade-view：头部增「充值」按钮+弹窗（预设 100/500/1000/5000+自定义）、「持仓 N 仓」下拉（confirm 提示自动平仓后果）、头部文案改「每仓=可用余额÷剩余仓位数」+累计充值展示；PositionCard 整卡可点（平仓/K线按钮 stopPropagation）；接入 CoinDialog(market=futures) 并新增 extraPriceLines/extraMarkers——自动持仓成本线/强平线/开仓时点「开」标记叠加在 K 线上
+- 测试：T2/T5 改均分口径（动态 notional），新增 T16 充值（balance/totalDeposited 同步、手动盘隔离、下限拒绝）、T17 持仓数量持久化+均分开仓；全量 bun test 39/39 绿
+- 线上验证：页面 200；deposit 非法金额返回具体文案；setMaxPositions 同值 no-op；用户实际操作验证全链路——充值 +5000 到账、持仓数改 8 时旧 4 仓自动平仓（03:52:01 人工平仓流水）、新仓按 余额÷8÷1.01≈1018.74 均分重开；持仓卡片点击弹出 SIREN K 线，成本线/强平线/开标记正确
 
 Stage Summary:
-- 开仓默认 20x 杠杆；模拟盘支持充值扩仓，ROI 口径正确（本金=初始+充值）
-- 异动建议从「纯动量」升级为「动量+趋势」：多头趋势中的急杀提示低吸而非追空，空头趋势中的急拉提示反抽而非追多，破位信号维持顺势
+- 交付：机器人充值（独立账户、不动手动盘）、可选持仓数量（1~8 仓，更换即清场均分重开）、持仓卡片点击看 K 线（持仓上下文叠加）
+- 行为变更：开仓 sizing 由「权益×20%」改为「可用余额÷剩余仓位数」（用户定版）；更换持仓数量=自动平仓+新口径（被平旧周期因幂等键不会立即重开，新仓只来自新确认周期）
+- 未验证假设：均分口径为工程实现（余额基准、预留手续费），未做历史回放对比；持仓数量选项 [1,2,3,4,5,6,8] 为界面约定非校准参数
 
 ---
-Task ID: 37
-Agent: Super Z (main)
-Task: 平台回滚事故恢复——检测到仓库被回退至 10月11日快照（Task 31 之前），重建 Task 31-36 全部功能
+Task ID: 55-2
+Agent: main
+Task: 趋势自动交易页四项改进——持仓更换/全部平仓改内部弹窗、模型判断有问题自行平仓、重置按钮（资金回 100U）、历史展示开仓+平仓时间
 
 Work Log:
-- 事故定位：git 历史被平台检查点改写（HEAD=10-11 19:52 UTC，UUID 命名提交）；对象库全量枚举无 12-13 日提交；.next/dev/trace 仅存 peakPriority 字样（编译缓存压缩不可反提取）；文件系统无备份残留 → 结论：只能依据会话上下文重建
-- 受损范围：enhanced 引擎全套（6 模块+2 路由+hook+视图）、futures.ts、paper.ts 合约化、page.tsx 简化、collector/pause 路由、worklog 31-36 条目
-- 重建（按会话记录逐文件还原）：excluded.ts / futures.ts / paper.ts（v2 key+加仓合并+精确强平）/ trade-modal+paper-panel+use-scanner（10U/2U 下限/币安费率文案）/ page.tsx（双专题页切换）/ pause 路由 / enhanced types+config+aggregate+engine（逐字还原含 peakPriority+prioValue）/ klines.ts+detectors.ts（按规格重写：TTL 缓存中位数与 24h 范围、冻结基线状态机、PENDING 首进入产出、假突破 90s 观察窗、>25% 异常复核）/ anomalies+logs 路由 / use-enhanced / enhanced-view（冷却池最终版）
-- 踩坑两连：① paper.ts 导出 PAPER_MIN_DEPOSIT/MAX_DEPOSIT 未 import → ReferenceError（dev.log 定位）② trade-modal 编辑误删 presetMargin 行 → 运行时 ReferenceError（浏览器 overlay 定位）；均已修复
-- 验证：eslint 全绿；paper initialCapital=10、重置后 balance=10；BTC 20x 多 2U 强平 -4.62%（与原验证值吻合）；enhanced 冷启动 104 标的回填 232 req、基线就绪 104/104（100%）、活跃事件即时产生；四池/切换器/明细桌面+移动端截图正常；控制台零应用错误
-- 运维：全程未重启 server（pid 1096 保持运行）；引擎为首次访问冷启动（回填并发 2+200ms 间隔，无封禁）
+- 内部弹窗：trend-trade-view 持仓数量更换/全部平仓/新增重置全部改用 shadcn AlertDialog（confirm 状态机三分支），操作结果反馈由 window.alert 改 useToast（Toaster 已在 layout 挂载）；重置按钮红色危险样式、弹窗标注不可撤销
+- 自动平仓 v2（auto-trader.manageExits 重写，用户定版「模型判断有问题即自行平仓」）：① ENDED 任意周期归属（修复旧规则周期回收/ORPHAN 漏配→残留持仓永远等不到退出只能人工平）；② END_PENDING 同周期立即离场，不再等 END_CONFIRM_BARS=3 根（防插针确认根数保留给池内生命周期展示；结束证据明细留 exitSignalJson）；③ 反向确认放宽任意周期；跨周期中间态（异周期 END_PENDING/OBSERVING/CANDIDATE_*）不误平，由 ①/③ 数根 K 线内自然收敛
+- 重置：AutoPaperTrader.resetAccount = closeAllManual（正常平仓释放保证金/记 MANUAL 流水）→ 删该账户 PaperPosition/PaperTrade → 清空 TrendTradeMeta/TrendAutoDecision（仅趋势账户使用，无账户维度）→ balance=initialCapital(100)、totalDeposited=0（ROI 本金=initial+deposited 回 100）、peakEquity 归零（repo 新增 resetPeakEquity——updatePeakEquity 是 WHERE peakEquity< ? 峰值语义，写 0 不生效，测试 T20 抓出）；运行模式/持仓数量保持不变
+- 历史交易：TradeRow 增开仓时间列（8 列网格重排：开仓时间/平仓时间/币种/方向/开→平价/费·滑/原因/净盈亏），新增 TradeHeader 表头，fmtStamp（月-日 时:分:秒，title 完整时间+持仓分钟数）；排序下拉「按平仓时间」语义不变
+- 引擎单例 bump v7（auto-trader 行为变更必 bump：v6 旧实例在 globalThis 存活会使新退出规则热重载后不生效）；resetEnhancedEngine 同步改 v7
+- 测试：T18 END_PENDING 即离场（exitSignalJson 留证据）、T19 残留持仓 ENDED 异周期归属也离场、T20 重置（含充值后重置、positions/trades/meta/decisions 全清、balance=100/totalDeposited=0/peakEquity=0）；全量 42/42 绿；生产构建通过
+- 线上验证（agent-browser + curl，保护用户数据未在线上执行 reset/closeAll 确认）：三个弹窗均正常弹出/取消（截图 download/task55-{reset,closeall}-dialog.png、task55-history.png）；deposit 校验/setMaxPositions 同值 no-op 正常；live 证据——END_PENDING 中的 ARIA 持仓在引擎 v7 接管后 10s 内被「趋势结束」自动平仓（04:17:01），历史行双时间列渲染正确
 
 Stage Summary:
-- 页面恢复至 Task 36 最终形态：模拟盘（10U 合约规则）| 升级版异动交易（四池含冷却池）
-- 教训沉淀：平台快照可能回滚工作区——关键迭代后应立即 commit 并在 worklog 记录完整实现细节（本次依赖会话上下文完成无损重建）
+- 交付：① 三个操作确认全部页内弹窗化（不再有浏览器原生弹窗）② 机器人自动离场规则强化——END_PENDING 报警即走 + ENDED 周期归属不再设限，用户无需再人工兜底 ③ 重置按钮一键回到 100U 起跑线（清仓清历史清审计，ROI 基准归零）④ 历史交易开仓/平仓双时间列
+- 行为变更注意：END_PENDING 即平仓比 Task 54 的 3 根确认更快离场，可能牺牲「结束迹象消失恢复确认」场景的持仓连续性（同周期重开被幂等键阻断）——这是用户明确要求的风险换向，阈值 END_CONFIRM_BARS 仍保留在 lifecycle 供池内展示
+- 未验证假设：重置后从零重跑的统计口径（胜率/回撤）未做长期观察；reset 未在线上执行（破坏性），仅测试库 T20 覆盖
 
 ---
-Task ID: 38
-Agent: Super Z (main)
-Task: 三项 UI 迭代——删除均线支撑机会与大级别支撑/压力区块、平仓流水可点开、异动事件池标签标注触发时间
+Task ID: 55-3
+Agent: main
+Task: 开仓 sizing 修复——资金滚动变化导致每仓金额不一致/最后一笔「余额不足」开不出；历史交易点击币种看 K 线；推送远端
 
 Work Log:
-- scanner-view.tsx：移除 SignalList（均线支撑位机会）+ MajorLevels（大级别支撑·做多参考/大级别压力·做空参考）及顶部「机会扫描器」状态条（其数据源 useSignals 随信号区一并失去展示意义）；页签现仅保留 异动监控（一键交易）+ 模拟建仓系统
-- 删除孤儿组件文件 signal-list.tsx / major-levels.tsx（仅 scanner-view 引用，grep 确认无其他引用）；use-scanner.ts 的 useSignals/useLevels 保留（导出无害）
-- paper-panel.tsx：平仓流水改为折叠卡片——默认收起，标题行常显「条数 + 合计盈亏（红绿着色）+ 点开/收起 + 旋转箭头」；展开后流水每行改为 button，点击行打开对应币 K 线弹窗（onSelectSymbol 已有链路）；空仓文案去掉「大级别支撑」措辞
-- enhanced-view.tsx EventChip：第二行右侧新增触发时间 fmtHM(firstAt)（HH:MM），tooltip 同步追加「· 触发 HH:MM」；三池（P1/P2/冷却）标签统一生效
-- format.ts 新增 fmtHM()（zh-CN hour12:false hour/minute 2-digit）
-- 验证：tsc/eslint 对改动文件零错误（全仓 tsc 历史遗留报错与本次无关）；浏览器实证——模拟盘页签顶部即异动监控、平仓流水「1 合计 -1.76 U 点开」→ 展开行点击打开 SKL K 线弹窗 ✓；升级版页签 BLUR「-1.06% 证×3 01:53 单」、XRP/FET/PUMP 时间均显示 ✓；桌面+移动端截图正常（scripts/task37-enhanced-*.png、scripts/paper-flow-open.png）
-- 全程未重启 server（dev 热重载自动生效）
+- 根因分析（用户实测反馈 + 8 仓观察）：旧口径「可用余额 ÷ 剩余仓位数」每笔开仓重算目标保证金——已实现盈亏/强平/手续费令余额滚动变化，每仓金额不一致；另发现 setInterval 不等待 async 完成，tick 慢于 10s 时并发轮次按同一份旧余额重复开仓（资金双扣）
+- sizing v2（auto-trader.manageEntries，用户定版）：每仓目标保证金 = 账户权益 ÷ 持仓数量（金额由持仓数量唯一决定，权益不变时每仓金额一致）；clamp 保护 = maxOpenableMargin(可用余额, 杠杆)（与 PaperEngine.open 校验同源，margin+fee ≤ 余额），资金被打穿时自动降到可承受最大值——数学上保证永不因「余额不足」跳过；仅 clamp 后 < MIN_MARGIN 才跳过（真没钱）；成功开仓后同步维护 eq.equity（= balance+marginUsed+unrealized 自洽）
+- tick 重入锁：ticking 标志 + 60s 僵死兜底，并发轮次直接跳过（防双扣余额）；引擎单例 bump v7→v8（行为变更必 bump，旧实例热重载后不生效）
+- 历史交易 K 线（用户需求）：TradeRow 币种列可点击（stopPropagation，不干扰整行决策链详情），kline 状态扩展为 {symbol, row?} 双上下文——持仓卡 = 成本线/强平线/开仓标记；历史行 = 开仓价线+平仓价线（紫色）+「开」箭头/「平」圆点双时点标记；复用同一 CoinDialog(market=futures)
+- 文案同步：control route note/注释、头部说明、空持仓提示、换仓确认弹窗全部改为「账户权益 ÷ 持仓数量（余额不足时自动降到可承受最大值）」
+- 测试：T2/T17 改权益口径（T17 断言逐笔 equity 递减：49.50/49.26，偏差 <0.5 验证金额一致性）；新增 T21 滚动资金保护（首仓开出后把余额打穿到 5u，新周期第二笔照常开出且 clamp 到 4.95 = 5/1.01 而非跳过「可用余额不足」）；全量 43/43 绿；生产构建通过
+- 线上 8 仓实测（用户授权）：初始 4 仓 + 多个确认趋势排队（WLD/SIREN/BR/AGT 因「已达最大持仓数」跳过）；setMaxPositions=8 自动平 4 笔旧仓后，新仓 FIL/ICNT 各 13.64 = equity110.21÷8÷1.01 金额完全一致（偏差 0.0），skips 中「不足」类 0 条（全部为正常的先平后开守卫）；观察后恢复原 4 仓设置
 
 Stage Summary:
-- 模拟盘页签精简为「异动监控 + 模拟建仓系统」；平仓流水折叠化（默认收起不占空间，合计盈亏常显，行可点开 K 线）
-- 异动事件池全部代币标签右上角常显触发时间（HH:MM），与已结束池时间格式一致
+- 交付：sizing v2 = 权益÷持仓数量（金额一致、由持仓数量唯一决定）+ 余额 clamp（永不余额不足）+ tick 重入锁；历史交易币种点击看 K 线（开/平仓价线与时点标记）
+- 行为变更：每仓保证金语义从「余额÷剩余槽位」改为「权益÷持仓数量」——充值/盈亏后金额随权益联动是预期行为（每仓恒为权益的 1/N）；引擎 v8
+- 未验证假设：clamp 场景在极端连续强平下的表现（测试库 T21 覆盖单次打穿）；未做历史回放对比
 
 ---
-Task ID: 39
-Agent: Super Z (main)
-Task: 事件池标签时间改为「X 分钟前」相对格式（用户澄清 Task 38 的时间标注样式）
+Task ID: 55-4
+Agent: main
+Task: 60 条历史交易归因分析（用户反馈大部分平仓即亏损，要求总结亏损/盈利规律并对照当前开平仓方案，供用户参与优化决策）
 
 Work Log:
-- enhanced-view.tsx EventChip：第二行时间从 fmtHM(firstAt)（HH:MM）改为相对时间；tooltip 保留绝对时间「触发于 HH:MM」
-- 首版直接用 fmtAgo 输出「29 分钟前」，截图发现窄卡片内与「证×2」一起折行 → format.ts 新增 fmtAgoShort()（无空格紧凑版：刚刚 / 29分前 / 3时前）
-- EventChip 第二行整体加 whitespace-nowrap，chg/证/时间/确认四个 span 全部 shrink-0 防压缩折行
-- 验证：eslint 零错误；桌面截图 PUMP「9分前 待」、GTC「1分前 双」单行无折行；移动端 390px 同样正常；相对时间随页面 1 秒心跳自动跳动
+- 导出 trend-auto-v1 最近 60 条 CLOSED TrendTradeMeta（时间跨度 04:57–05:34 UTC，37 分钟，即上次 reset 后全部历史），join PaperPosition + 解析 signalAtOpen/exitSignalJson/featuresAtOpen
+- 拉取 Binance futures 1m K 线（限速后改为每 symbol 一次全窗口请求，23 symbols）计算逐笔 MFE/MAE（最大浮盈/最大浮亏，占保证金%）、入场前 5 分钟追价、趋势年龄
+- 决策时间线取证：TrendAutoDecision 逐笔对比开仓/平仓信号快照，定位「持仓数秒即 ENDED」的机制
+- 代码走读：lifecycle.ts 证据 A/B/C + END_CONFIRM_BARS、config.ts 阈值（minMovePct 0.35 / END_IDLE_TOL_MUL 2.5 → 衰减证据线 0.875%）、auto-trader manageExits END_PENDING 即刻离场
+- 产出分析脚本 6 个存 scripts/trend-analysis/（query-trades/analyze/mfe/final/evidence/race-check），中间数据 JSON 可复用
 
 Stage Summary:
-- 事件池三池标签时间样式定稿：「X分前」紧凑相对时间（自动刷新），悬停可见绝对触发时间
+- 核心数字：60 笔净 -43.98 U（胜率 17%，盈 25.30/亏 -69.28）；手续费 25.73 + 滑点 10.29 = 摩擦 36.02（占净亏 82%），纯价格亏损仅 -7.96；中位持仓 1.0 分钟；0-2 分钟组 47 笔 -41.58，10-20 分钟组 3 笔全胜 +12.67
+- 平仓归因：100% TREND_ENDED；45 笔 END_PENDING 第一根证据即离场（DECAY 32 笔 -19.18 / STRUCTURE_ER 10 笔 -10.38 / REVERSE_CANDIDATE 3 笔 -5.25）；14 笔秒级 ENDED（同根 K 线去重被 dataOk/null 交替打败，DECAY_CONFIRMED 可在 2.3 秒内凑满 3 根）
+- 「从赚到拿到亏」：28/50 亏损单浮盈曾覆盖摩擦成本；12 笔浮盈曾 ≥10% 保证金，峰值合计 69.88 U，最终实亏 -32.87 U
+- 开仓端缺陷：confirmCount 全部 3-5（确认瞬间追入）；ER<0.3 组 20 笔 -33.15；htfAgree=false 占 87% 照开 -37.92；score 55-70 组最差 -22.51；SHORT 37 笔 -35.79 明显差于 LONG
+- 结构性疑点（已代码定位待修）：证据 B 阈值 0.875% 与确认阈值 0.35% 缝隙过窄 → 弱趋势出生即带病；END_PENDING 即刻离场绕过了 END_CONFIRM_BARS=3 的防插针设计；stepLifecycle dataOk=false 路径 barTime=null 会产生一次伪 DECAY 证据
+- 结论已发用户（chat），等用户选定优化方向后实施；本轮未改任何生产代码
 
 ---
-Task ID: 40
-Agent: Super Z (main)
-Task: 两项调整——事件标签时间改为纯秒数（去「刚刚」/不显分钟）+ 已结束池只归档 MAJOR·曾达P1 事件
+Task ID: 56
+Agent: main
+Task: 趋势机器人亏损修复——P0 状态机 bug / P1 三根收盘K线确认+阈值迟滞 / P2 入场门槛+二次确认+冷却 / P3 统计采集 + A/B/C 历史回放报告（用户 11 节任务书）
 
 Work Log:
-- format.ts fmtAgoShort：改为纯秒数累计输出「{s}秒前」（原 刚刚/X分前/X时前 换挡制删除）；事件最长 30min→最长显示「1800秒前」，tabular-nums 10px 下宽度可控
-- enhanced-view.tsx：新增 endedShown = ended.filter(level==='MAJOR' && peakPriority==='P1')，已结束池渲染/计数/desc 全部切换到过滤后列表；desc 改「仅 MAJOR·曾达P1 · 保留最近 N 条」；空态文案「暂无 · 仅归档 MAJOR 且曾进入 P1 紧急池的事件」；服务端 ended 缓冲（400 条）保持全量记录不动，仅前端展示过滤
-- 验证：eslint 零错误；桌面截图——P2 池 NEAR 537秒前/TAO 387秒前/W 23秒前，已结束池 21 条全为「大」档（MUB/SKL/W 假突破、NVDAB/SKHYB/SOXLB/KORUB 有效突破等），MINOR「小」档全部过滤；移动端 390px 秒数单行无折行
-- 全程未重启 server
+- 实施前核对：lifecycle/config/auto-trader/repo/signal/paper/schema/tests 全读——确认 Task 56 主体代码已在上一会话落盘（lifecycle v2 重构含 barTime 顶层守卫/endEvidenceBarTimes 持久化去重/BIRTH_BAR 排除；config END_MOMENTUM_RATIO=0.6 迟滞；auto-trader manageExits v3=周期匹配+END_PENDING 只记 firstEndSignAt 不平仓+反向确认立即平；entryGateCheck=score/ER/5m15m 过滤；managePendings=等待新收盘K线二次确认（TrendPendingEntry 表）+5min 冷却（lastCloseAt）；updateOpenStats=MFE/MAE 逐 tick 增量；repo 14 个扩展列 PRAGMA 幂等补列；engine 单例 v9；schema.prisma 同步）
+- 验证补全：bun test 54/54 绿（T1-T28 + lifecycle 12 用例，覆盖任务书 §十 20 条验收：barTime=null 不计数/同bar去重/重启不重复/旧周期不关新仓(T19)/开仓bar不作结束证据(T22)/END_PENDING 不平(T18)/三根独立收盘K线(T23)/恢复重置(T24)/反向确认平旧仓/数据缺失不伪装(T7)/门槛过滤(T25)/中性严格门槛(T26)/等待bar只开一次(T27)/同周期不重复(T6)/冷却(T13)/20%保证金20x(T2)/多仓约束(T11)/费用滑点MFE/MAE强平(T28/T12)/暂停(T9)/手动盘回归(T1)）
+- typecheck 修复：tsconfig 加 "types":["bun-types"]（bun:test 声明缺失，错误 81→76 且全为存量 scripts/ 一次性脚本问题）；lifecycle.test.ts 179 行 Record→unknown 二段转换；engine.ts pickLegacyEngine 参数类型补全 v5-v9 全局声明
+- lint 干净；next build 成功（/trend-trading + 3 API 在列）；localhost:3000 三 API 200、lastError=null、20 信号评估中（server 未重启，引擎 v9 热重载接管）
+- 回放（§十）新建 scripts/replay/run-replay-t56.ts：A 基线=Task55 线上行为复现（END_PENDING 第一根证据即平+无过滤）/B 仅修 bug/ C=B+score≥70+ER≥0.4+HTF 过滤+二次确认+5min 冷却；12 标的 72h（Bybit/Gate），下一根开盘成交、双边费+滑点、逐仓强平、MFE/MAE 逐分钟增量
+- 回放排错 2 轮：①UTE 状态必须跨分钟累积（首次误传 new Map() → 0 笔）；②ER 是本项目 indicators 自算字段，误取 UTE assessment.features.efficiencyRatio（恒 undefined→0）导致 C 全拒——修为 features.efficiencyRatio（线上同源口径）
+- 回放结果：A 553 笔净 -81.70 回撤 90.1% 胜率 21.9%；B 684 笔净 -79.06（MFE 1.2→4.8% 但摩擦 158U——仅修 bug 不扭亏）；C 25 笔净 -8.99 回撤 22.8% 胜率 40% MFE 12.7%（LONG +7.68/56% vs SHORT -16.68/31%）；报告 scripts/replay/report-t56.md（含 §十 全部指标：交易频率/盈亏比/摩擦与价格分解/误判率/LONG-SHORT/波动分桶/币种分组）
+- 门槛可行性诊断（diag-score-dist.ts + 回放内统计）：9083 个 lifecycle 确认 bar 中 score≥70 仅 967（10.6%，p90=70）→ HTF 拒 369 → 96 待入场 → 25 开仓；ENTRY_MIN_SCORE=70 将使线上交易频率约 0.4 笔/小时（无异动+3 分时更严）——已写入报告警告，未擅自调参
+- 无法复现项如实注明：秒级误杀（10s 扫描数据竞态）、旧周期误杀（重启/乱序窗口）在严格时序回放中不可构造，A 的「第一根证据即平」已涵盖主要后果；未编造收益改善（C 仍为负）
 
 Stage Summary:
-- 事件池标签时间定稿为纯秒数格式（自动跳动，精确感知新鲜度）
-- 已结束池语义收窄为「重要事件归档」：仅 MAJOR 且曾进入 P1 紧急池的事件入库展示，MINOR/普通 P3 结束事件仅引擎内部记录
+- 交付：Task 56 全部规格验收通过（54 测试/typecheck 修复/lint/build/线上健康）+ A/B/C 回放报告 report-t56.md
+- 核心结论：①仅修状态机 bug 不改变亏损结局（低质量信号摩擦磨损是主因）；②入场过滤把亏损从 -79 收敛到 -9、回撤 90%→23%，但仍为负——不构成盈利能力证明；③SHORT 是主要拖累（与 60 笔归因一致），高周期对 SHORT 的约束是下一轮校准方向；④score≥70 门槛很严（p90=70），调频需回放校准
+- 未验证假设：C 的 25 笔为小样本；回放无法复现线上数据竞态类 bug；参数未经多周期稳健性验证
+- 遗留：remote 为空且无 token（旧 token 一次性已弃用，不持久化），Task 55-3 的推送远端待用户提供新凭证；线上机器人处于 PAUSED（用户此前设置），余额 66.31 未动
 
 ---
-Task ID: 41
-Agent: Super Z (main)
-Task: 升级版异动交易页签新增「持仓明细」面板（免切页签盯持仓涨跌）
+Task ID: 56-b
+Agent: main
+Task: 修复「无法重置/无法恢复交易」——Prisma SQLite 连接永久只读事件（用户报告 reset/resume 按钮全挂）
 
 Work Log:
-- lib/utils.ts 新增共享 pnlCls()（盈亏红绿着色），paper-panel.tsx 删本地同名函数改 import
-- paper-panel.tsx PositionsTable 导出（export）并新增 emptyHint 可选 prop（空态文案按页签语境定制）
-- 新建 src/components/enhanced/positions-panel.tsx：Card「持仓明细」——标题行含数量徽标 + 浮动盈亏/总权益/ROI 摘要（红绿着色）+「3 秒刷新 · 与模拟盘同账户」+ 金色「手动开仓」按钮；表体复用 PositionsTable（币对点开 K 线 / 一键平仓 / 强平价 / ROE 全功能）；空态文案「在上方事件池点买入做多/卖出做空，或点右上手动开仓」
-- 数据源 usePaperAccount（queryKey ['paper-account'] 3s 轮询，与模拟盘同 key 自动去重共享缓存）；useClosePosition 平仓后 toast + 缓存失效联动
-- enhanced-view.tsx：EnhancedView 底部（事件明细之后）挂 PositionsPanel；补 openManual()（此前仅 ScannerView 有，漏定义曾致 Runtime ReferenceError，dev overlay 定位后即修）
-- 验证：eslint 零错误；API 开 BTC 20x/2U 测试仓 → 升级页持仓明细实时显示（浮动盈亏 -0.01U/总权益 7.92U/ROI -20.80% 与模拟盘一致）→ 页内点「一键平仓」成功（toast「已平仓 BTC」+ 回空态）；桌面+移动端截图正常；期间冷却池吃进真实降级事件 SKHYB（曾P1 徽标）二次实证 Task 36 链路；测试仓已平掉，账户恢复 0 仓位
-- 全程未重启 server
+- 复现：POST /api/trend-trading/control {action:resume/reset} 均返回 1032 attempt to write a readonly database（resume=raw UPDATE、reset=deleteMany，所有写全挂；读正常）
+- 排除法定位：磁盘 7.1G 可用、db 目录/文件权限 z:z 可写、lsattr 无不可变位、bun:sqlite 直写 custom.db 成功——文件系统无问题，readonly 只存在于 dev server 进程内的 Prisma 连接
+- 根因推断：custom.db mtime 停在 07:02（平台自动快照时间点，git log 同刻有环境快照提交）——快照替换 db 文件 inode 后，进程内 Prisma 引擎旧连接持有失效 inode，写入被 SQLite 判 readonly 且永久不自愈
+- 修复（不重启 3000，单例 bump 纪律）：① src/lib/db.ts 单例 v2→v3（新 key 新建 PrismaClient，新 fd 指向现 inode；旧实例不 disconnect 自然淘汰）② engine 单例 v9→v10（autoTrader/trendWatch 持有旧 db 引用必须重建；pickLegacyEngine 链补全 v7/v8/v9 保证 K 线仓库携带不丢失）
+- 验证：resume → {"ok":true,"mode":"RUNNING"}（用户 07:02 前设的 PAUSED 已按其「恢复交易」意图恢复 RUNNING）；trendWatch 重建后 dbWrites 25/dbErrors 0（模型层写证实恢复）；池冷启动路径正常（断供超 15min 退池→探针重新积累，45s 后 pool 7/klineReqs 13）；54/54 测试绿、lint 干净、lastError=null
+- reset 未在线上实际执行（破坏性：清账户+历史），但其写路径（模型层 deleteMany/update + raw DELETE）与已验证的写同连接同权限——resume（raw 写）+ trendWatch upsert（模型写）双证实后可判定恢复
 
 Stage Summary:
-- 升级版页签闭环：事件池盯机会 → 事件明细看依据 → 持仓明细管仓位（涨跌 3s 刷新 + 一键平仓 + 手动开仓），不再需要切回模拟盘页签
-- PositionsTable 升级为跨页签共享组件（emptyHint 参数化）
+- 交付：只读连接事件修复（db v3 + engine v10），reset/resume 写路径全部恢复
+- 机制留痕：平台快照替换 db inode 会令运行中 Prisma 连接永久 readonly（读 OK 写挂）——未来再遇同症状（写报 1032 且文件可直写）直接 bump db 单例即可，无需重启
+- 状态：机器人 RUNNING（用户预期），余额 66.31 未动，60 笔历史保留；引擎冷启动重新积累趋势池属预期
 
 ---
-Task ID: 42
-Agent: Super Z (main)
-Task: 模拟盘手续费双边口径透明化（买入开仓手续费在流水中可见，平仓盈亏改为双边净额）
+Task ID: 57
+Agent: main
+Task: 入场算法重构——通用策略接口（可插拔）+「短周期套利 v1」（用户思路算法化：异动选币不问方向 / 1m 确认定多空+5m 背景分级 / 冲高及时套利 / 走弱先走、同周期走强再入场）+ UI 算法可选框（用户明确：本轮不回测）
 
 Work Log:
-- 用户反馈「币安买卖都有手续费，为什么这里没有买入时候的手续费」；核查 paper.ts 确认开仓费一直有收（开仓即从余额扣除 margin+fee，DB 中 OPEN 行 fee 合计 0.59），但两处展示缺口让它"隐形"：①Task 38 流水只显示平仓行，开仓行被过滤；②平仓行 pnl=毛盈亏-平仓费，未扣该仓开仓费，合计比余额变化虚高
-- paper.ts close()：netPnl 改为 毛盈亏-平仓费-开仓费（双边净额口径，对齐币安已实现盈亏含佣金）；position.pnl 同步净额；余额结算逻辑不变（开仓费开仓时已扣，不重复）
-- paper.ts snapshot()：新增按 positionId 批量取 openFee，平仓行 DTO 附带 openFee 字段；types.ts PaperTradeDTO 增 openFee?；LIQUIDATE 行保持原口径不动
-- paper-panel.tsx HistoryList：手续费列改显双边合计「手续费 0.153（含开仓 0.076）」（sm 以下只显合计，tooltip 展开明细）；移动端行列超宽问题修复——外层 overflow-auto + 内层 min-w-[520px] sm:min-w-0（窄屏横向滑动看全列，桌面布局不变）
-- trade-modal.tsx：计算区 4→6 格（新增「预估平仓手续费」）；脚注改「开/平仓双边均收 Taker 0.05%」；账户卡徽标同步「开/平双边」；useClosePosition 平仓 toast 注明「已扣开/平双边手续费」
-- scripts/migrate-close-pnl-net.ts：一次性迁移 8 条历史平仓行 pnl 回补扣除开仓费（迁移后 10+Σ平仓pnl=balance 严丝合缝：10-2.8377=7.1623）
-- 排查 dev 热更新失效：改 API 后响应不变，定位为 paperEngine 全局单例（globalThis.__binanceRadarPaper_v2）跨热更新复用旧类实例——bump key 至 _v3 重建实例（PaperEngine 无内存状态，安全）；这解释了此前"改服务端代码不生效"的现象
-- 验证：eslint 全绿；桌面 1440 流水每行显双边手续费、账户卡「费 1.18」=开0.59+平0.59、合计-2.84 与余额对账一致；移动 390 展开流水横向滑动正常；开仓弹窗 6 格布局正常；全程未重启 server
+- 用户思路逐条映射为算法（strategy/short-swing.ts 头注释逐条留痕）：①选币=异动候选池（策略不读 anomaly.dir 定方向）；②模式 A TREND_ALIGNED=1m 确认+5m 同向→趋势内波段（score≥60/ER≥0.35）；③模式 B RANGE_DIRECTION=5m 震荡/数据不足→1m 先行选向（严门槛 score≥70/ER≥0.45）；④5m 反向拒单（不做逆势，ALLOW_HTF_OPPOSED=false）；⑤WEAKNESS_EARLY=END_PENDING 同周期先走，走强（同周期 CONFIRMED+新收盘 K 线）按轮次再入场（#R2…上限 2，REENTRY_MIN_GAP_MS=60s）；⑥SPIKE_TAKE=浮盈+短窗（90s）顺向运动≥0.6%→及时落袋（对冲冲高回落/下杀拉回；SHORT 对称；基于 observe 标记价样本=当时可用数据，无未来泄漏）
+- 通用策略接口（strategy/types.ts）：TrendStrategy=evaluateEntry/evaluateExit/observe/nextRound/onOpen/onClose/exportState/importState/bindPersistence；AutoPaperTrader 只做基础设施（扫描/资金 20% 权益/20x/幂等/二次确认/冷却 5min/强平/MFE-MAE/ENDED 周期匹配/反向确认），策略全权决定方向与门槛；registry.ts 工厂表+未知 id 兜底默认（新增算法=实现接口+注册一行）
+- 轮次化：决策/待入场键 `{cycleId}#R{round}`（pending 主键/OPEN/CLOSE 决策 id 全链路）；TrendTradeMeta.entryRound 列；「每 symbol 一条 ACTIVE pending」防重 + CANCELED 重建（资金不足等暂时性取消不烧轮次）；resetAccount 清 TrendStrategyState
+- 持久化：TrendAutoConfig.strategyId 列（存量行回填）+ TrendStrategyState 表（策略每 symbol 轮次状态 JSON，onOpen/onClose 即时落库，重启恢复再入场语义）；setStrategyId=持久化+热装配实例（control API 先 closeAllManual 清场，同 setMaxPositions 模式）；tick 策略自愈（DB 配置≠实例→重装配）
+- UI：头部「算法」下拉（overview 返回 config.strategyId+strategies 注册表）+ AlertDialog 确认切换（说明新算法+自动平仓后果）；头部文案加当前算法名；hook 类型同步
+- 测试：新增 tests/trend-trade/strategy-short-swing.test.ts 13 用例（S1-S9：模式 A/B 门槛、逆势拒、相位拒、冲高套利 LONG/SHORT/负浮盈/幅度不足/持仓过短、WEAKNESS_EARLY 同异周期+可关、轮次全链路、gap、状态导入导出、参数声明）；auto-trader.test.ts 适配——T4/T18/T23/T24 改注入 WEAKNESS_EXIT_EARLY:false 保留 Task 56「END_PENDING 不平仓」验收语义，新增 T4b（默认策略 END_PENDING 提前离场→#R2 再入场全链路：entryRound=2 落库）；T25 门槛 60/0.35、T26 重写（5m 反对拒/INVALID 视同震荡严门槛/中性 70+0.45）、T27 轮次键断言、T21 轮次不烧毁
+- 修复过程中发现：①upsertMeta 加列后 VALUES 占位符 30→31（T2 大面积失败根因）；②closePosition 旧 meta 快照覆盖同轮写入的 firstEndSignAt（平仓前重读最新 meta）；③spikePct 采样相位对不齐丢窗（改为相对最新样本固定回看窗）
+- 存量 bug 修复（线上触发）：Task 54 raw SQL 建表 firstBarTime/firstSeenAt/entryBarTime/mfeAt/firstEndSignAt 为 INTEGER 声明，毫秒值（~1.79e12）超 int32 → Prisma 绑定报 Conversion failed；新增 migrateIntToBigint 幂等迁移（PRAGMA 检测→重建表整行拷贝→改名→重建索引），线上两表迁移完成、lastError 清零
+- 引擎单例 bump v10→v11（行为变更必 bump；pickLegacyEngine 链补 v10）；全量 68/68 测试绿（43 auto-trader + 13 策略 + 12 lifecycle）、eslint 干净、next build 成功
+- ⚠️ 环境事件（非本次改动所致）：构建/测试期间平台把环境回滚到 07:02 快照（cf62ac1）——dev server 进程消失、db/custom.db 回滚（trend-auto-v1 余额 66.31→100、60 笔历史/手动盘流水清零；测试全程用独立库 trend-trade-test.db 未触碰生产库）。已重启 dev server（原进程已死，恢复性启动非重启运行中实例）、备份回滚库 db/custom.db.rollback-backup-10170820
+- 线上验证：/api/trend-trading 返回 strategyId=short-swing-v1+strategies 列表；setStrategy 同值 no-op；skips 实时出现新策略审计（「1m 看空与 5m 背景（up）相反，短周期套利不做逆势」「评分 56 < 60」）；页面 200 含算法下拉
 
 Stage Summary:
-- 模拟盘费用模型与币安对齐且全程可对账：开仓扣 margin+开仓费 → 平仓回 margin+毛盈亏-平仓费 → 流水行显示双边合计费用与双边净额盈亏 → 合计盈亏+初始资金=当前余额（已实测零误差）
-- 发现并修复 dev 模式全局单例阻断服务端热更新的坑（bump 版本 key 解法），后续改 paperEngine 类方法后需再 bump
+- 交付：策略插件架构（types/registry/short-swing 三件套）+「短周期套利」算法（用户六条思路全落地）+ UI 可选框 + 轮次化再入场 + BIGINT 迁移；68 测试全绿；server 3000 已恢复运行（engine v11，策略运行中）
+- 红线遵守：纯模拟未动真实下单；手动盘零改动（账户隔离测试 T1 仍绿）；无固定止盈止损（SPIKE_TAKE 是价格行为离场非比例止盈）；20% 权益保证金+20x+冷却+强平全保留
+- 未验证假设（用户明确本轮不回测）：short-swing 全部阈值（60/0.35/70/0.45/0.6%/90s/2 轮）为工程初始参数，未做历史回放校准，不构成胜率声明；冲高检测粒度=SCAN_MS 10s（tick 采样），比 K 线收盘快但受限于扫描节奏；MAX_ROUNDS_PER_CYCLE=2 是防磨损上限非优化值
+- 遗留：平台回滚吞掉的 66.31 余额与 60 笔历史无法找回（快照即真值）；如需继续可先 reset 再观察新策略表现；后续新算法只需实现 TrendStrategy+注册
 
 ---
-Task ID: 43
-Agent: Super Z (main)
-Task: 排查「RSR 11:32 明显异动未监测到」——定位并修复 vol1m 全市场冻结导致的成片漏报
+Task ID: 57-b
+Agent: main
+Task: 短周期套利入场门槛下调——趋势起点入场（用户反馈：分数不要调那么高，高分=走势已成熟，起点分数不高）
 
 Work Log:
-- 复盘 11:32 RSR：拉币安 1m K 线还原——1m +2.21%（超 MAJOR 固定阈值 2.0）、5m +2.81%、量比 15×、qv1m 41.7K；自适应阈值复算（medAbs1m=0.297%）证明阈值当时就是固定值，SPIKE 本应 MAJOR 触发 → 问题在输入端
-- 发现 AnomalyEvent 表 0 行（enhanced 引擎纯内存缓冲），DB 无从回查；改用 API 缓冲 + 币安 K 线双源还原
-- 根因：collector.refresh24h 每 30s 拉全市场 24hr 差分每分钟成交额，但接受条件 dtMin>=0.7（42s）> 轮询间隔（30s）→ 差分几乎全被丢弃 → vol1m/volAvg20m 长时间冻结为旧值（实测 3.5 分钟 0 更新）→ 引擎在异动瞬间看到的是异动前的低量 → SPIKE（qv1m≥1万）与 VOLUME（qv1m≥5万）双双被门槛拦死；大币冻结值恰好高于门槛仍能靠价格触发，中小币成片漏报，VOLUME 检测器全天瘫痪
-- 修复：dtMin 窗口改 >=0.35（18s 下限防抖动，perMin 本就按 dtMin 归一化）；collector 单例 key bump v2
-- 踩坑与二次修复：dev 下 Turbopack 每个 API 路由可持有独立模块图，首版「无条件替换式」IIFE 把他图正在服务的实例定时器清掉，造成 tickers 路由数据冻结（updatedAt 卡 12:17:09）——改为「同 key 必复用」收敛式单例（跨图共享同实例，代码更新靠 bump key），touch 全部 17 个 route.ts 强制各图重估收敛，随后 ?reset=1 重挂增强引擎（K 线仓库保留）
-- 验证：修复前探针 3.5min vol1m 0 更新；修复后 BTC 6 次/RSR 7 次（平均年龄 14-19s、最大 57s）；实时抓到 RSR 12:34:16 MAJOR·P1（量比 21.3×，qv1m 5.0 万U，正是探针看到 49K 跳动的时刻），VOLUME 检测器全线复活（牛来 30×/SPCXB 51×/U 57×）；UI P1 池正常显示 RSR/牛来；eslint 全绿；全程未重启 server
-- 现在回看 11:32 RSR：vol1m 修复后 SPIKE 门槛（qv1m≥1万）可过 → 1m +2.21% 会以 MAJOR 触发；VOLUME 检测器 5 万门槛对 41.7K 仍拦（设计门槛，属 Task 32 阶段二分层校准范畴）
+- 实施前核对：strategy/short-swing.ts（SHORT_SWING 参数区 + evaluateEntry 门槛段）、config.ts、auto-trader.ts 引用关系、engine.ts 单例链、两份测试文件全读；grep 确认 Task 56 的 config ENTRY_MIN_SCORE/ENTRY_HTF_STRICT_* 自 Task 57 策略化后已无任何 src 引用（死参数）
+- 门槛下调（唯一生效入口 = 策略 SHORT_SWING）：模式 A ENTRY_MIN_SCORE 60→45（≈候选池入池线 40 上方一档，1m 确认瞬间通常可达）、模式 B NEUTRAL_MIN_SCORE 70→55（仍比 A 严一档，但按「起点可达」定线）；ER 门槛不动（0.35/0.45——防震荡磨损与「入场早」正交，用户只要求降分数）；审计文案「趋势波段门槛」→「趋势起点门槛」；策略头注释补 ⑦ 趋势起点入场哲学（用户原话留痕）+ UI description 同步
+- config.ts 清理死门槛常量（ENTRY_MIN_SCORE 70/ENTRY_MIN_ER 0.4/ENTRY_HTF_STRICT_*)，替换为指路注释（唯一调参入口在 SHORT_SWING，在此改不生效）
+- 存量 bug 顺手修复（typecheck 暴露 + 代码走读坐实）：closePosition 的 catch 块引用 try 内声明的 meta（Task 57 重读快照重构遗留）→ 非 PaperError 异常时 ReferenceError 而非预期「记录 skip 下轮重试」；改用入参 metaIn。策略测试 S6 pos side 补 as const（存量类型噪音）
+- 测试适配：S1b score 55→40、S2 bad 65→50、S9 断言 45/55；T25 score 55→40、T26 CCC 65→50 + 用例名 score≥55；全量 68/68 绿；改动文件 typecheck 干净；eslint 干净；next build 成功
+- 引擎单例 bump v11→v12（策略默认值变更=行为变更必 bump；pickLegacyEngine 链补 v11）
+- 线上验证（未重启 server，热重载+v12 接管）：skip 流出现「评分 53 < 55」（模式 B 新线，旧代码会显示 <70）证实新门槛生效；趋势池冷启动恢复 20 标的/6 确认/dbErrors 0/dbWrites 91；/trend-trading 页面 200；lastError=null；持仓 reconcile 正常
 
 Stage Summary:
-- 漏报主因修复：vol1m 差分窗口对齐 30s 轮询节奏，量能输入从「冻结假数据」变为 30s 级实时速率，SPIKE/VOLUME 两检测器的成交额门槛恢复判别力
-- 架构认知落档：Turbopack dev 每路由独立模块图 → 模块级单例必须「同 key 必复用」；paperEngine（v3）/collector（v2）均已按此模式，后续改这两个引擎代码需 bump key + touch 相关 route.ts
-- 遗留：VOLUME 5 万/分钟门槛对中小币偏严（RSR 类 15× 放量仍被拦）、自适应阈值倍数校准——归入 Task 32 阶段二
+- 交付：趋势起点入场门槛（A 45 / B 55）+ 死参数清理 + closePosition catch 作用域 bug 修复；68 测试全绿，v12 已接管
+- 行为预期：交易频率将显著高于 60/70 时代（Task 56 回放显示 score≥70 仅覆盖 10.6% 确认 bar，p90=70）——这正是用户要的实验方向；ER/5m 反向/轮次/冷却/二次确认等守门全部保留，磨损风险由这些非分数护栏兜底
+- 未验证假设：45/55 为用户「试一下」方向的工程取值，未经回放校准；若起点单频繁止损，下一档可调 ER 或再加「新周期 N 根内才允许低分」的时间窗条件
+- 观察 suggestion：数小时后可对比本轮 entryRound=1 的 score 分布与此前 60+ 区间盈亏差异
 
 ---
-Task ID: 44
-Agent: Super Z (main)
-Task: 排查并修复「持仓里面的价格没有变化」——paperEngine 闭包绑定 v1 僵尸 collector
+Task ID: 57-c
+Agent: main
+Task: 自动开仓参数控制台（用户可自行调参）+《参数说明书》docx（用户反馈入场滞后：如 ERA 等 4 根 K 线）
 
 Work Log:
-- 复现：/api/paper/account 两次调用 RSR 持仓 markPrice 恒为 0.002044（=entryPrice，upnl=0），而 /api/market/tickers 中 RSR 实时价 0.00217 且 updatedAt 毫秒级新鲜——collector 主实例是活的，唯独 paper 链路冻结
-- account 路由加临时探针（Task 42 已验证路由热重载可靠）：同请求内路由直读 collector 为 656 币种/RSR 0.002154/4.5s 新鲜，但 paperEngine.snapshot() 算出的 markPrice 仍是 0.002044 → 引擎读的不是同一个 collector
-- 根因：Turbopack 每路由独立模块图 + globalThis 单例跨代引用——paperEngine v3 实例创建于 Task 42（collector 重写之前），其类方法闭包绑定了当时模块图导出的 v1 collector；Task 43 修复时执行「v1 遗留停表」清掉 v1 定时器 → v3 引擎从此读僵尸实例（数据停在停表时刻 0.002044）。scanner/enhanced 引擎实测价格与 live 一致，仅 paper 中招
-- 修复两层：①collector.ts 新增稳定别名 __binanceRadarCollectorActive（单例解析的每个分支都刷新该别名，v2 复用与新建均指活跃实例）；②paper.ts markPrice() 改为调用时经 globalThis 别名动态解析 activeCollector()（别名缺失才回退模块绑定），并 bump paper key v3→v4 重建实例摆脱僵尸闭包；注释落档跨引擎引用规则
-- 验证：修复后 markPrice 0.002123→0.002125 实时跳动、upnl +7.64→+7.84、与 tickers 接口价一致；用户 RSR 多单真实浮盈 +8.42U/ROE +85.1% 得以显示（此前被冻结隐藏）；用户随后 04:53:56 手动平仓于实时价 0.002126，净盈亏 +7.7335U，对账 10+7.7224=17.7224 严丝合缝；eslint 全绿；桌面 1440 持仓面板截图两帧差异 bbox 证实持续刷新，移动端 390 空态正确（仓位已平）
-- 探针已还原，account 路由回到干净版；全程未重启 server
+- 延迟归因：4 根 K 线 = 1m 确认 3 根（TREND_WATCH.confirmObservations=3，平台状态机固定）+ 待入场二次确认 1 根（可关）+ 10s 扫描粒度——控制台把可安全开放的杠杆全部交给用户，确认根数保持固定（全局池语义）
+- 参数域设计（console-params.ts 唯一数据源）：13 个 PARAM_DEFS（分组/类型/范围/默认/含义/调大调小效果三合一文案）——策略域 11 项（SHORT_SWING 覆盖，按 strategyId 存 JSON map）+ 基础设施域 2 项（waitBarConfirm 开关列 + cooldownMs 列）；严格校验（写路径 sanitizeRuntimeParams：白名单/类型/范围，非法 400 中文报错）+ 宽松校验（读路径 lenient：脏数据逐键丢弃回退默认，不阻断交易循环）
+- 存储：TrendAutoConfig 加 3 列（strategyParamsJson/waitBarConfirm/cooldownMs，PRAGMA 幂等补列 + schema.prisma 同步）；repo.loadConfig 扩展 + updateRuntimeParams 动态白名单 SET
+- 热生效：applyStrategy 装配时解析 DB 覆盖传入 createStrategy(id, params)（registry 工厂签名扩展）；setRuntimeParams 持久化后重装配实例（轮次状态从 TrendStrategyState 恢复不丢）；基础设施参数每 tick 重读即时生效；resetRuntimeParams 一键回代码默认
+- 直开路径：manageEntries 按 waitBarConfirm 分支——关 = 策略达标当根直接开仓（快 1 根 K 线）；executeOpen 从 managePendings 抽取共享（容量/同币防御/权益20%测算/幂等抢占/开仓/meta/审计全同构，pending 与 direct 行为不分叉）；cooldownOf 统一冷却取值
+- API：overview config.params 返回 defs+生效值（overridden=值≠默认）；control 新增 setRuntimeParams/resetRuntimeParams
+- UI：trend-trade-view 头部「参数」按钮（带「改」角标）+ params-console.tsx 泛化渲染（分组/输入框/开关/单参数「默认」钮/恢复全部默认/保存并生效；表单仅打开时挂载——草稿不受 5s 轮询重置）；修复空仓文案残留「评分≥70/ER≥0.4」旧值
+- 测试：T29 校验拒绝与通过、T30 调参热生效（45→50 后新信号按新门槛评估）、T31 直开路径（当根开仓/无 pending/幂等键同构/重复扫描不开）、T32 cooldownMs=0 平仓后立即可再入、T33 恢复默认；73/73 全绿（首版 T30 因旧 ACTIVE pending 挡路误判，改「先拒后调再放行」流后绿）
+- 引擎单例 bump v12→v13；typecheck/lint 干净、next build 成功
+- 说明书：docx skill 全链（create 路由 + design-system R1 配方 + common-rules + docx-js-core + toc），R1+DM-1 封面 + 3 节结构（封面/目录罗马码/正文阿拉伯码）+ TOC 占位 22 条 + 页脚格式补丁（ROMAN/arabic）+ 空 pgNumType 清理；内容五章+附录（快速开始/入场链路与 4 根 K 线延迟拆解表/13 参数逐一详解含风险提示/激进保守两套调法对照/安全边界纪律/速查总表），15 页；postcheck 0 错误；LibreOffice 渲染目检封面/目录/正文/附录
+- 线上验证（未重启 server）：overview 13 参数返回正常；setRuntimeParams 试改（评分 50+关二次确认）→ 生效值与自定义标记正确 → 非法参数 400 报「不能超过 100」→ resetRuntimeParams 回 45/55 基线；agent-browser 实测控制台弹窗渲染（13 参数分组展示正常，截图 download/task57c-params-console-open.png）；lastError=null，持仓与历史正常（ERA/ICNT 的 SPIKE_TAKE/WEAKNESS_EARLY 流水可见）
 
 Stage Summary:
-- 持仓价格冻结根因修复：paperEngine markPrice 经 __binanceRadarCollectorActive 调用时动态解析，collector 未来 bump key 对 paper 透明，不再产生僵尸绑定
-- 架构规则落档：globalThis 单例引擎相互引用必须「调用时经稳定别名解析」，绝不能依赖模块图捕获的旧绑定；改 collector 代码 bump key 后无需再连带 bump 消费方引擎
+- 交付：参数控制台（13 参数热生效）+《趋势机器人自动开仓参数说明书.docx》（15 页，download/）；73 测试全绿；引擎 v13 运行中
+- 入场滞后的可调空间：关二次确认 = 快 1 根（第 4 根→第 3 根内）；确认 3 根为平台固定设计未开放（改它影响全部标的确认语义与趋势面板）；说明书 2.2 节以 ERA 为例逐根拆解
+- 未验证假设：激进/保守两组调法为组合示例未经回放校准；直开路径在线上默认关闭（基线未变），效果需用户实盘观察
+- 红线遵守：纯模拟；手动盘零改动；恢复全部默认后线上参数回到 57-b 基线（45/55/二次确认开/冷却 5min）
 
 ---
-Task ID: 45
-Agent: Super Z (main)
-Task: 对照完整需求规格书逐条核查增强异动引擎；修复 P1 时间语义（「进入P1时刻」起算）与 4 处文档违规
+Task ID: HOTFIX-1017
+Agent: 主 agent
+Task: 修复重启后全线 API 500（Module not found: 'universal-trend-engine'）+ Prisma client 回退
 
 Work Log:
-- 通读 enhanced 全部代码（config/detectors/aggregate/engine/klines/types/enhanced-view），逐条对照规格书十四节核查；检测节奏（SPIKE/BREAKOUT 2s、VOLUME 30s）、固定阈值、24h 滚动基准（完整已收盘 1m K线重算+15s缓存，无基准漂移）、聚合合并/冷却/结束、方向规则（§8.2-8.7 全部落地）、置信度分层、通知格式、有效性检查（±50%/80% 疑似复核 + DATA_ANOMALY）均合规
-- 量化「事件不多」：近 27 分钟引擎实际产出 60 个新事件（VOLUME 52/SPIKE 11/BREAKOUT 2），少的是「可见事件」——P1/P2 池常空、已结束池仅 6 条。三个根因：①MAJOR 急拉急跌因「方向不明→confirm=PENDING」被压 P3 不可见（27 分钟 3 个 MAJOR SPIKE 2 个被吞，违反§十「已确认的MAJOR急拉急跌→P1」）；②SPIKE 覆盖缺口——statsOf 对不在K线仓库的币返回 undefined 导致 265 个达标币只测 220 个（违反§三「历史不足退回固定阈值」）；③VOLUME 无方向放量按文档本就 P3 仅记录（合规，属设计）
-- 修复 4 处违规 + 时间语义：①priorityOf 放宽——MAJOR SPIKE（方向可不明）/有效突破/MINOR→MAJOR升级/MULTI 均进 P1（mergeInto 提前算 upgraded 传入 rejudge）；②statsOf 放开 store.has 限制——无K线币 medAbs=null 自动退回固定阈值（全市场 265 个达标币全覆盖）；③excluded.ts 补稳定币 base 集合（USDC/FDUSD/TUSD/USDP/DAI/USD1/USDE/USDS/PYUSD/AEUR/EURI/EUR/XUSD/BUSD，§2.1）；④detectVolume 暴露基线状态（NO_STORE/SHORT/INSUFFICIENT），engine.volumeTick 节流记录 BASELINE_INSUFFICIENT 日志（每标的 10min 一条，§五）
-- P1 时间语义（用户指出的核心）：types.ts EventDTO 新增 p1At（最近一次进入P1时刻，回落再升级会刷新）；aggregate.rejudge 检测 P1 晋级记 p1At；前端 EventChip 增 timeBase 参数——P1/冷却池传 p1At??firstAt、P2 保持 firstAt；已结束池行首绝对时间改 p1At，tooltip 完整时间线（触发于/进入P1/结束于）
-- 检查中新发现的违规：P2 条件 evidence.length>=2 允许同类型证据隔窗重复凑数（OGN MINOR 单类型证×1 进 P2）——违反§九「至少两个不同类型」；P2 改 distinctKinds>=2、VOLUME 升级条件同步改 new Set(prevKinds).size>1
-- 验证：scripts/verify-p1-rule.ts 单元断言 11/11 通过（MAJOR SPIKE 方向不明→P1、MINOR 单证据→P3、升级→P1+p1At、p1At 不反复刷新、NEUTRAL MAJOR→P3、同类型重复不凑数→P3、MINOR+异类型→P2）；?reset=1 重挂引擎（K线仓库保留 220/220）；eslint 全绿；截图实证 OGN 事件完整生命周期——P2(64秒前)→升P1(6秒前，金框高亮，p1At 语义)→回落P2(曾P1徽标，130秒前 firstAt 语义)；BASELINE_INSUFFICIENT 标记已在日志出现（币安人生USDT）
-- 全程未重启 server
+- 用户报 bug；curl /api/trend-trading 证实 500，dev.log 定位为 service.ts:19 Module not found: 'universal-trend-engine'
+- 排查：今天 10:44 宿主机整机重启（/tmp/boot-timeline.log），初始化流程重建 node_modules（10:44:09），但 file:./vendor/universal-trend-engine 的链接未恢复；vendor 源目录与 bun.lock 记录均完好
+- 修复①：bun install 补回 file: 依赖链接（未重启 server，Turbopack 下次编译自动恢复）
+- 连带发现②：重启同时把 node_modules/.prisma/client 打回旧快照（10:44:12 写入，缺 TrendWatchSymbol 模型）→ tests/trend-watch/repo.test.ts 类型化访问 client.trendWatchSymbol.deleteMany 报 undefined，3 个测试挂
+- 运行时为何没炸：trend-watch repo 全程 $queryRawUnsafe 原生 SQL，不依赖生成 client 的类型化模型（Task 53 埋的防御）；rg 证实 src 无任何 db.trendWatchSymbol 类型化引用
+- 修复②：bunx prisma generate 重生成标准 client（补回模型）；globalThis __radarPrisma_v3 单例保护运行中实例不受影响
 
 Stage Summary:
-- 可见事件恢复文档口径：MAJOR 急拉急跌/有效突破/升级事件全部进 P1 立即推送（方向不明不再吞事件），SPIKE 覆盖扩展至全市场 265 个达标币
-- P1/冷却/已结束池时间语义定稿：「进入P1时刻」起算（p1At），P2 池保持首次触发时间，tooltip 保留完整时间线
-- P2 门槛收紧为「不同类型第二证据」（§九），同类型重复触发不再凑数
-- 规格书阶段二遗留项不变：medQv1m 成交额分层统计量、VOLUME 5万门槛对中小币校准、自适应倍数回放校准
----
-Task ID: 46
-Agent: Super Z (main)
-Task: 排查「冷却池一直没东西」——冷却降级链路缺失（曾P1事件永不降出P1）+ 前端冷却池条件过窄
-
-Work Log:
-- 用户反馈冷却池一直为空；先拉引擎实时数据取证：BAT 事件 peak=P1/pri=P2/tend=UNKNOWN（曾达P1已回落方向不明）却挤在 P2 池——前端冷却池条件 priority==='P3' 收不到它；更关键的根因在后端 priorityOf：MAJOR 急拉事件 dto.level==='MAJOR'&&hasSpike 恒成立 → priority 永不回落，即使冲高回落/假突破也一直占 P1 池直到 90s 静默结束，「P3+曾P1」组合几乎不可能出现，冷却池成死路
-- 后端修复①（retrace/假突破冷却）：rejudge 提出 retraced=spikeRetraced(ev,snap) 到方向分支外（方向判定与冷却判定共用，同 snap 幂等）；priorityOf 新增 cooled 参数——cooled = peakPriority==='P1' && !boConfirmed && (retraced||boFalse) → 返回 P3；只约束「曾经热过现在凉了」的事件，新发生异动不受影响（MAJOR 急拉急跌发生即 P1 口径不变）；有效突破例外：回落未回区间前突破有效性由 FALSE 链路单独判定，不按回撤冷却
-- 后端修复②（动量衰减冷却）：sweep 新增——曾P1 仍挂 P1 的事件静默 ≥AGG.coolDownQuietMs（新增配置 45s，须<quietEndMs 90s）→ 先降 P3 进冷却池（peakPriority/p1At 保持，format 同步 headline）；到 90s 结束线照常结束归档 → 冷却池保有 45~90s 观察期；再触发（新证据 merge→rejudge）热度回归会重新达 P1 并刷新 p1At
-- 前端修复③：冷却池条件放宽为 priority!=='P1' && peakPriority==='P1' && tendency==='UNKNOWN'（回落途中 P2/P3 都算冷却，P2 只是过渡档位）；P2 池同步排除冷却事件不重复展示（!cooled.includes 引用比较安全——同源 filter）
-- 验证：scripts/verify-cooldown-rule.ts 单元断言 27/27 通过（回落进冷却+headline同步[P3]、创新高回P1+p1At刷新、假突破冷却、未达P1不冷却、有效突破回落仍P1、sweep 45s降冷却/90s结束、sweep降级后再触发回P1刷p1At、BAT场景P2+曾P1+UNKNOWN命中冷却条件）；旧规则 verify-p1-rule.ts 11/11 无回归；eslint 全绿
-- ?reset=1 重挂引擎（K线仓库保留）后真实事件即刻实证：TIA 突破确认进P1(06:38:02)→价格回到区间标假突破→新逻辑降出P1进冷却池→90s结束归档已结束池（行首显示进入P1时刻 06:38:02）；LUMIA 假突破降级后在冷却池稳定展示（曾P1金徽标+147秒前=p1At起算），事件明细完整（MAJOR/P3/曾达P1徽标、疑似假突破风险提示、方向不明隐藏交易按钮）；桌面1440+移动390截图正常
-- 全程未重启 server；用户验证期间自开的 LUMIA 20x 多单不受影响（账户对账自洽：总权益=余额+浮亏、ROI 相对初始资金）
-
-Stage Summary:
-- 冷却池从「死路」变「活水」：曾达P1 的事件现在有三条真实的降级路径进冷却池——冲高回落（retrace>振幅一半）、假突破（FALSE 标记）、动量衰减（静默45s），且热度回归自动重返P1并刷新 p1At
-- P1 池语义回归「紧急」：不再被已回落/已停触发的事件长期占位，异动发生即进、热度过即出
-- 池子流转全景：P1（紧急）→ 冷却池（曾P1+方向不明，45-90s观察期）→ 已结束池（MAJOR·曾P1归档）；P2 池只留方向仍明确的事件
----
-Task ID: 47
-Agent: Super Z (main)
-Task: 排查「模拟盘做空 ICP 一秒强平」——强平价公式在 MMR≥IMR 时数学退化（liq=开仓价，开仓即强平）+ 误强平损失还原
-
-Work Log:
-- 复现取证：DB 流水 OPEN_SHORT@07:30:32.954（ICP 价 3.195、qty=31,050.95、margin 4960.39、20x、名义 9.92 万U）→ 177ms 后 LIQUIDATE@3.195——强平价与开仓价完全相同、价格未动即被强平；账户余额被吞至 0.0061
-- 根因（两层叠加）：①逐仓强平价公式 空=E(1+IMR)/(1+MMR) 在 IMR=MMR 时分子分母相消，强平价=开仓价（mark≥liq 开仓瞬间成立）；20x 的 IMR=0.05 恰与 DEFAULT_TIERS 第 3 档（名义≤10万U）MMR=0.05 相撞——正是本单参数；②更糟的隐藏形态：旧第 4 档 MMR=0.1>IMR 时空单强平价低于开仓价/多单高于开仓价（开仓必然命中），即「20x+名义>10万U」任何空单都会开仓即强平。扫描证实 600 组合（1~20x×1千~100万U×多空）中 115 个违例
-- 修复①MMR 档位校准：DEFAULT_TIERS 5%/10% 两档（超出币安真实山寨水平）降至 0.5%/1%/2.5%/5%，对齐币安 USDT-M 真实档位；BTC/ETH 专属档位不动（最高 0.02 恒低于 20x IMR=0.05，无退化风险）
-- 修复②公式钳制防御：liqPriceFor 内 mmr=Math.min(mmrFor(symbol,notional), imr/2)——真实交易所通过限制大名义标的最大杠杆保证 IMR>MMR，模拟盘以 MMR≤IMR/2 钳制近似同一约束，强平价距开仓价至少半个初始保证金率的精确下界 (1±IMR)/(1∓IMR/2)；注释完整落档退化数学与修复原理；前端 trade-modal 与服务端同源自动生效
-- 验证：scripts/verify-liqprice-rule.ts 12/12——事故场景复现（ICP 修复后强平价 3.2729=+2.44%）、反转场景钳制（20x+20万U 空单 +2.44%/多单 −2.56%）、600 组合零违例、BTC 档位行为不变（−4.04% 精确值断言）；初版断言 4 处口径错误（IMR/2 当距离下界、注释抽查值当真值）修正后全绿
-- 损失还原 scripts/migrate-liqprice-fix.ts：ICP 仓 LIQUIDATED→OPEN、删除 LIQUIDATE 流水、退回保证金 4960.39（余额 0.0061→4960.40）、强平价按新公式重算 3.195→3.2729；全部存量 OPEN 仓位强平价重算（本单为唯一误强平，diag-all-liquidations.ts 扫描 LIQUIDATE 全表偏离=0.00% 确认）；API 复核：ICP 空单在持仓（mark 3.226、真实浮亏 −962.58/ROE −19.41% 为市价波动非 bug）、总权益 8958.21 对账自洽（可用 4960.40+保证金 4960.39+浮亏 962.58）；LIQUIDATE 流水无 balance 动作（保证金全损语义）确认账目自洽
-- eslint 全绿；全程未重启 server（futures.ts 前后端引用模块热重载生效；paper.ts 未改）
-
-Stage Summary:
-- 一秒强平根因修复：强平价公式增加 MMR≤IMR/2 钳制 + 山寨 MMR 档位校准至币安真实水平，1~20x×全名义×多空 600 组合强平价方向恒正确且距离≥钳制精确下界，退化/反转形态彻底杜绝
-- 用户 4960.39U 误强平保证金全额退回，ICP 空单原样恢复（含重算后的合理强平价 3.2729），后续按正常市价规则运作
-- 教训落档：公式类代码必须对参数边界做退化扫描（本次 IMR=MMR 的相撞是「合法输入参数」触发的数学边界，单元扫描比抽查更能拦住）
-
----
-Task ID: 48
-Agent: Super Z (main)
-Task: 按用户要求收紧「最大可开」——单仓保证金上限 50%（强平价公式冻结不动）
-
-Work Log:
-- 背景：Task 47 已修复强平价公式退化（MMR≤IMR/2 钳制）并退还误强平保证金；用户确认思路——「高仓位不能维持保证金导致的强平，那就把最大可开减少一点；强平价按币安规则就不用动」。本次只收紧开仓口径，强平价公式零改动
-- futures.ts（客户端/服务端同源）：新增 PAPER_MAX_MARGIN_RATIO=0.5 与 maxOpenableMargin(available, leverage)=min(余额×50%, 余额/(1+杠杆×费率)) 向下取整到分——前端「最大可开」展示与服务端拒绝阈值由本函数唯一提供，杜绝两处漂移；文件头规则行与 liqPriceFor 注释同步标注「Task 48 后公式冻结不动，风险控制由单仓上限承担」
-- paper.ts open()：在仓位数校验后新增单仓上限校验——margin > maxOpenableMargin(余额, 杠杆) 即拒绝，报错文案「超出单仓上限：保证金最高 X USDT（可用余额的 50%），可平仓回笼资金或充值后再开」；加仓合并场景同样只约束本次新增部分；单例 key bump v4→v5（无内存状态，重建安全）
-- trade-modal.tsx：maxMargin 改调同源 maxOpenableMargin（原为全额余额/(1+费率)）；错误文案改为「单仓上限为可用余额的 50%」；脚注补「单仓保证金上限50%」；修复预设档浮点伪影边界——balance×0.5 实算 2480.1999999999998 类值会低于分位上限导致 50% 档误报超限，presetMargin 与 maxOpenableMargin 均加 1e-9 伪影护栏后 floor
-- 单测 scripts/verify-position-cap.ts 13/13：基准值（事故级余额 4960.40→2480.20 / 初始 10→5.00 / 0/负数/NaN 边界）、160 组合扫描（20 杠杆×8 档余额：比例上限恒成立、手续费预留仍成立、分位取整、只紧不松）、满上仓强平最大损失=保证金≤余额一半、liqPriceFor 回归护栏（ICP 空 3.272927/多 3.115385/BTC 95.382153/500 万U 钳制 1.024390——Task 47 定稿值零漂移）；旧规则 verify-liqprice-rule.ts 12/12 无回归
-- API 实测（账户已重置为 10 USDT 干净态）：margin 6 @20x → 400 拒绝「保证金最高 5.00 USDT（可用余额的 50%）」；margin 5.01 → 拒绝；margin 5.00 贴边 → 成交（BTC 20x 名义 100U 强平价 80046.09=−4.62% 币安公式照常）→ 立即平仓还原，对账 10−0.1 费=9.90 严丝合缝
-- 浮点伪影 bug 为单测抓出（首版 3 断言失败：4960.4×0.5 floor 丢一分钱），修复后全绿——验证了「公式类代码必须做参数边界扫描」教训
-- 前端实证：手动开仓弹窗「可用 9.90 · 最大可开 4.95」，点「最大」档即 4.95（名义 99U，不再是全额 9.90→名义 198U），脚注「单仓保证金上限50%」；桌面 1440+移动 390 截图正常（scripts/task48-cap-*.png）
-- eslint 全绿；全程未重启 server（lib+组件热重载，paper key bump 后路由自动重建引擎实例）
-
-Stage Summary:
-- 「最大可开」语义变更：从「全额余额预留手续费」收紧为「可用余额 × 50%」——单仓被强平的最大损失=保证金≤可用余额一半，全仓梭哈一把打穿账户的形态彻底关闭；充值后上限随余额水涨船高
-- 强平价公式冻结：liqPriceFor 保持币安逐仓精确式（Task 47 定稿），回归护栏单测确保后续改动零漂移
-- 同源纪律：maxOpenableMargin 为前端展示与服务端校验的唯一真源，位于 futures.ts 防两处漂移
-
----
-Task ID: 49
-Agent: Super Z (main)
-Task: 按用户反馈放开单仓上限——从 50% 回到「几乎全仓」（余额预留手续费后可拉满），强平价公式继续冻结
-
-Work Log:
-- 用户反馈「50 也太少了 改成之前的几乎全仓的模式吧」；因 Task 48 已把上限做成同源常量，本次只改 PAPER_MAX_MARGIN_RATIO 0.5→1 一个数字：maxOpenableMargin 在比例=1 时手续费上限恒主导，数学上与初版公式 min 侧完全一致（余额/(1+杠杆×费率) 向下取整到分）；注释落档演变史（Task 48 收紧→Task 49 放开）与「未来再调只改一个数字」
-- paper.ts / trade-modal.tsx 报错文案与脚注条件化：比例<1 时显示「可用余额的 X%」与「单仓保证金上限X%」，=1 时回初版口径「需预留开仓手续费」且脚注不再显示比例字样
-- 单测 verify-position-cap.ts 重写为比例=1 口径 14/14：基准锚点（10→9.90、4960.40→4911.28、1x→4957.92、余额 3→2.97 仍可开）、160 组合与初版公式逐分一致 + 满上扣款 9.999≤10 真·拉满、liqPriceFor 护栏（ICP 空 3.272927/多 3.115385/BTC 95.382153/钳制 1.024390）确认 Task 48/49 两次改动零触碰强平价；verify-liqprice-rule.ts 12/12 无回归
-- 踩坑实证（API 层）：改 paper.ts 后首次实测服务端仍按 50% 拒绝（「保证金最高 4.95（可用余额的 50%）」）而前端已显示 9.80——单例 key 未 bump，v5 旧实例方法闭包绑着旧模块图的 50% 版 maxOpenableMargin，与 Task 44 僵尸 collector 同型。bump v5→v6 后立刻生效。教训强化：改 PaperEngine 类方法（哪怕只是方法内引用的纯函数版本）必须 bump key
-- API 三路径复测（余额 9.90）：9.81 → 拒「保证金最高 9.80 USDT（需预留开仓手续费）」；9.80 贴边 → 成交（BTC 20x 名义 196U 几乎全仓、强平价 79651.21=−4.62% 币安公式照常）→ 平仓还原，对账 9.9−0.196=9.704 自洽
-- 前端实证：「可用 9.90 · 最大可开 9.80」，「最大」档即 9.80（名义 196U），脚注恢复初版文案；桌面 1440+移动 390 截图（scripts/task49-fullmargin-*.png）；eslint 全绿；全程未重启 server
-
-Stage Summary:
-- 「最大可开」回到几乎全仓口径：单仓最高 = 余额预留开仓手续费后全额（与初版一致），PAPER_MAX_MARGIN_RATIO=1 保留为未来调节旋钮（改一个数字前后端+文案自动跟随）
-- 强平价公式连续两次改动（Task 48 收紧/Task 49 放开）零触碰，回归护栏单测持续锁死 Task 47 定稿值
-- 单例坑再实证：改引擎类方法引用的任何依赖都必须 bump key，前端正常≠服务端生效（两端热重载机制不同），API 实测不可省
+- 全部恢复：5 个关键 API + 2 个页面 200；引擎 RUNNING、心跳正常（trendSignalCount 1→2）、lastError 空；测试 73/73 全绿；server 3000 全程未重启
+- 结论：非代码 bug，属「环境整机重启 → node_modules 重建不完整」事故。两处修复均无代码改动、无引擎 bump
+- 遗留观察：db/custom.db.rollback-backup-10170050/10170820 为今日 10:17 生成的历史备份，非本次事故产物，暂不清理
