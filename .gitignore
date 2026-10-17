@@ -59,3 +59,5 @@ db/trend-watch-test.db
 .tmp-ute/
 db/trend-trade-test.db
 scripts/replay/data/
+tool-results/
+/*.png

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Task 69: 行号定位替换 enhanced-view.tsx 的 title 属性（绕开中文字面量不可见漂移）"""
+"""Task 70: 行号定位替换 enhanced-view.tsx 的 title 属性（绕开中文字面量不可见漂移）"""
 import io
 
 PATH = '/home/z/my-project/src/components/enhanced/enhanced-view.tsx'

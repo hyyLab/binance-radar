@@ -552,7 +552,7 @@ Stage Summary:
 - 唯一待恢复项：币安 IP 限流到期后行情采集自动恢复（无需人工干预）
 
 ---
-Task ID: deploy-2（Task 69）
+Task ID: deploy-2（Task 70）
 Agent: Super Z (main)
 Task: 修复「全站无数据 + 页面报错」——币安 418 封禁期白名单降级建池
 

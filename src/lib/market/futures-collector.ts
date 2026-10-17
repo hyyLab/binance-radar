@@ -72,7 +72,7 @@ interface VolSample {
 interface SourceState {
   instruments: InstrumentsMap;
   instrumentsAt: number;
-  /** Task 69：币安封禁期白名单降级标记（Bybit∩Gate 交集代管；真 exchangeInfo 到货后置 false） */
+  /** Task 70：币安封禁期白名单降级标记（Bybit∩Gate 交集代管；真 exchangeInfo 到货后置 false） */
   instrumentsDegraded: boolean;
   lastPriceAt: number;
   last24hAt: number;
@@ -225,14 +225,14 @@ export class FuturesCollector {
       // 418/429 同样按 retry-after 长挂起（instruments 撞墙也是撞墙）
       this.applyRateLimitSuspend(source, e);
       st.lastError = errMsg(e);
-      // Task 69：币安清单不可得时用 Bybit∩Gate 交集临时建池（白名单空 → 分片/聚合全停）
+      // Task 70：币安清单不可得时用 Bybit∩Gate 交集临时建池（白名单空 → 分片/聚合全停）
       if (source === 'binance') this.applyDegradedWhitelistIfNeeded();
       const wait = Math.max(60_000, st.suspendUntil - Date.now() + 5_000);
       setTimeout(() => void this.refreshInstruments(source), wait);
     }
   }
 
-  /** 币安封禁期品种池降级（Task 69）：Bybit ∩ Gate 交集代管白名单。
+  /** 币安封禁期品种池降级（Task 70）：Bybit ∩ Gate 交集代管白名单。
    *  背景：白名单本体 = 币安 exchangeInfo，币安 418 封禁期它也拿不到 → 白名单空 →
    *  assignShards/rebuildMerged 全停 → 全站无数据（实测封禁可达 18h+）。
    *  两所同时上线的 USDT 永续 ≈ 币安主流品种池（行情大差不差、异动方向一致），
@@ -501,7 +501,7 @@ export class FuturesCollector {
     return null;
   }
 
-  /** 重建聚合行情：白名单 = 币安 U 本位永续（封禁期降级为 Bybit∩Gate 交集代管，Task 69） */
+  /** 重建聚合行情：白名单 = 币安 U 本位永续（封禁期降级为 Bybit∩Gate 交集代管，Task 70） */
   private rebuildMerged(): void {
     this.applyDegradedWhitelistIfNeeded(); // 白名单为空时按两所交集临时建池（幂等，秒级开销）
     this.assignShards(); // 首次统计就绪时分配（幂等）
@@ -746,7 +746,7 @@ export class FuturesCollector {
 // bump 重建继承封禁状态不探针）。旧 3 分钟短挂起会反复撞墙，每次 418 刷新币安累犯
 // 计数、把封禁时长一路升级（实测 24h）。v3（Task 51 续）：K 线兜底「非币安优先，
 // 币安末位」+ klineReqs 计数 + isSharded 门控。v1/v2 已退役。
-// v5（Task 69）：币安封禁期白名单降级——Bybit∩Gate 交集代管品种池（白名单空则
+// v5（Task 70）：币安封禁期白名单降级——Bybit∩Gate 交集代管品种池（白名单空则
 // 分片/聚合全停、全站无数据），解封后真 exchangeInfo 到货自动覆盖回真白名单。
 const g = globalThis as typeof globalThis & {
   __binanceRadarFutures_v1?: FuturesCollector; // v1：全量币安供价（Task 50，已退役）
