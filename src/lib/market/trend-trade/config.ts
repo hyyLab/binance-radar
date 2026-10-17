@@ -12,15 +12,16 @@ export const TREND_TRADE = {
   // ===== 运行参数（DB TrendAutoConfig 行为运行时真值；此处为首次播种/重置的默认值） =====
   /** 初始资金（USDT）——可配置（DB initialCapital），界面明确展示 */
   INITIAL_CAPITAL: 100,
-  /** 每笔保证金比例（用户定版 §一.1/§六；Task 58 语义修订）：每次自动开仓使用
-   *  「开仓时账户权益 × min(本比例, 95% ÷ 持仓数)」作为初始保证金（权益 = 可用余额 +
-   *  已占用保证金 + 未实现盈亏，与模拟账户口径一致）。持仓数多时自动压缩单仓比例，
-   *  保证 maxPositions 个仓位实际开得满（用户反馈：设 8 仓只开出 4 仓就没余额——
-   *  8 × 20% = 160% 权益物理上不可能）。95% 头寸 = 预留 ~5% 给手续费与浮动亏损缓冲。
-   *  保证金 + 开仓手续费超出可用余额时直接跳过该笔并记录原因，不得变相提高杠杆/比例。 */
-  MARGIN_RATIO: 0.2,
-  /** 满仓头寸预算（Task 58）：全部 maxPositions 个仓位的保证金合计 ≈ 权益 × 本值，
-   *  剩余 ~5% 覆盖开仓手续费（20x 杠杆、费率 0.02% 下全部仓位开仓手续费 ≈ 权益 × 0.38%）与浮动亏损。 */
+  /** 每仓保证金占比上限（Task 65 用户定版语义修订）：实际生效比例 =
+   *  min(本上限, 95% ÷ (当前持仓数+1))——单一持仓时自动用满 95% 配额（开最大仓位），
+   *  并发持仓越多单仓自动越小（第 2 仓 47.5%、第 3 仓 31.7%…，动态槽位均分）。
+   *  要同时开满 N 仓，把本上限调到 ≤ 95%/N（如 8 仓 ≈ 0.12）。
+   *  95% 头寸 = 预留 ~5% 给手续费与浮动亏损缓冲。保证金 + 开仓手续费超出可用余额时
+   *  直接跳过该笔并记录原因，不得变相提高杠杆/比例。 */
+  MARGIN_RATIO: 0.95,
+  /** 满仓头寸预算（Task 58 建；Task 65 语义修订）：当前持仓槽位（已持仓数+1）的保证金
+   *  合计 ≈ 权益 × 本值，剩余 ~5% 覆盖开仓手续费（20x 杠杆、费率 0.02% 下开仓手续费
+   *  ≈ 权益 × 0.38%）与浮动亏损。 */
   MARGIN_SLOT_HEADROOM: 0.95,
   /** 持仓数量（最大同时持仓数）可选项（界面下拉） */
   MAX_POSITIONS_OPTIONS: [1, 2, 3, 4, 5, 6, 8] as const,
@@ -72,14 +73,16 @@ export const TREND_TRADE = {
 export type TrendAutoMode = 'RUNNING' | 'PAUSED' | 'STOPPED';
 
 /**
- * 单仓有效保证金比例（Task 58 用户反馈修复）：min(设定比例, 95% ÷ 持仓数)。
- * 持仓数 ≤ 4 时设定比例 20% 不触顶（行为与 Task 54 定版完全一致）；
- * 5/6/8 仓时自动压缩为 19% / 15.83% / 11.875%，保证满仓可开。
+ * 实际生效的每仓保证金比例（Task 65 动态槽位配额）。
+ * = min(用户上限, 95% ÷ (当前持仓数+1))——本仓占用第 openCount+1 个槽位：
+ * 单仓（openCount=0）→ min(cap, 95%)，cap=0.95 时即满配开最大仓；
+ * 并发越多槽位越碎（2 仓时新仓 47.5%、3 仓时 31.7%…），资金按剩余配额自动均分。
+ * openCount 异常（负数/NaN）按 0 处理（回退单仓槽位，绝不放大比例）。
  * 唯一消费点：auto-trader executeOpen 仓位测算（pending 转换与直开共用，单点生效）。
  */
-export function effectiveMarginRatio(marginRatio: number, maxPositions: number): number {
-  if (!(maxPositions > 0)) return marginRatio;
-  return Math.min(marginRatio, TREND_TRADE.MARGIN_SLOT_HEADROOM / maxPositions);
+export function effectiveMarginRatio(marginRatioCap: number, openCount: number): number {
+  const slot = Math.max(Math.floor(openCount) || 0, 0) + 1;
+  return Math.min(marginRatioCap, TREND_TRADE.MARGIN_SLOT_HEADROOM / slot);
 }
 
 /** 平仓原因（TrendTradeMeta.exitReason；细分的模型结束原因见 TrendTradeMeta.exitEndReason） */

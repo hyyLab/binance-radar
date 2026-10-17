@@ -447,3 +447,22 @@ Work Log:
 Stage Summary:
 - 交付：一页速成文档 docs/strategy-quickstart.md——用户可自助完成「新算法文件 → registry 注册 → PARAM_DEFS 注册 → bump 上线」全流程
 - 文档化最关键的两个坑：参数键必须带自己算法的前缀（全局索引撞名即坏短周期套利）；控制台 key 必须 = 参数常量的键（原样透传，对不上改了不生效）
+
+---
+Task ID: 65
+Agent: Super Z (main)
+Task: 每仓保证金动态槽位配额——用户定版「单一持仓时开最大仓位」（旧版单仓被静态 marginRatio=0.2 封死只开 20U）
+
+Work Log:
+- 实施前核实：effectiveMarginRatio 旧语义 = min(设定值, 95%÷maxPositions)（按目标仓数静态均分，Task 58）；单仓在场时同样被 0.2 封顶——资金利用率过低（用户实测 20U/100U 权益）；auto-trader L883 唯一消费点 + L973 日志 + L1131 marginBasis 审计串
+- config.ts：effectiveMarginRatio(marginRatioCap, openCount) = min(cap, 95%÷(当前持仓数+1))——本仓占用第 n+1 槽位，单仓（n=0）即 min(cap, 95%)，并发越多单仓自动越小（47.5%/31.7%/23.75%…）；退化入防 floor+负数/NaN 按 0（绝不放大比例）；MARGIN_RATIO 默认 0.2→0.95（单仓满配）；MARGIN_SLOT_HEADROOM 注释同步（95% 头寸语义不变：预留手续费+浮亏缓冲）
+- auto-trader.ts：调用点改传 eq.openCount（原 cfg.maxPositions）；slot 捕获进日志「min(上限,95%/槽位)」与 marginBasis 审计串（openDetail 签名加 slot）；头注释交易规则同步
+- repo.ts schema DEFAULT 0.2→0.95（新装一致）；console-params marginRatio 定义文案重写（新语义 + 「要 N 仓并发调 cap ≤ 95%/N」指引）；API fallback（overview/control/reset）自动跟随常量无需另改
+- 引擎单例 bump v16→v17（头注释/类型/legacy 链/getEngine/reset 五处；pickLegacyEngine 链补 v16 缺位——Task 62 遗留，v15 时代旧实例经 v16→v17 两跳交接）
+- 测试：T29a 重写为动态槽位配额表（单仓满配/槽位递减/上限封顶/退化入防 11 断言）；T17b 重写（cap=0.2 时不再按目标仓数压缩，maxPositions 只限并发不参与 sizing）；T2/T11/T14/T20 显式 seedConfig 钉住 0.2（容量/手动平仓/重置语义测试与默认值解耦）；T34 恢复默认断言改引用常量；92/92 全绿
+- 上线（未重启 server）：热重载后 v17 接管（startedAt 新鲜、lastError=null、lastTickAt 正常）；运行库 UPDATE TrendAutoConfig SET marginRatio=0.95（用户运行 maxPositions=1 + universal-trend-v1，空仓后首仓即权益 × 95% 满配）；overview 实测 effMarginRatio=0.475（1 仓在场 → 下一槽位 2 → 47.5%，公式线上自证）
+
+Stage Summary:
+- 交付：动态槽位配额 sizing——单一持仓开最大仓（权益 × 95%），并发自动均分剩余配额；「要 N 仓并发」由静态压缩改为用户自调上限（cap ≤ 95%/N）
+- 语义变化明示：marginRatio 从「每仓固定比例」变为「每仓占比上限」；0.95 + 20x 下单仓逆行 5% 即近爆仓线（纯模拟环境如实呈现，强平机制兜底）；余额不足时跳过不变通（原红线保持）
+- 未验证假设：满配单仓在高波动 1m 行情的强平频率未回放校准；两笔并发（47.5%×2=95%）恰好触顶预算，手续费可能挤掉第二仓（跳过并记录，可接受）

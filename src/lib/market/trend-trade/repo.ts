@@ -211,7 +211,7 @@ export async function ensureTrendTradeSchema(client: RawClient = db): Promise<vo
       "name"          TEXT    NOT NULL UNIQUE,
       "mode"          TEXT    NOT NULL DEFAULT 'RUNNING',
       "initialCapital" REAL   NOT NULL,
-      "marginRatio"   REAL    NOT NULL DEFAULT 0.2,
+      "marginRatio"   REAL    NOT NULL DEFAULT 0.95,
       "leverage"      REAL    NOT NULL DEFAULT 20,
       "maxPositions"  INTEGER NOT NULL DEFAULT 3,
       "slippageBps"   REAL    NOT NULL DEFAULT 2,

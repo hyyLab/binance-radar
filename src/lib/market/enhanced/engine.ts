@@ -496,6 +496,10 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v17（Task 65）：每仓保证金动态槽位配额——用户定版「单一持仓时开最大仓」。
+//   effectiveMarginRatio(marginRatioCap, openCount) = min(cap, 95%÷(当前持仓数+1))：
+//   单仓自动用满 95% 配额（不再被目标仓数静态均分封死 20%）；并发越多单仓自动越小。
+//   MARGIN_RATIO 默认 0.2→0.95（单仓满配）；DB 存量行同步 UPDATE。改行为必 bump key。
 // v16（Task 62）：通用趋势引擎算法化——最开始的 Universal Trend Engine（vendor 包，
 //   系统唯一趋势信号源）整理为可插拔算法 universal-trend-v1 注册进 STRATEGY_FACTORIES
 //   （确认即顺势 / 无评分·ER·5m 门槛 / 走弱先走 ≤2 轮；默认算法仍 short-swing-v1 不变，
@@ -569,6 +573,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v14?: EnhancedEngine;
   __binanceRadarEnhanced_v15?: EnhancedEngine;
   __binanceRadarEnhanced_v16?: EnhancedEngine; // v16（Task 62）：注册通用趋势引擎 universal-trend-v1
+  __binanceRadarEnhanced_v17?: EnhancedEngine; // v17（Task 65）：每仓保证金动态槽位配额（单仓满配）
 };
 
 function pickLegacyEngine(
@@ -586,11 +591,13 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v11?: EnhancedEngine;
     __binanceRadarEnhanced_v12?: EnhancedEngine;
     __binanceRadarEnhanced_v13?: EnhancedEngine;
-    __binanceRadarEnhanced_v15?: EnhancedEngine;
     __binanceRadarEnhanced_v14?: EnhancedEngine;
+    __binanceRadarEnhanced_v15?: EnhancedEngine;
+    __binanceRadarEnhanced_v16?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v16 ??
     g.__binanceRadarEnhanced_v15 ??
     g.__binanceRadarEnhanced_v14 ??
     g.__binanceRadarEnhanced_v13 ??
@@ -636,20 +643,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v16;
+  const existing = g.__binanceRadarEnhanced_v17;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v16 = fresh;
+  g.__binanceRadarEnhanced_v17 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v16 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v17 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v16 = fresh;
+  g.__binanceRadarEnhanced_v17 = fresh;
   return fresh;
 }
