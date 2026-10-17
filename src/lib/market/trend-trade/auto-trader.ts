@@ -4,8 +4,9 @@
 //
 // 规则（用户定版）：
 // - 独立账户 trend-auto-v1（PaperAccount.name 隔离；手动 default 盘完全不受影响）
-// - 开仓：确认趋势（CONFIRMED_UP/DOWN）才开；Task 55 sizing = 可用余额 ÷ 剩余仓位数
-//   （持仓数量界面可选，更换时自动平仓原有持仓；分子预留开仓手续费）；
+// - 开仓：确认趋势（CONFIRMED_UP/DOWN）才开；Task 55-3 sizing = 权益 ÷ 持仓数量
+//   （每仓金额一致、由持仓数量唯一决定；余额不足时 clamp 到可承受最大值，
+//   永不因资金滚动变化/余额不足跳过）；更换持仓数量自动平仓原有持仓；
 //   杠杆固定 20x；同一趋势周期只允许一笔（决策键幂等）
 // - 不设固定止盈止损：模型判断趋势有问题即自行平仓（Task 55 用户定版，不让人工兜底）——
 //   END_PENDING（结束迹象：反向候选/深回撤/结构失效）立即离场，不等确认根数；
@@ -22,7 +23,7 @@
 
 import { db } from '@/lib/db';
 import { PaperError, PaperEngine, paperEngineFor } from '../paper';
-import { TAKER_FEE } from '../futures';
+import { TAKER_FEE, maxOpenableMargin } from '../futures';
 import type { UnifiedTrendSignal } from '../trend-watch/signal';
 import { TREND_TRADE, type TrendAutoMode, type TrendExitReason } from './config';
 import {
@@ -208,8 +209,17 @@ export class AutoPaperTrader {
   // ============ 主循环 ============
 
   /** 单步主循环：public 以便测试/回放驱动（生产由 SCAN_MS 定时器调用） */
+  // 重入保护（Task 55-3）：setInterval 不等待异步完成——上一轮 tick 未跑完（行情/DB
+  // 慢）时下一轮并发执行，会按同一份旧余额重复开仓（资金双扣 → 后续仓位「可用余额
+  // 不足」）。60s 僵死兜底：异常挂起时不永久卡死主循环。
+  private ticking = false;
+  private tickStartedAt = 0;
+
   async tick(): Promise<void> {
     if (this.stopped) return;
+    if (this.ticking && Date.now() - this.tickStartedAt < 60_000) return;
+    this.ticking = true;
+    this.tickStartedAt = Date.now();
     try {
       const now = Date.now();
       this.lastTickAt = now;
@@ -242,6 +252,8 @@ export class AutoPaperTrader {
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
       console.warn('[trend-auto] tick 失败：', this.lastError);
+    } finally {
+      this.ticking = false;
     }
   }
 
@@ -413,24 +425,23 @@ export class AutoPaperTrader {
         }
       }
 
-      // 仓位测算（Task 55 用户定版）：每仓目标保证金由「持仓数量」决定——
-      // 可用余额按剩余仓位数平均分配；分子预留开仓手续费（margin×杠杆×taker），
-      // 否则最后一仓因 margin+fee>可用余额永远开不出。分母用剩余仓位数：
-      // 已占用的仓位不再重复分钱，每次开仓天然填满一个槽位。
-      // （开仓时点余额即「当时权益中可动用的现金」；已实现盈亏会随余额滚动计入，
-      //  浮动盈亏不影响未开槽位的分配——保守口径）
-      const remainingSlots = Math.max(1, cfg.maxPositions - eq.openCount);
-      const targetMargin = floor2(eq.balance / remainingSlots / (1 + cfg.leverage * TAKER_FEE));
-      if (targetMargin < TREND_TRADE.MIN_MARGIN) {
-        await this.recordSkipDb(signal.symbol, cycleId, `权益不足：目标保证金 ${targetMargin} < ${TREND_TRADE.MIN_MARGIN}`);
-        continue;
-      }
+      // 仓位测算（Task 55-3 用户定版 v2）：每仓目标保证金 = 账户权益 ÷ 持仓数量——
+      // 金额由持仓数量唯一决定（权益不变时每仓金额一致），不再随前面仓位占用/资金
+      // 滚动变化而漂移（旧口径「可用余额÷剩余仓位数」每次重算金额不一致，资金滚动后
+      // 最后一笔可能按偏大目标开不出）。分子预留开仓手续费（margin×杠杆×taker）。
+      // 余额保护：已实现盈亏/强平/手续费令可用余额暂时不足时，clamp 到余额能承受的
+      // 最大值（margin+fee ≤ 余额，与 PaperEngine.open 校验同源），保证永不因「余额
+      // 不足」跳过；仅 clamp 后仍低于单笔最小保证金才跳过（真没钱了）。
+      const feeFactor = 1 + cfg.leverage * TAKER_FEE;
+      let targetMargin = floor2(eq.equity / cfg.maxPositions / feeFactor);
+      const maxAffordable = maxOpenableMargin(eq.balance, cfg.leverage);
+      if (targetMargin > maxAffordable) targetMargin = maxAffordable;
       const fee = targetMargin * cfg.leverage * TAKER_FEE;
-      if (targetMargin + fee > eq.balance) {
+      if (targetMargin < TREND_TRADE.MIN_MARGIN) {
         await this.recordSkipDb(
           signal.symbol,
           cycleId,
-          `可用余额不足：需 ${targetMargin.toFixed(2)} + 手续费 ${fee.toFixed(2)}，可用 ${eq.balance.toFixed(2)}`,
+          `权益不足：每仓目标保证金 ${targetMargin}（权益 ${eq.equity.toFixed(2)} ÷ ${cfg.maxPositions} 仓）低于最小保证金 ${TREND_TRADE.MIN_MARGIN}`,
         );
         continue;
       }
@@ -484,6 +495,7 @@ export class AutoPaperTrader {
         eq.openCount += 1;
         eq.marginUsed += targetMargin;
         eq.balance -= targetMargin + fee;
+        eq.equity -= fee; // equity = balance + marginUsed + unrealized 自洽（开仓瞬时浮亏≈0）
       } catch (e) {
         if (isTransientOpenError(e)) {
           // 行情暂时不可用：释放决策（下轮同周期可重试）
@@ -508,9 +520,9 @@ export class AutoPaperTrader {
       lastBarTime: signal.lastBarTime,
       margin,
       leverage: cfg.leverage,
-      /** Task 55：sizing = 可用余额 ÷ 剩余仓位数（由持仓数量决定，平均分配） */
+      /** Task 55-3：sizing = 权益 ÷ 持仓数量（平均分配、金额一致；余额不足时 clamp 到可承受最大值） */
       positionSlots: cfg.maxPositions,
-      marginBasis: 'balance/remainingSlots',
+      marginBasis: 'equity/maxPositions (clamped to affordable)',
       volRegime: signal.features.volRegime,
       atrPct: signal.features.atrPct,
       efficiencyRatio: signal.features.efficiencyRatio,

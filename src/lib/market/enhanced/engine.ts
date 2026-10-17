@@ -496,6 +496,9 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v8（Task 55-3）：AutoPaperTrader sizing v2（每仓 = 权益÷持仓数量，余额不足 clamp）
+//   + tick 重入锁（防 setInterval 并发轮次双扣余额）。改行为必 bump key；旧实例 stop()
+//   会同步停掉 autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
 // v7（Task 55-2）：AutoPaperTrader 退出管理 v2（END_PENDING/ENDED 任意周期归属即自行平仓）
 //   + resetAccount（重置账户到 100 U）。改行为必 bump key；旧实例 stop() 会同步停掉
 //   autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
@@ -510,6 +513,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v5?: EnhancedEngine;
   __binanceRadarEnhanced_v6?: EnhancedEngine;
   __binanceRadarEnhanced_v7?: EnhancedEngine;
+  __binanceRadarEnhanced_v8?: EnhancedEngine;
 };
 
 function pickLegacyEngine(g: typeof globalThis & {
@@ -555,20 +559,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v7;
+  const existing = g.__binanceRadarEnhanced_v8;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v7 = fresh;
+  g.__binanceRadarEnhanced_v8 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v7 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v8 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v7 = fresh;
+  g.__binanceRadarEnhanced_v8 = fresh;
   return fresh;
 }

@@ -17,7 +17,7 @@ export const dynamic = 'force-dynamic';
  * - close    ：平掉单笔持仓（body.positionId）
  * - deposit  ：给机器人账户充值（Task 55：增加可用余额与 ROI 本金基数，不计入盈亏）
  * - setMaxPositions：设置持仓数量/最大同时持仓数（Task 55：可选；更换时自动平仓
- *   原有持仓，每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配）
+ *   原有持仓，每仓保证金 = 账户权益 ÷ 持仓数量 平均分配，余额不足时自动降到可承受最大值）
  * - reset    ：重置机器人账户（Task 55：按标记价平掉全部持仓并清空持仓/流水/趋势关联
  *   与决策审计，资金回到初始 100 USDT、ROI 本金基准归零；运行模式与持仓数量保持不变）
  *
@@ -115,7 +115,7 @@ export async function POST(req: Request) {
           skipped: closed.skipped,
           note: `持仓数量已设为 ${value}；已自动平仓 ${closed.closed} 笔原持仓${
             closed.skipped > 0 ? `（${closed.skipped} 笔暂时未能平仓，将在下轮巡检重试）` : ''
-          }。每仓保证金改为「可用余额 ÷ 剩余仓位数」均分，新确认趋势按新口径开仓`,
+          }。每仓保证金改为「账户权益 ÷ 持仓数量」均分（余额不足时自动降到可承受最大值），新确认趋势按新口径开仓`,
         });
       }
       // Task 55：重置机器人账户——先按标记价正常平掉全部持仓，再清空持仓/流水/趋势

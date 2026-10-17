@@ -1,12 +1,13 @@
 // ---------- 趋势自动模拟交易 · 行为测试（bun test，独立测试库 + fake 注入） ----------
 // 覆盖任务 §七 12 项要求中可自动化验证的全部场景（页面展示用截图人工核验）：
-// 1) 手动账户隔离  2) 余额÷仓位数均分开仓（持仓数量可选）+ 20x  3) 未确认不开仓  4) 短暂反向不提前平仓
+// 1) 手动账户隔离  2) 权益÷持仓数量均分开仓（余额不足 clamp 保护）+ 20x  3) 未确认不开仓  4) 短暂反向不提前平仓
 // 5) 趋势结束/反向确认正确离场  6) 同一趋势信号不重复开仓（含重启）
 // 7) 数据过期不开仓、不误判结束  8) 手续费/滑点/净盈亏口径
 // 9) 暂停后不开新仓但持仓仍受监控（含强平）  10) 重启恢复持仓关联（reconcile）
 // 11) 最大持仓数与保证金限制  12) 强平记录正确；附：先平后开独立性、人工平仓/全部平仓、
 //     充值（Task 55）、持仓数量变更持久化（Task 55）、
-//     结束迹象即自行平仓/残留持仓自行离场/重置账户（Task 55-2）
+//     结束迹象即自行平仓/残留持仓自行离场/重置账户（Task 55-2）；
+//     滚动资金保护：余额被打穿后新仓 clamp 到可承受最大值而非跳过（Task 55-3）
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
@@ -282,7 +283,7 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     expect(accounts[0]!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL); // 初始资金来自配置（可配）
   });
 
-  test('T2 开仓 sizing：每仓保证金 = 可用余额 ÷ 剩余仓位数（均分，预留手续费），杠杆 20x', async () => {
+  test('T2 开仓 sizing：每仓保证金 = 账户权益 ÷ 持仓数量（均分，预留手续费），杠杆 20x', async () => {
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
     const trader = makeTrader([sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP' })], engine);
@@ -290,7 +291,7 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     await trader.tick();
     const rows = await openPositions();
     expect(rows.length).toBe(1);
-    // 100 余额 ÷ 4 仓 ÷ (1 + 20x×taker0.05%) 预留开仓手续费 → floor2
+    // 权益 100 ÷ 4 仓 ÷ (1 + 20x×taker0.05%) 预留开仓手续费 → floor2（无持仓时权益=余额）
     const expectMargin = Math.floor((100 / 4 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
     expect(rows[0]!.margin).toBeCloseTo(expectMargin, 2);
     expect(rows[0]!.leverage).toBe(20);
@@ -601,13 +602,47 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     await trader.tick();
     const rows = await openPositions();
     expect(rows.length).toBe(2);
-    // 两仓均 ≈ 余额一半（首仓 100/2/1.01 = 49.50；次仓按剩余余额/1 仍 ≈ 49.50）
-    const expectMargin = Math.floor((100 / 2 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
-    for (const r of rows) expect(r.margin).toBeCloseTo(expectMargin, 1);
+    // 每仓 = 权益 ÷ 持仓数量（2）：首仓 100/2/1.01 = 49.50；次仓权益递减一笔手续费后重算
+    const floor2 = (v: number) => Math.floor((v + 1e-9) * 100) / 100;
+    const m1 = floor2(100 / 2 / (1 + 20 * TAKER_FEE));
+    const m2 = floor2((100 - m1 * 20 * TAKER_FEE) / 2 / (1 + 20 * TAKER_FEE));
+    const bySymbol = new Map(rows.map((r) => [r.symbol, r]));
+    expect(bySymbol.get('BTCUSDT')!.margin).toBeCloseTo(m1, 2);
+    expect(bySymbol.get('ETHUSDT')!.margin).toBeCloseTo(m2, 2);
+    // 两仓金额几乎一致（差异仅为一笔手续费的权益递减，金额不随资金滚动漂移）
+    expect(Math.abs(m1 - m2)).toBeLessThan(0.5);
     // 仓位数改小后不会超过新上限：第三笔同价新周期不应开仓
     const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
     const openNow = await client.paperPosition.findMany({ where: { accountId: acc!.id, status: 'OPEN' } });
     expect(openNow.length).toBe(2);
+  });
+
+  test('T21 滚动资金保护（Task 55-3）：余额被打穿后新仓 clamp 到可承受最大值，永不因「可用余额不足」跳过', async () => {
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    engine.marks.set('ETHUSDT', 50);
+    const signals: UnifiedTrendSignal[] = [
+      sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:921' }),
+    ];
+    const trader = makeTrader(signals, engine);
+    await trader.ensureStarted();
+    await trader.tick();
+    let rows = await openPositions();
+    expect(rows.length).toBe(1); // 首仓按 权益100÷4仓 开出
+    // 模拟资金滚动变化（已实现亏损/强平损耗把余额打穿到 < 权益÷N 的目标保证金）：
+    // 此时权益 = 5 + 24.75(占用) ≈ 29.75，目标 29.75/4/1.01 ≈ 7.36 > 余额可承受 5/1.01 ≈ 4.95
+    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+    await client.paperAccount.update({ where: { id: acc!.id }, data: { balance: 5 } });
+    // 新确认趋势（新周期）下一轮 tick 开仓
+    signals.push(sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_UP', cycleId: 'ETHUSDT:L:922' }));
+    await trader.tick();
+    rows = await openPositions();
+    expect(rows.length).toBe(2); // 第二笔照常开出（旧口径此处会跳过「可用余额不足」）
+    const second = rows.find((r) => r.symbol === 'ETHUSDT')!;
+    // clamp 到余额能承受的最大值（margin+fee ≤ 余额，与 PaperEngine.open 校验同源）
+    const clamped = Math.floor((5 / (1 + 20 * TAKER_FEE) + 1e-9) * 100) / 100;
+    expect(second.margin).toBeCloseTo(clamped, 2);
+    expect(second.margin).toBeGreaterThanOrEqual(TREND_TRADE.MIN_MARGIN);
   });
 
   test('T18 结束迹象即自行平仓（Task 55-2）：END_PENDING 不再等确认根数，机器人自行离场', async () => {

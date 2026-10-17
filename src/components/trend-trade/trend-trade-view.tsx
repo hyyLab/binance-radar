@@ -216,14 +216,22 @@ function PositionCard({
 
 // ============ 历史明细行 ============
 
-function TradeRow({ t, onDetail }: { t: TrendTradeRow; onDetail: (id: string) => void }) {
+function TradeRow({
+  t,
+  onDetail,
+  onKline,
+}: {
+  t: TrendTradeRow;
+  onDetail: (id: string) => void;
+  onKline: (t: TrendTradeRow) => void;
+}) {
   const exitLabel = EXIT_REASON_LABEL[t.exitReason ?? ''] ?? (t.exitReason ?? '—');
   const net = t.netPnlWithSlip;
   return (
     <button
       onClick={() => onDetail(t.positionId)}
       className="grid w-full grid-cols-[76px_76px_48px_40px_1fr_1fr_54px_76px] items-center gap-1 rounded px-2 py-1 text-left text-[11px] tabular-nums hover:bg-secondary/40 sm:grid-cols-[92px_92px_60px_44px_1fr_1fr_64px_88px]"
-      title="点击查看开仓依据与趋势变化详情"
+      title="点击查看开仓依据与趋势变化详情；点击币种可看 K 线"
     >
       <span
         className="truncate text-muted-foreground"
@@ -237,7 +245,16 @@ function TradeRow({ t, onDetail }: { t: TrendTradeRow; onDetail: (id: string) =>
       >
         {fmtStamp(t.closedAt)}
       </span>
-      <span className="truncate font-mono font-semibold">{t.base}</span>
+      <span
+        className="cursor-pointer truncate font-mono font-semibold hover:text-gold"
+        onClick={(e) => {
+          e.stopPropagation();
+          onKline(t);
+        }}
+        title={`点击查看 ${t.symbol} K 线（含开/平仓价线与时点标记）`}
+      >
+        {t.base}
+      </span>
       <span className={cn('font-bold', t.side === 'LONG' ? 'text-up' : 'text-down')}>
         {t.side === 'LONG' ? '多' : '空'}
       </span>
@@ -309,10 +326,11 @@ export function TrendTradeView() {
   const history = useTrendTradeHistory(filterSymbol, sort, order);
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TradeDetail | null>(null);
-  // Task 55：充值弹窗 + K 线弹窗（点击持仓卡片）
+  // Task 55：充值弹窗 + K 线弹窗（点击持仓卡片 / 历史交易币种）
+  // Task 55-3：K 线上下文扩展——持仓（成本/强平线 + 开仓标记）与历史交易（开/平仓价线 + 开/平标记）
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
-  const [klineSymbol, setKlineSymbol] = useState<string | null>(null);
+  const [kline, setKline] = useState<{ symbol: string; row?: TrendTradeRow } | null>(null);
   // Task 55-2：操作确认内部弹窗（持仓数量更换 / 全部平仓 / 重置）——替代浏览器原生 confirm
   const [confirm, setConfirm] = useState<
     null | { type: 'changePositions'; value: number } | { type: 'closeAll' } | { type: 'reset' }
@@ -370,36 +388,79 @@ export function TrendTradeView() {
     }
   };
 
-  // Task 55：K 线弹窗附加物——当前查看的自动持仓 → 成本线/强平线/开仓时点标记
+  // Task 55/55-3：K 线弹窗附加物——自动持仓（成本线/强平线/开仓时点）或历史交易（开/平仓价线与标记）
   const klinePosition = useMemo(
-    () => data?.positions.find((p) => p.symbol === klineSymbol) ?? null,
-    [data, klineSymbol],
+    () => (kline && !kline.row ? data?.positions.find((p) => p.symbol === kline.symbol) ?? null : null),
+    [data, kline],
   );
   const klinePriceLines = useMemo<ChartPriceLine[] | undefined>(() => {
-    if (!klinePosition) return undefined;
-    const long = klinePosition.side === 'LONG';
+    if (!kline) return undefined;
+    // 历史交易：开仓价 + 平仓价（已平仓）两条参考线
+    if (kline.row) {
+      const r = kline.row;
+      const lines: ChartPriceLine[] = [
+        {
+          price: r.entryPrice,
+          color: r.side === 'LONG' ? '#0ecb81' : '#f6465d',
+          title: `开仓 ${r.leverage}x`,
+        },
+      ];
+      if (r.exitPrice != null) lines.push({ price: r.exitPrice, color: '#a78bfa', title: '平仓' });
+      return lines;
+    }
+    // 当前持仓：成本线 + 强平虚线
+    const p = klinePosition;
+    if (!p) return undefined;
+    const long = p.side === 'LONG';
     return [
       {
-        price: klinePosition.entryPrice,
+        price: p.entryPrice,
         color: long ? '#0ecb81' : '#f6465d',
-        title: `自动${long ? '多' : '空'}成本 ${klinePosition.leverage}x`,
+        title: `自动${long ? '多' : '空'}成本 ${p.leverage}x`,
       },
-      { price: klinePosition.liqPrice, color: '#f6465d', title: '强平', dashed: true },
+      { price: p.liqPrice, color: '#f6465d', title: '强平', dashed: true },
     ];
-  }, [klinePosition]);
+  }, [kline, klinePosition]);
   const klineMarkers = useMemo<ChartTradeMarker[] | undefined>(() => {
-    if (!klinePosition) return undefined;
-    const long = klinePosition.side === 'LONG';
+    if (!kline) return undefined;
+    // 历史交易：开仓 + 平仓两个时点标记
+    if (kline.row) {
+      const r = kline.row;
+      const long = r.side === 'LONG';
+      const markers: ChartTradeMarker[] = [
+        {
+          timeMs: new Date(r.openedAt).getTime(),
+          position: long ? 'belowBar' : 'aboveBar',
+          shape: long ? 'arrowUp' : 'arrowDown',
+          color: long ? '#0ecb81' : '#f6465d',
+          text: '开',
+        },
+      ];
+      if (r.closedAt) {
+        markers.push({
+          timeMs: new Date(r.closedAt).getTime(),
+          position: long ? 'aboveBar' : 'belowBar',
+          shape: 'circle',
+          color: '#a78bfa',
+          text: '平',
+        });
+      }
+      return markers;
+    }
+    // 当前持仓：开仓时点标记
+    const p = klinePosition;
+    if (!p) return undefined;
+    const long = p.side === 'LONG';
     return [
       {
-        timeMs: new Date(klinePosition.openedAt).getTime(),
+        timeMs: new Date(p.openedAt).getTime(),
         position: long ? 'belowBar' : 'aboveBar',
         shape: long ? 'arrowUp' : 'arrowDown',
         color: long ? '#0ecb81' : '#f6465d',
         text: '开',
       },
     ];
-  }, [klinePosition]);
+  }, [kline, klinePosition]);
 
   // Task 55-2：改用页内 AlertDialog 确认（不再用浏览器原生 confirm）
   const changePositions = (v: number) => {
@@ -417,11 +478,11 @@ export function TrendTradeView() {
         <span className="hidden text-[10px] text-muted-foreground sm:inline">
           账户 {data?.config.accountName ?? 'trend-auto-v1'} · 初始 {data?.config.initialCapital ?? '—'} USDT
           {totalDeposited > 0 && <span className="text-gold"> · 累计充值 +{totalDeposited.toFixed(0)}</span>} · 每仓 =
-          可用余额 ÷ 剩余仓位数 · {data?.config.leverage ?? 20}x · 无固定止盈止损（趋势结束离场）
+          账户权益 ÷ 持仓数量 · {data?.config.leverage ?? 20}x · 无固定止盈止损（趋势结束离场）
         </span>
         <div className="ml-auto flex items-center gap-1.5">
           {/* Task 55：持仓数量可选——更换即自动平仓原有持仓 */}
-          <label className="flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted-foreground" title="最大同时持仓数；每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；更换数量会自动平仓原有持仓">
+          <label className="flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted-foreground" title="最大同时持仓数；每仓保证金 = 账户权益 ÷ 持仓数量 平均分配（余额不足时自动降到可承受最大值，永不因余额不足跳过）；更换数量会自动平仓原有持仓">
             持仓
             <select
               value={maxPositions}
@@ -527,7 +588,7 @@ export function TrendTradeView() {
             </div>
             {data.positions.length === 0 ? (
               <div className="rounded-lg border border-dashed border-border/60 px-4 py-3 text-center text-xs text-muted-foreground">
-                暂无自动持仓 · 确认趋势（CONFIRMED）出现后按「可用余额 ÷ 剩余仓位数（当前 {data.config.maxPositions}）」均分 +{' '}
+                暂无自动持仓 · 确认趋势（CONFIRMED）出现后按「账户权益 ÷ 持仓数量（当前 {data.config.maxPositions}）」均分 +{' '}
                 {data.config.leverage}x 自动开仓；候选趋势/数据过期/暂停状态一律不开仓
               </div>
             ) : (
@@ -537,7 +598,7 @@ export function TrendTradeView() {
                     key={p.positionId}
                     p={p}
                     onClose={(id) => act('close', id)}
-                    onSelectSymbol={setKlineSymbol}
+                    onSelectSymbol={(s) => setKline({ symbol: s })}
                     busy={busy}
                   />
                 ))}
@@ -577,7 +638,7 @@ export function TrendTradeView() {
                 <TradeHeader />
                 {history.data.trades.map((t) => (
                   <div key={t.positionId}>
-                    <TradeRow t={t} onDetail={openDetail} />
+                    <TradeRow t={t} onDetail={openDetail} onKline={(row) => setKline({ symbol: row.symbol, row })} />
                     {detailId === t.positionId && detail && (
                       <div className="mb-1 rounded border border-border/60 bg-secondary/20 px-3 py-2 text-[10px] leading-relaxed">
                         <div className="font-semibold">决策链还原（趋势周期 {detail.meta.trendCycleId}）</div>
@@ -696,10 +757,10 @@ export function TrendTradeView() {
         </DialogContent>
       </Dialog>
 
-      {/* Task 55：持仓 K 线弹窗（合约多源 K 线 + 自动持仓成本线/强平线/开仓时点标记） */}
+      {/* Task 55：持仓/历史交易 K 线弹窗（合约多源 K 线；持仓=成本线/强平线/开仓标记，历史=开平仓价线/时点标记） */}
       <CoinDialog
-        symbol={klineSymbol}
-        onClose={() => setKlineSymbol(null)}
+        symbol={kline?.symbol ?? null}
+        onClose={() => setKline(null)}
         market="futures"
         extraPriceLines={klinePriceLines}
         extraMarkers={klineMarkers}
@@ -719,7 +780,7 @@ export function TrendTradeView() {
                 {confirm?.type === 'changePositions' && (
                   <>
                     <span className="block">· 将自动平仓当前全部 {data?.positions.length ?? 0} 笔持仓（按标记价市价）</span>
-                    <span className="block">· 每仓保证金改为「可用余额 ÷ 剩余仓位数」均分</span>
+                    <span className="block">· 每仓保证金改为「账户权益 ÷ 持仓数量」均分（余额不足时自动降到可承受最大值）</span>
                     <span className="block">· 新确认趋势按新口径开仓；被平掉的旧趋势周期不会立即重开</span>
                   </>
                 )}
