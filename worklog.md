@@ -529,3 +529,24 @@ Stage Summary:
 - 两算法定位更清晰：UTE=长周期趋势跟随（拿满周期、利润回吐有底线）；short-swing=短周期脉冲套利（快进快出、第一顺势单优先不排他）
 - 语义变化明示：UTE 持仓时间将显著拉长（代价：END_PENDING→ENDED 之间的浮盈回吐更深，由宽移动止盈兜底）；short-swing R2 恢复（代价：同周期磨损面+1 次开仓，有追入保护+新 K 线门槛约束）
 - 未验证假设：1.5% 止损与 30/20 移动止盈为长周期工程初值未经回放校准（样本仅 3 笔）；R2 恢复后的胜率表现待实盘观察（Task 65 旧 R2 -5.63U 是「回调低吸」时代数据，新 R2 语义=重新走强）；UTE 无 weakness 离场后 ENDED 前的极端插针由强平线兜底
+
+---
+Task ID: deploy-1
+Agent: Super Z (main)
+Task: 从 GitHub 克隆并部署 binance-radar 项目（hyyLab/binance-radar，私有仓库）
+
+Work Log:
+- 用用户提供的 GitHub PAT 定位仓库 hyyLab/binance-radar（私有，TypeScript，main 分支，最新提交 5d13110 Task 68）
+- git clone 到临时子目录后整体迁移至部署根目录 /home/z/my-project（替换脚手架），保留仓库 .git 与 db/ 历史数据（custom.db 1.4MB + 2 个 rollback 备份 + trend-debug.db）
+- 运行 init-fullstack.sh 初始化环境；确认 Caddyfile 网关 :81 → localhost:3000 路由不变
+- bun install 870 包成功（含 file:vendor/universal-trend-engine 本地包）；prisma generate + db push，schema 与存量库完全同步（零数据丢失）
+- .env 沿用 DATABASE_URL=file:/home/z/my-project/db/custom.db，与仓库约定一致
+- 重启 .zscripts/dev.sh 守护进程（首次启动时项目文件尚未迁移完成导致 app 目录缺失报错，迁移后重启即恢复）
+- Agent Browser 端到端验证：/ 首页（币安热点雷达：异动引擎状态栏、P1/P2/冷却/已结束事件池）与 /trend-trading（趋势自动模拟交易：账户 100U、运行中徽标、算法/舱位选择器）均正常渲染；参数控制台弹窗交互正常
+- 趋势服务自动拉起：/api/trend-trading 返回 mode=RUNNING、lastError=null（v20 单例正常接管）
+- 外部约束记录：沙箱出口 IP 8.212.10.159 被币安临时限流（spot api.binance.com 约 26 分钟后解除；fapi 约 18 小时后解除）——属共享出口 IP 被历史请求打满，非本次部署引起；Bybit/Gate API 连通正常，引擎将自动恢复采集
+
+Stage Summary:
+- binance-radar 已在 /home/z/my-project 成功部署并运行（Next.js 16 + Turbopack dev，端口 3000）
+- 数据库历史数据完整保留，趋势交易服务 v20 自动运行，两页面浏览器验证零报错
+- 唯一待恢复项：币安 IP 限流到期后行情采集自动恢复（无需人工干预）
