@@ -92,6 +92,8 @@ const STRATEGY_FACTORIES = {
 
 事件驱动策略是特殊入口：普通算法消费 `UnifiedTrendSignal`；`major-p1-breakout-v1` 通过 `evaluateAnomalyEntry(event, ctx)` 和 `AutoTraderDeps.getEvents` 直接消费活动异动事件，绕过趋势池、同币固定冷却与下一根 K 线二次确认；执行仍复用 AutoPaperTrader 的模拟资金和成交层。
 
+该算法默认参数：事件首次入场窗口 30s；拒绝 1m 变动超过 5% 或 5m 变动超过 10% 的极端追单；标的价格逆向 1.8% 硬止损；顺向 2.0% 后启动移动止盈，峰值回撤 1.0% 全平；10 分钟未出现 2.0% 的有利扩张则时间退出。平台分类使用本地缓存的 1m 已收盘K线（20 根、区间 ≤5%、ER ≤0.35、平台边缘与突破基准相距 ≤2%），缓存过期则不判平台。全部阈值是待历史回放校准的初值。
+
 保存后热重载自动生效。**验证：**
 
 ```bash
