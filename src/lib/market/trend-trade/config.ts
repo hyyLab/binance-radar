@@ -91,6 +91,11 @@ export type TrendExitReason =
   | 'REVERSE_CONFIRMED' // 反向趋势确认，关闭原方向持仓
   | 'SPIKE_TAKE' // Task 57 策略离场：冲高/下杀短窗快速运动，浮盈及时落袋
   | 'WEAKNESS_EARLY' // Task 57 策略离场：短周期走弱（END_PENDING 同周期）先走，走强可再入场
+  | 'BREAKOUT_FALSE_EXIT' // MAJOR P1：平台突破失败，价格重新回到结构失效区域
+  | 'BREAKOUT_HARD_STOP' // MAJOR P1：紧急逆向价格硬止损
+  | 'BREAKOUT_BREAKEVEN' // MAJOR P1：浮盈后保本保护退出
+  | 'BREAKOUT_TRAIL_STOP' // MAJOR P1：移动止盈触发
+  | 'BREAKOUT_TAKE_PROFIT' // MAJOR P1：固定目标止盈
   | 'LIQUIDATED' // 强平（杠杆模拟执行结果，不伪装模型止损）
   | 'MANUAL'; // 人工平仓 / 全部平仓 / 换仓数量调整 / 切换算法清场
 
