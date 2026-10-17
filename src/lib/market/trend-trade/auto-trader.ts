@@ -17,8 +17,9 @@
 //   反向趋势独立确认（dataFresh）可立即平掉原方向持仓；保留强平机制（独立巡检任务）
 // - 数据不可用（DATA_UNAVAILABLE/过期）：不新开仓、不伪装趋势结束、继续按标记价
 //   管理强平；暂停模式：只停新开仓（含待入场转换），继续退出管理与强平巡检
-// - 成本口径：开/平仓手续费按 PaperEngine Taker 0.05% 双边；滑点按可配基点估算，
-//   成交记录展示；统计主口径 = 含滑点净盈亏（更保守，不省略成本）
+// - 成本口径：开/平仓手续费双边各 0.02%（Task 59 用户定版，TREND_TRADE.FEE_RATE；
+//   经 PaperEngine 实例属性 feeRate 生效——手动盘 default 账户仍为默认 Taker 0.05%）；
+//   滑点按可配基点估算，成交记录展示；统计主口径 = 含滑点净盈亏（更保守，不省略成本）
 // - 持仓结果采集（Task 56 §七）：MFE/MAE 按主循环可用标记价增量更新并持久化，
 //   绝不用事后最高/最低价构造决策时不存在的数据
 // - 成交假设：以决策时刻标记价成交（非信号 K 线收盘价），绝不使用未来行情
@@ -28,7 +29,6 @@
 
 import { db } from '@/lib/db';
 import { PaperError, PaperEngine, paperEngineFor } from '../paper';
-import { TAKER_FEE } from '../futures';
 import type { UnifiedTrendSignal } from '../trend-watch/signal';
 import { TREND_WATCH } from '../trend-watch/config';
 import {
@@ -142,7 +142,7 @@ export class AutoPaperTrader {
   ) {
     this.deps = deps;
     this.repo = opts?.repo ?? createTrendTradeRepo();
-    this.engine = opts?.engine ?? paperEngineFor(TREND_TRADE.ACCOUNT_NAME);
+    this.engine = opts?.engine ?? paperEngineFor(TREND_TRADE.ACCOUNT_NAME, TREND_TRADE.FEE_RATE);
     this.strategy = opts?.strategy ?? createStrategy(TREND_TRADE.DEFAULT_STRATEGY_ID);
     // 外部注入的策略（测试/定制）优先：boot 不按 DB 配置覆盖，tick 自愈也不改换
     this.fixedStrategy = opts?.strategy != null;
@@ -874,12 +874,14 @@ export class AutoPaperTrader {
       return { outcome: 'skipped', reason: '同币种已有持仓' };
     }
     // ⑧ 仓位测算（Task 58：每仓保证金 = 权益 × min(设定比例, 95%÷持仓数)——持仓数多时
-    //    自动压缩单仓比例保证满仓可开；超出可用余额直接跳过）
-    const feeFactor = 1 + cfg.leverage * TAKER_FEE;
+    //    自动压缩单仓比例保证满仓可开；超出可用余额直接跳过）。费率唯一真值 = 引擎实例
+    //    feeRate（Task 59：自动账户 0.02%；测试注入引擎默认 TAKER_FEE，口径随引擎走）
+    const feeRate = this.engine.feeRate;
+    const feeFactor = 1 + cfg.leverage * feeRate;
     const effRatio = effectiveMarginRatio(cfg.marginRatio, cfg.maxPositions);
     const effRatioPct = (effRatio * 100).toFixed(2).replace(/\.?0+$/, '');
     const targetMargin = floor2(eq.equity * effRatio);
-    const fee = targetMargin * cfg.leverage * TAKER_FEE;
+    const fee = targetMargin * cfg.leverage * feeRate;
     if (targetMargin + fee > eq.balance) {
       const reason = `权益 ${effRatioPct}% 保证金 ${targetMargin.toFixed(2)} + 手续费 ${fee.toFixed(2)} 超出可用余额 ${eq.balance.toFixed(2)}（跳过不变通）`;
       await this.recordSkipDb(signal.symbol, rKey, reason);

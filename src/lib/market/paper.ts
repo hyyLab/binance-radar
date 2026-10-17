@@ -1,6 +1,8 @@
 // ---------- 模拟建仓引擎（Paper Trading） ----------
 // 规则（对齐币安 USDT-M 合约，见 ./futures）：初始 10 USDT；最高 20x；最低保证金 2 USDT；
-// Taker 手续费 0.05%（开/平仓都收，Maker 0.02% 备案）；
+// Taker 手续费默认 0.05%（开/平仓都收，Maker 0.02% 备案）；Task 59 起费率为引擎实例
+// 属性（构造第二参 feeRate，默认 TAKER_FEE）——趋势自动账户 trend-auto-v1 注入 0.02%
+// 双边（TREND_TRADE.FEE_RATE），手动 default 账户行为不变；
 // 强平价按币安逐仓精确式（分层维持保证金率）；触及强平价自动清算（小名义价值下亏损全部保证金）
 
 import { db } from '@/lib/db';
@@ -60,7 +62,12 @@ export class PaperEngine {
   /** 账户名：default = 手动模拟盘（默认页签，行为与历史完全一致）；
    *  Task 54 参数化后可创建隔离的自动账户（trend-auto-v1）——资金/持仓/流水
    *  全部按 accountId 隔离，互不污染。引擎无内存状态，多实例安全。 */
-  constructor(private readonly accountName: string = 'default') {}
+  constructor(
+    private readonly accountName: string = 'default',
+    /** 单边手续费率（占名义价值）：open/close 结算与本账户全部成本口径的唯一真值。
+     *  默认 TAKER_FEE=0.05%（手动盘不变）；自动账户注入 TREND_TRADE.FEE_RATE=0.02%。 */
+    public readonly feeRate: number = TAKER_FEE,
+  ) {}
 
   /** 拉起合约多源采集器（幂等 fire-and-forget）：模拟盘是默认页签，
    *  用户可能不进异动交易页，但持仓计价/强平检查需要合约行情常驻 */
@@ -287,7 +294,7 @@ export class PaperEngine {
       );
     }
 
-    const fee = input.margin * input.leverage * TAKER_FEE;
+    const fee = input.margin * input.leverage * this.feeRate;
     if (input.margin + fee > acc.balance) {
       throw new PaperError(
         `可用余额不足：需 ${input.margin.toFixed(2)} + 手续费 ${fee.toFixed(2)}，当前可用 ${acc.balance.toFixed(2)}`,
@@ -423,7 +430,7 @@ export class PaperEngine {
 
     const sign = this.dirSign(pos.side);
     const grossPnl = (mark - pos.entryPrice) * pos.qty * sign;
-    const closeFee = mark * pos.qty * TAKER_FEE;
+    const closeFee = mark * pos.qty * this.feeRate;
     // 净盈亏扣除双边手续费：开仓费（开仓时已从余额扣除）+ 平仓费（此处结算时扣除）
     const netPnl = grossPnl - closeFee - pos.openFee;
 
@@ -526,22 +533,28 @@ export class PaperEngine {
 }
 
 const g = globalThis as typeof globalThis & {
+  // v9（Task 59）：费率实例化——构造第二参 feeRate（默认 TAKER_FEE=0.05%，default 账户
+  // 行为逐字节不变）；引擎无内存状态，重建安全。
   // v8（Task 54）：PaperEngine 构造参数化（accountName），支持趋势自动交易独立账户。
-  // 默认 'default' 路径行为逐字节不变；引擎无内存状态，重建安全。
   // v7（Task 50）：markPrice 切换为「合约多源优先 + 现货兑底」。
-  // 类方法闭包绑定创建时模块图的取价函数，改取价链路必须 bump key。
+  // 类方法闭包绑定创建时模块图的取价函数，改取价链路/类源必须 bump key。
   __binanceRadarPaper_v7?: PaperEngine;
   __binanceRadarPaper_v8?: PaperEngine;
+  __binanceRadarPaper_v9?: PaperEngine;
 };
 
-export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v8 ??= new PaperEngine());
+export const paperEngine: PaperEngine = (g.__binanceRadarPaper_v9 ??= new PaperEngine());
 
 /** 创建隔离账户的引擎实例（Task 54：趋势自动模拟交易 trend-auto-v1 用）。
- *  同名实例全局单例（HMR 不重复创建）；与手动盘仅共享行情源，不共享资金/持仓。 */
+ *  同名实例全局单例（HMR 不重复创建）；与手动盘仅共享行情源，不共享资金/持仓。
+ *  Task 59：第二参 feeRate 注入账户费率（自动账户传 TREND_TRADE.FEE_RATE=0.02%）。 */
 const gAuto = globalThis as typeof globalThis & {
+  // v2（Task 59）：费率实例化——v1 缓存实例为旧费率（模块常量 0.05%）类源，必须 bump
+  // key 重建才能让运行中的自动账户切到 0.02%（改行为必 bump 纪律）。
   __binanceRadarPaperAuto_v1?: PaperEngine;
+  __binanceRadarPaperAuto_v2?: PaperEngine;
 };
-export function paperEngineFor(accountName: string): PaperEngine {
+export function paperEngineFor(accountName: string, feeRate?: number): PaperEngine {
   if (accountName === 'default') return paperEngine;
-  return (gAuto.__binanceRadarPaperAuto_v1 ??= new PaperEngine(accountName));
+  return (gAuto.__binanceRadarPaperAuto_v2 ??= new PaperEngine(accountName, feeRate ?? TAKER_FEE));
 }

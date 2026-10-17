@@ -329,3 +329,23 @@ Stage Summary:
 - 交付：满仓可开的封顶 sizing + marginRatio 控制台第 14 参数 + 说明书 v1.1（download/趋势机器人自动开仓参数说明书.docx）；76 测试全绿；引擎 v14 运行中
 - 行为预期：8 仓下每仓 ≈ 11.875% 权益（总名义敞口 ≈ 19 倍权益，8 仓 × 20x），强平敏感度显著高于小仓数配置——用户需知晓这是满仓的代价；存量旧仓（20% 保证金开的）自然轮换后新仓全部按封顶比例
 - 边界保留：余额不足仍跳过不变通；MIN_MARGIN 2 USDT 仍生效；marginRatio 调整不平已有仓（换仓位数才平）
+
+---
+Task ID: 59
+Agent: Super Z (main)
+Task: 用户定版「买入卖出手续费都是 0.02%」——趋势自动账户费率改造上线（手动盘不动）
+
+Work Log:
+- 实施前核对：费率唯一源头 futures.ts TAKER_FEE=0.05%（MAKER_FEE 0.02% 仅备案），被 paper.ts（引擎结算 open:290/close:426）与 auto-trader.ts（开仓预检 878/882）共用；手动 default 盘与自动盘同类不同账户——直接改常量会违反「手动盘不受影响」红线，故改为实例属性注入
+- paper.ts：PaperEngine 构造第二参 public readonly feeRate（默认 TAKER_FEE=0.05%，default 账户行为逐字节不变）；open/close 结算改读 this.feeRate（单点真值）；paperEngineFor(accountName, feeRate?) 第二参注入；单例按纪律 bump——手动盘 paper v8→v9（类源变更、行为不变、无内存状态重建安全）、自动盘 paperAuto v1→v2（v1 缓存实例为旧费率类源，必须重建）
+- trend-trade/config.ts：新增 FEE_RATE: 0.0002（买卖双边各 0.02%，仅自动账户，代码常量非控制台项）；MARGIN_SLOT_HEADROOM 注释的手续费估算同步更新（0.95%→0.38%）
+- auto-trader.ts：构造 engine 时注入 TREND_TRADE.FEE_RATE；开仓预检费率改读 this.engine.feeRate（与引擎结算同源不脱钩；测试注入引擎默认 TAKER_FEE 口径随引擎走）；删除已无引用的 TAKER_FEE import；头部成本口径注释更新
+- enhanced/engine.ts：单例 bump v14→v15（改行为必 bump——运行中 AutoPaperTrader 持有旧引擎引用，须重建才能换新费率引擎）；pickLegacyEngine 链补 v14
+- futures.ts：TAKER_FEE 注释改为「默认费率（手动盘/maxOpenableMargin 上限估算用）」，指路 TREND_TRADE.FEE_RATE
+- 验证：bun test 76/76 全绿（FakePaperEngine 继承默认费率，测试零改动）；tsc 报错 0 处涉改动文件（4 处均为未触碰文件的历史遗留）；eslint exit 0；线上不重启验证——/api/trend-trading 触发 v15 热替换，service.on=true、lastError=null、lastTickAt 0.3s、trendSignalCount=20、mode=RUNNING、4 持仓（ICNT/SAND/HYPE/AERO）完好、maxPositions=8 保留
+- 语义说明：存量持仓已扣的开仓费（0.05%）不追溯，openFee 按仓位记录逐仓准确；其后所有平仓费与新开仓双边费用均按 0.02% 结算
+
+Stage Summary:
+- 自动账户 trend-auto-v1 手续费已切至双边各 0.02%（v15 热替换生效，全程未重启 server）；手动模拟盘保持 0.05% Taker 完全不受影响
+- 费率真值下沉为 PaperEngine 实例属性（feeRate），预检与结算同源；三次单例 bump（paper v9 / paperAuto v2 / enhanced v15）均按「改行为必 bump」纪律执行
+- 手续费暂为代码常量（config.ts FEE_RATE）；如需运行时可调可仿 marginRatio 接入参数控制台（DB 列 + PARAM_DEFS），用户提出即可做

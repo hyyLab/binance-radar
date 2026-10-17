@@ -29,7 +29,9 @@ export function maxOpenableMargin(available: number, leverage: number): number {
   return Math.floor((Math.min(ratioCap, feeCap) + 1e-9) * 100) / 100;
 }
 
-/** 币安 USDT-M 合约费率 */
+/** 币安 USDT-M 合约费率（Task 59 起为「默认费率」：手动盘 default 账户与 maxOpenableMargin
+ *  上限估算用；趋势自动账户费率独立为 TREND_TRADE.FEE_RATE=0.02% 双边，经 PaperEngine
+ *  实例属性 feeRate 注入，见 trend-trade/config.ts） */
 export const TAKER_FEE = 0.0005; // 0.05% 市价单
 export const MAKER_FEE = 0.0002; // 0.02% 限价单（备案）
 

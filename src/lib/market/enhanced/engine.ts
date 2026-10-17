@@ -496,6 +496,13 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v15（Task 59）：手续费 0.02% 双边——用户定版「买入卖出都是 0.02%」。费率改为
+//   PaperEngine 实例属性（构造第二参 feeRate）：自动账户 trend-auto-v1 注入
+//   TREND_TRADE.FEE_RATE=0.02%（开仓预检与引擎结算同一实例费率，口径不脱钩），
+//   手动盘 default 账户仍为默认 Taker 0.05% 行为逐字节不变；paper 引擎单例同步
+//   bump（paper v9 / paperAuto v2）。改行为必 bump key；旧实例 stop() 会同步停掉
+//   autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）——存量持仓已扣的开仓
+//   费不变，平仓费按新费率 0.02% 结算（openFee 按仓位记录，逐仓口径不受影响）。
 // v13（Task 57-c）：参数控制台——用户可自行调整自动开仓参数（策略门槛/轮次/冲高套利
 //   来自 SHORT_SWING 覆盖，二次确认开关/冷却为基础设施列）+ waitBarConfirm 直开路径
 //   （关闭二次确认 = 达标当根直接开仓，快 1 根 K 线）+ executeOpen 抽取（pending/direct
@@ -554,6 +561,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v12?: EnhancedEngine;
   __binanceRadarEnhanced_v13?: EnhancedEngine;
   __binanceRadarEnhanced_v14?: EnhancedEngine;
+  __binanceRadarEnhanced_v15?: EnhancedEngine;
 };
 
 function pickLegacyEngine(
@@ -571,9 +579,11 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v11?: EnhancedEngine;
     __binanceRadarEnhanced_v12?: EnhancedEngine;
     __binanceRadarEnhanced_v13?: EnhancedEngine;
+    __binanceRadarEnhanced_v14?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v14 ??
     g.__binanceRadarEnhanced_v13 ??
     g.__binanceRadarEnhanced_v12 ??
     g.__binanceRadarEnhanced_v11 ??
@@ -617,20 +627,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v14;
+  const existing = g.__binanceRadarEnhanced_v15;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v14 = fresh;
+  g.__binanceRadarEnhanced_v15 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v14 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v15 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v14 = fresh;
+  g.__binanceRadarEnhanced_v15 = fresh;
   return fresh;
 }
