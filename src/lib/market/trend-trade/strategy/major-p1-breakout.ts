@@ -97,7 +97,7 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     const cycleId = cycleOf(e), evAt = evidenceAt(e, ctx.now), round = this.nextRound(e.symbol, cycleId);
     const st = this.states.get(e.symbol), same = st?.cycleId === cycleId;
     if (round > this.params.MP1B_MAX_ROUNDS_PER_EVENT) return noEntry('单事件轮次已达上限');
-    if (round === 1 && ctx.now - p1At > this.params.MP1B_EVENT_FRESH_MS) return noEntry('P1 首次入场窗口已过');
+    if (round === 1 && !eligibleFalseReversal && ctx.now - p1At > this.params.MP1B_EVENT_FRESH_MS) return noEntry('P1 首次入场窗口已过');
     if (ctx.now - evAt > this.params.MP1B_EVENT_FRESH_MS) return noEntry('异动证据已过期');
     if (same && st?.round) {
       if (st.lastExitAt == null) return noEntry('该事件上一轮没有平仓记录');
