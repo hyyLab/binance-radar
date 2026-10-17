@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { trendTradeRepo, type TrendTradeMetaRow } from '@/lib/market/trend-trade/repo';
 import { TREND_TRADE } from '@/lib/market/trend-trade/config';
+import { DEFAULT_STRATEGY_ID, listStrategies } from '@/lib/market/trend-trade/strategy/registry';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,8 +11,9 @@ export const dynamic = 'force-dynamic';
  * GET /api/trend-trading/trades?symbol=BTC&limit=100&sort=pnl|time&order=asc|desc
  * GET /api/trend-trading/trades?positionId=xxx   （单笔详情：还原决策链）
  *
- * 返回每笔已平仓交易的完整口径：开/平仓价与手续费、滑点估算、毛盈亏/净盈亏/
- * 含滑点净盈亏、开仓与退出时的趋势状态及理由、平仓原因、趋势周期关联。
+ * 返回每笔已平仓交易的完整口径：开/平仓价、滑点估算、毛盈亏/净盈亏/
+ * 含滑点净盈亏、开仓算法（Task 63：历史明细「算法」列，费用不再展示）、
+ * 开仓与退出时的趋势状态及理由、平仓原因、趋势周期关联。
  */
 export async function GET(req: Request) {
   try {
@@ -65,17 +67,32 @@ export async function GET(req: Request) {
     const order = url.searchParams.get('order') === 'asc' ? 'ASC' : 'DESC';
     const limit = Math.min(500, Math.max(1, Number(url.searchParams.get('limit') ?? 100) || 100));
 
+    // Task 63：算法 id → 展示名映射（registry 唯一真值，与 UI 算法下拉同源）。
+    // 历史行无独立 strategyId 列：开仓算法自 Task 57 起随 executeOpen 写进
+    // featuresAtOpen 快照 JSON（featuresAtOpen.strategyId），更早/缺失一律兜底
+    // 默认算法（short-swing-v1 在 Task 62 前是唯一在线算法，事实正确）。
+    const strategyNameById = new Map(listStrategies().map((s) => [s.id, s.name] as const));
+
     const closedMetas: TrendTradeMetaRow[] = await trendTradeRepo.loadMetasByStatus('CLOSED');
     const rows: Record<string, unknown>[] = [];
     for (const m of closedMetas) {
       if (symbol && !m.symbol.includes(symbol)) continue;
       const pos = await db.paperPosition.findUnique({ where: { id: m.positionId } });
       if (!pos) continue;
+      // 开仓算法：featuresAtOpen.strategyId（Task 57 起快照）；损坏/缺失兜底默认算法
+      let strategyId = DEFAULT_STRATEGY_ID;
+      try {
+        strategyId = (JSON.parse(m.featuresAtOpen) as { strategyId?: string }).strategyId ?? DEFAULT_STRATEGY_ID;
+      } catch {
+        /* 快照损坏 → 默认算法 */
+      }
       rows.push({
         positionId: m.positionId,
         symbol: m.symbol,
         base: m.symbol.replace(/USDT$/, ''),
         side: m.side,
+        strategyId,
+        strategyName: strategyNameById.get(strategyId) ?? strategyId,
         // —— 时间 ——
         openedAt: pos.openedAt.toISOString(),
         closedAt: (pos.closedAt ?? m.closedAt ? new Date(m.closedAt ?? Date.now()) : new Date()).toISOString(),
