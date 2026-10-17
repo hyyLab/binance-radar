@@ -1,8 +1,9 @@
 # 趋势自动交易 · 算法（策略）接口文档
 
-> **文档版本** v1（2026-10-17） · 适用代码：`src/lib/market/trend-trade/`（enhanced 引擎单例 v15 / paper v9 / paperAuto v2 时代）
+> **文档版本** v1（2026-10-17） · 适用代码：`src/lib/market/trend-trade/`（enhanced 引擎单例 v16 / paper v9 / paperAuto v2 时代）
 > **读者**：要往「趋势自动模拟交易」里加新算法的人（主要是我们自己）
 > **一句话**：新算法 = 实现一个 `TrendStrategy` 接口 + 在注册表登记一行 + bump 引擎单例 key，UI 下拉自动出现，资金/风控/幂等/审计全部不用管。
+> **⚡ 只要速成**：看 `docs/strategy-quickstart.md`（一页版：加算法 3 步 + 参数进控制台 3 条铁规则）。
 
 ---
 

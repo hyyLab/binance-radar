@@ -433,3 +433,17 @@ Stage Summary:
 - 关键设计：复用 featuresAtOpen.strategyId 快照（Task 57 起天然存在）实现零 DB 变更零 bump；未来若需按算法筛选/对比统计（如 UTE vs 短周期套利胜率），再把 strategyId 升为 TrendTradeMeta 独立列（PRAGMA 补列既有模式）
 - 红线遵守：未动引擎/未动手动盘/未重启 server；92 测试全绿；纯模拟不变
 - 推送补记（实际执行）：远端 main 与本地分叉（另一环境推过 Task 55-3 时代历史）——先核实远端文件集合是本地严格子集（comm 双向比对零独有文件），旧远端历史备份为 backup/task55-3-remote 分支后 force-with-lease 覆盖，main 现为 25e71b0；恢复旧远端视角随时可查 backup 分支
+
+---
+Task ID: 64
+Agent: Super Z (main)
+Task: 算法扩充自助指南——一页速成版 docs/strategy-quickstart.md（用户要自行加新算法并把参数注册进控制台，嫌 807 行接口文档太长）
+
+Work Log:
+- 实施前核实四件事：① strategy 目录结构与两个参考实现（short-swing 完整版 / universal-trend 最短骨架）② auto-trader 参数装配链 applyStrategy：parseStrategyParamsMap → sanitizeRuntimeParamsLenient → createStrategy(id, params)，控制台键名原样透传给策略构造器 ③ console-params 的 DEF_BY_KEY 按键名建全局索引（后注册覆盖先注册 → 新算法与 short-swing 键名相撞会让短周期套利同名参数被「不属于当前算法」拒绝）④ UI 下拉数据源 = overview 路由 listStrategies() → strategies 字段，注册即出现（但需 bump 单例让运行中 auto-trader 旧实例退役）
+- 新建 docs/strategy-quickstart.md（约 90 行一页版）：算法目录树 / 写算法文件（复制 universal-trend.ts、必改 id/name/description 三字段、evaluateEntry/evaluateExit 两个决策方法 + 其余照抄）/ registry 注册一行 / PARAM_DEFS 每参数一条 + 三条铁规则（key 全局唯一带算法前缀、key 必须等于参数常量键否则改了不生效、strategyId 填自己的 id）/ bump v16→v17 四处不重启 server / curl + UI 验证清单 / 参数保存落库链路排障图
+- docs/strategy-interface.md 头部加速成版导航；顺手修正时代标注 v15→v16（Task 62 已 bump，engine.ts L571 实证）；strategy/README.md「新增算法三步」节加快成版指路；rg 核验三处文档互相指路均已落盘
+
+Stage Summary:
+- 交付：一页速成文档 docs/strategy-quickstart.md——用户可自助完成「新算法文件 → registry 注册 → PARAM_DEFS 注册 → bump 上线」全流程
+- 文档化最关键的两个坑：参数键必须带自己算法的前缀（全局索引撞名即坏短周期套利）；控制台 key 必须 = 参数常量的键（原样透传，对不上改了不生效）

@@ -24,6 +24,8 @@ strategy/
 
 ## 新增算法三步
 
+> ⚡ 速成版（含最小代码骨架、参数进控制台的 3 条铁规则、验证命令）见 `docs/strategy-quickstart.md`。
+
 1. 实现接口：新建 `<algo-name>.ts`，`implements TrendStrategy`（照 short-swing/universal-trend 的样子；
    完整契约与教学示例见 `docs/strategy-interface.md`）。
 2. 注册：`registry.ts` 的 `STRATEGY_FACTORIES` 加一行 + 文件头算法清单补一行。
