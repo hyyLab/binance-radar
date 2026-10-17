@@ -958,7 +958,7 @@ export class AutoPaperTrader {
       ? Math.max(0.1, Math.min(1, verdict.riskMultiplier as number))
       : 1;
     const effectiveRatio = effRatio * riskMultiplier;
-    const effRatioPct = (effectiveRatio * 100).toFixed(2).replace(/\\.?0+$/, '');
+    const effRatioPct = (effectiveRatio * 100).toFixed(2).replace(/\.?0+$/, '');
     const targetMargin = floor2(eq.equity * effectiveRatio);
     const fee = targetMargin * cfg.leverage * feeRate;
     if (targetMargin + fee > eq.balance) {
