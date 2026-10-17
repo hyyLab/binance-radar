@@ -1,0 +1,13 @@
+import { PrismaClient } from '@prisma/client';
+const db = new PrismaClient();
+const ACC = 'cmvbspxtg00fln1u2x9f0wvyb';
+console.log('== 自动账户持仓（最近12条，含已平） ==');
+const poses = await db.paperPosition.findMany({ where: { accountId: ACC }, orderBy: { openedAt: 'desc' }, take: 12 });
+for (const p of poses) console.log(`${p.symbol} ${p.side} margin=${p.margin.toFixed(4)} lev=${p.leverage}x notional=${(p.qty*p.entryPrice).toFixed(2)} status=${p.status} pnl=${p.pnl ?? '-'} opened=${p.openedAt?.toISOString?.()}`);
+console.log('\n== TrendAutoConfig ==');
+const cfgs = await db.trendAutoConfig.findMany();
+for (const c of cfgs) console.log(JSON.stringify(c, null, 1));
+console.log('\n== 决策表最近12条 ==');
+const decs = await db.trendAutoDecision.findMany({ orderBy: { createdAt: 'desc' }, take: 12 });
+for (const d of decs) console.log(`${d.createdAt?.toISOString?.()} ${d.symbol} ${d.action} detail=${(d.detail||'').slice(0,220)}`);
+await db.$disconnect();

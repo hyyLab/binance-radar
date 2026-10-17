@@ -583,3 +583,18 @@ Work Log:
 Stage Summary:
 - 修复已上链：Task 70（白名单降级）+ 真实业务库恢复；线上跑用户真实数据（92.23U/13.61U）
 - 布防：custom.db.deploy1017.bak 留档不入库；当日两起事故均为环境操作层，代码无回归
+
+---
+Task ID: deploy-3 / Task 71（纯排查，无代码改动）
+Agent: main
+Task: 排查用户疑问「为什么 ICNT 开仓保证金只有 5.45U，设计应是按账户权益最大金额平均分配」
+
+Work Log:
+- 查 PaperAccount（trend-auto-v1 balance 83.83）、PaperPosition 最近 5 笔、TrendAutoConfig（marginRatio=0.95, maxPositions=8, strategyId=major-p1-breakout-v1）
+- 查 TrendAutoDecision 审计：ICNT 17:54 OPEN detail 含 riskMultiplier=0.5、marginBasis="equity × min(0.95, 0.95/8) × 0.5"、modeTag=MAJOR_MOMENTUM
+- 核对源码：auto-trader.ts executeOpen ⑧ 仓位测算（targetMargin = equity × effRatio × riskMultiplier，clamp [0.1,1]）；major-p1-breakout.ts classify() 形态分级倍率（PLATFORM_BREAKOUT=1.0 / CONFIRMED_BREAKOUT=0.7 / ACCELERATION=0.55 / MAJOR_MOMENTUM=0.5 / FALSE_BREAKOUT_REVERSAL=0.5）；config.ts effectiveMarginRatio = min(上限, 95%/舱位数)
+
+Stage Summary:
+- 结论：非 bug。5.45U ≈ 权益91.8 × 11.875%（95%÷8舱）× 0.5（MAJOR_MOMENTUM 半舱倍率）；同批 BTW 因判为 PLATFORM_BREAKOUT 拿满舱 10.95U。舱位均分（Task 67）仍成立，均分之上叠加了远端 MAJOR P1 策略的入场质量分级倍率（Task 70 拉入）
+- 历史口径互洽：SUSDT 95U=权益100×95%（当时 maxPositions=1）；16:13 两笔 ≈11.2U=权益×47.5%（当时 maxPositions=2）
+- 若用户想改：调 maxPositions/marginRatio（参数控制台）或 major-p1-breakout.ts 内各形态 riskMultiplier
