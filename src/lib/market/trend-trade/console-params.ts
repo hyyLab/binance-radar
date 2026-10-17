@@ -14,7 +14,8 @@
 // - 未在 DEFS 中的键一律拒绝（防止拼错键名造成「看起来生效了」的错觉）。
 
 import { TREND_TRADE } from './config';
-import { SHORT_SWING, type ShortSwingParams } from './strategy/short-swing';
+import { SHORT_SWING } from './strategy/short-swing';
+import { MAJOR_P1_BREAKOUT } from './strategy/major-p1-breakout';
 
 /** 解析 DB strategyParamsJson（{ [strategyId]: 覆盖项 }；损坏/格式不对返回空 map——参数回退代码默认） */
 export function parseStrategyParamsMap(
@@ -59,6 +60,106 @@ export interface ParamDef {
 
 /** 控制台全部参数定义（顺序 = UI 渲染顺序；分组连续排列） */
 export const PARAM_DEFS: ParamDef[] = [
+  // ===== MP1 · 重大异动突破 v1 =====
+  {
+    key: 'MP1B_EVENT_FRESH_MS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 入场',
+    label: 'P1 入场新鲜窗', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_EVENT_FRESH_MS,
+    min: 1000, max: 120000, step: 1000, unit: 'ms',
+    desc: '首次入场只接受新进入 P1 的活动事件；轮次再入场要求出现平仓后的新事件证据。',
+    effect: '调大 → 容忍更晚入场；调小 → 更严格限制追旧事件',
+  },
+  {
+    key: 'MP1B_MAX_CHASE_1M_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 入场',
+    label: '1m 极端延伸上限', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_MAX_CHASE_1M_PCT,
+    min: 0.5, max: 25, step: 0.5, unit: '%',
+    desc: '当前 1m 涨跌幅超过阈值时拒绝在脉冲末端追入。',
+    effect: '调大 → 允许更极端的延伸；调小 → 更少追顶/追底',
+  },
+  {
+    key: 'MP1B_MAX_CHASE_5M_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 入场',
+    label: '5m 极端延伸上限', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_MAX_CHASE_5M_PCT,
+    min: 1, max: 50, step: 1, unit: '%',
+    desc: '当前 5m 涨跌幅超过阈值时不再追单；按照高波动加密资产设置。',
+    effect: '调大 → 允许更多延伸行情；调小 → 更谨慎',
+  },
+  {
+    key: 'MP1B_FALSE_BREAKOUT_REENTRY_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 入场',
+    label: '假突破反向确认距离', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_FALSE_BREAKOUT_REENTRY_PCT,
+    min: 0.1, max: 5, step: 0.1, unit: '%',
+    desc: '突破标为 FALSE 后，价格还需向反方向越过基准线此距离才反向入场。',
+    effect: '调大 → 更谨慎；调小 → 更快反向但更易误判',
+  },
+  {
+    key: 'MP1B_STRUCTURE_INVALIDATION_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 出场',
+    label: '结构失效缓冲距离', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_STRUCTURE_INVALIDATION_PCT,
+    min: 0.1, max: 5, step: 0.1, unit: '%',
+    desc: '价格反向越过原突破基准线并超过此缓冲后，累计结构失效证据。',
+    effect: '调大 → 容忍更大回撤；调小 → 更早承认突破失败',
+  },
+  {
+    key: 'MP1B_STRUCTURE_BREACH_TICKS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 出场',
+    label: '结构失效连续采样数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_STRUCTURE_BREACH_TICKS,
+    min: 1, max: 5, step: 1, unit: '次',
+    desc: '结构越界必须连续满足多少次才平仓，默认过滤单个瞬时刺穿。',
+    effect: '调大 → 更抗插针但退出更慢；调小 → 更快退出也更易被洗',
+  },
+  {
+    key: 'MP1B_STOP_LOSS_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 出场',
+    label: '硬止损价格幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_STOP_LOSS_PCT,
+    min: 0.3, max: 10, step: 0.1, unit: '%',
+    desc: '相对入场价的反向标的价格幅度。默认 1.8% 价格逆行约等于 20x 下保证金 -36%，未计成本。',
+    effect: '调大 → 容忍更大波动、潜在损失更大；调小 → 更快止损',
+  },
+  {
+    key: 'MP1B_TRAIL_ARM_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 出场',
+    label: '移动止盈启动幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_TRAIL_ARM_PCT,
+    min: 0.5, max: 20, step: 0.1, unit: '%',
+    desc: '顺向价格运动达到此幅度后，启动峰值回撤保护。',
+    effect: '调大 → 允许更久延伸但会回吐更多；调小 → 更早保护浮盈',
+  },
+  {
+    key: 'MP1B_TRAIL_GIVEBACK_PCT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 出场',
+    label: '移动止盈回撤幅度', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_TRAIL_GIVEBACK_PCT,
+    min: 0.2, max: 10, step: 0.1, unit: '%',
+    desc: '移动止盈启动后，顺向价格峰值回撤达到此幅度时全部平仓。',
+    effect: '调大 → 容忍更多正常回撤但利润回吐多；调小 → 更早落袋',
+  },
+  {
+    key: 'MP1B_MAX_HOLD_WITHOUT_EXPANSION_MS', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 出场',
+    label: '未扩张最长持仓时间', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_MAX_HOLD_WITHOUT_EXPANSION_MS,
+    min: 60000, max: 3600000, step: 60000, unit: 'ms',
+    desc: '持仓超过此时长仍未出现足够顺向扩张，则退出失去动能的交易。',
+    effect: '调大 → 等待更久；调小 → 更快释放资金，也可能错过慢速突破',
+  },
+  {
+    key: 'MP1B_MAX_ROUNDS_PER_EVENT', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 再入场',
+    label: '单事件最大开仓轮次', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_MAX_ROUNDS_PER_EVENT,
+    min: 1, max: 20, step: 1, unit: '轮',
+    desc: '不设固定分钟冷却，但单事件交易达到此轮数后停止；每轮须由平仓后的新事件证据触发。',
+    effect: '调大 → 捕捉更多异动波段；调小 → 降低手续费磨损',
+  },
+  {
+    key: 'MP1B_ACCELERATION_RISK_MULTIPLIER', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 仓位风险',
+    label: '加速型保证金系数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_ACCELERATION_RISK_MULTIPLIER,
+    min: 0.1, max: 1, step: 0.05,
+    desc: '只有方向性 SPIKE、尚无明确突破确认的加速型交易使用的保证金系数。',
+    effect: '调大 → 风险敞口更大；调小 → 降低加速末端判断错误的损失',
+  },
+  {
+    key: 'MP1B_PENDING_BREAKOUT_RISK_MULTIPLIER', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 仓位风险',
+    label: '待确认突破保证金系数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_PENDING_BREAKOUT_RISK_MULTIPLIER,
+    min: 0.1, max: 1, step: 0.05,
+    desc: 'BREAKOUT_PENDING 允许即时参与，但使用较小保证金。',
+    effect: '调大 → 参与度更高；调小 → 降低假突破损失',
+  },
+  {
+    key: 'MP1B_FALSE_BREAKOUT_RISK_MULTIPLIER', scope: 'strategy', strategyId: 'major-p1-breakout-v1', group: 'MAJOR P1 仓位风险',
+    label: '假突破反向保证金系数', type: 'number', default: MAJOR_P1_BREAKOUT.MP1B_FALSE_BREAKOUT_RISK_MULTIPLIER,
+    min: 0.1, max: 1, step: 0.05,
+    desc: '突破已被判定为 FALSE 且价格越过反向确认距离后，反向交易使用的保证金系数。',
+    effect: '调大 → 潜在盈亏均放大；调小 → 以更小仓位验证反转',
+  },
+
   // ===== A · 入场门槛（模式 A：5m 同向 → 趋势内波段） =====
   {
     key: 'ENTRY_MIN_SCORE', scope: 'strategy', strategyId: 'short-swing-v1', group: '入场门槛 · 模式A（5m 同向波段）',
@@ -280,7 +381,7 @@ export function sanitizeRuntimeParamsLenient(
  */
 export interface SanitizedRuntimeParams {
   /** 策略域覆盖项（干净、仅含合法键——存什么用什么） */
-  strategyParams: ShortSwingParams;
+  strategyParams: Record<string, unknown>;
   waitBarConfirm?: number;
   cooldownMs?: number;
   /** 每仓保证金比例（Task 58；TrendAutoConfig.marginRatio 列，NOT NULL DEFAULT 0.2） */
