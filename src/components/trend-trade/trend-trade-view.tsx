@@ -354,6 +354,9 @@ export function TrendTradeView() {
   const strategyId = data?.config.strategyId ?? 'short-swing-v1';
   const strategies = data?.config.strategies ?? [];
   const currentStrategy = strategies.find((s) => s.id === strategyId);
+  // Task 71：单仓比例显示真值化——min(设定比例, 95%÷舱位数)；重大异动突破另乘形态风险倍率 0.5~1.0
+  const effRatioPct = ((data?.config.effMarginRatio ?? 0.2) * 100).toFixed(3).replace(/\.?0+$/, '');
+  const isMajorP1 = strategyId === 'major-p1-breakout-v1';
 
   const depositVal = Number(depositAmount);
   const depositValid = Number.isFinite(depositVal) && depositVal >= MIN_DEPOSIT && depositVal <= MAX_DEPOSIT;
@@ -501,7 +504,7 @@ export function TrendTradeView() {
           账户 {data?.config.accountName ?? 'trend-auto-v1'} · 初始 {data?.config.initialCapital ?? '—'} USDT
           {totalDeposited > 0 && <span className="text-gold"> · 累计充值 +{totalDeposited.toFixed(0)}</span>} · 算法
           {currentStrategy?.name ?? strategyId} · 每仓 =
-          开仓时权益 × 20% · {data?.config.leverage ?? 20}x · 无固定止盈止损（按算法规则离场）
+          开仓时权益 × {effRatioPct}%{isMajorP1 && '（按入场形态再乘 0.5~1.0 风险倍率）'} · {data?.config.leverage ?? 20}x · 无固定止盈止损（按算法规则离场）
         </span>
         <div className="ml-auto flex items-center gap-1.5">
           {/* Task 57-c：参数控制台——自行调整自动开仓参数（保存即热生效） */}
@@ -642,7 +645,7 @@ export function TrendTradeView() {
             </div>
             {data.positions.length === 0 ? (
               <div className="rounded-lg border border-dashed border-border/60 px-4 py-3 text-center text-xs text-muted-foreground">
-                暂无自动持仓 · 策略达标后建待入场、下一根收盘 K 线复核开仓（每仓 = 开仓时权益 × 20% +{' '}
+                暂无自动持仓 · 等待策略触发后按当前算法规则开仓（每仓 = 开仓时权益 × {effRatioPct}%{isMajorP1 && '，另乘形态风险倍率 0.5~1.0'} +{' '}
                 {data.config.leverage}x）；同币种平仓后冷却（默认 5 分钟）；门槛/时机详见「参数」控制台
               </div>
             ) : (
