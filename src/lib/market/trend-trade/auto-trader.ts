@@ -787,6 +787,7 @@ export class AutoPaperTrader {
     const accountId = await this.autoAccountId();
     const rows = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
     const openSymbols = new Set(rows.map(p => p.symbol));
+    const consideredSymbols = new Set<string>();
     const events = getEvents(Date.now()).active
       .filter(e => e.state === 'ACTIVE' && e.level === 'MAJOR' && (e.priority === 'P1' || (e.peakPriority === 'P1' && e.breakout.status === 'FALSE')))
       .sort((a, b) => {
@@ -795,7 +796,8 @@ export class AutoPaperTrader {
       });
     for (const event of events) {
       if (eq.openCount >= cfg.maxPositions) break;
-      if (openSymbols.has(event.symbol)) continue;
+      if (openSymbols.has(event.symbol) || consideredSymbols.has(event.symbol)) continue;
+      consideredSymbols.add(event.symbol); // UP/DOWN 两个活跃事件同时存在时，只评估排序靠前的一个。
       const mark = this.deps.markPrice(event.symbol);
       if (!(mark > 0)) continue;
       const lastClose = await this.repo.lastCloseAt(event.symbol); // 提供上下文，但不应用固定冷却。
