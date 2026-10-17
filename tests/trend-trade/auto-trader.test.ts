@@ -1,7 +1,7 @@
 // ---------- 趋势自动模拟交易 · 行为测试（bun test，独立测试库 + fake 注入） ----------
 // Task 56 验收清单（用户定版 §九 20 项）映射：
 // T1  手动账户隔离                       §一.8
-// T2  sizing = 开仓时权益 20% + 20x       §一.1/§六（验收 16）
+// T2  sizing = 开仓时权益 × min(20%, 95%÷仓数)（默认 3 仓 = 20%）+ 20x   §一.1/§六（验收 16；Task 58 封顶语义）
 // T3  未确认/数据过期不开仓               §一.10（验收 11 部分）
 // T4  反向候选/短暂反向不提前平仓         §3.2（验收 6 部分）
 // T5  趋势确认结束（ENDED 同周期）正确离场 + 滑点/手续费/净盈亏口径（验收 7/18）
@@ -38,7 +38,7 @@ const TEST_DB_URL = 'file:/home/z/my-project/db/trend-trade-test.db';
 
 import { AutoPaperTrader } from '@/lib/market/trend-trade/auto-trader';
 import { trendTradeRepo } from '@/lib/market/trend-trade/repo';
-import { TREND_TRADE } from '@/lib/market/trend-trade/config';
+import { TREND_TRADE, effectiveMarginRatio } from '@/lib/market/trend-trade/config';
 import { ShortSwingStrategy } from '@/lib/market/trend-trade/strategy/short-swing';
 import { sanitizeRuntimeParams } from '@/lib/market/trend-trade/console-params';
 import { PaperEngine, PaperError } from '@/lib/market/paper';
@@ -731,7 +731,7 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
     expect(realEngine.deposit(5)).rejects.toBeInstanceOf(PaperError);
   });
 
-  test('T17 持仓数量可选（持久化）：maxPositions 只约束上限，每仓保证金 = 权益 20% 与数量解耦', async () => {
+  test('T17 持仓数量可选（持久化）：仓数 ≤4 时不触顶，每仓保证金仍 = 权益 20%（Task 58 封顶不改变小仓数行为）', async () => {
     await trendTradeRepo.seedConfig({
       name: TREND_TRADE.ACCOUNT_NAME,
       mode: 'RUNNING',
@@ -765,8 +765,45 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
     const bySymbol = new Map(rows.map((r) => [r.symbol, r]));
     expect(bySymbol.get('BTCUSDT')!.margin).toBeCloseTo(m1, 2);
     expect(bySymbol.get('ETHUSDT')!.margin).toBeCloseTo(m2, 2);
-    // 两仓均为权益 20%（金额不随持仓数量变化——数量仅约束上限）
+    // 两仓均为权益 20%（仓数 2 远低于 95%÷2=47.5% 封顶线，设定比例原样生效）
     expect(Math.abs(m1 - m2)).toBeLessThan(0.1);
+  });
+
+  test('T17b Task 58 仓位测算封顶：maxPositions=8 时每仓保证金 = 权益 × min(20%, 95%÷8)=11.875%（满仓可开，修复「8 仓只开出 4 仓」）', async () => {
+    await trendTradeRepo.seedConfig({
+      name: TREND_TRADE.ACCOUNT_NAME,
+      mode: 'RUNNING',
+      initialCapital: 100,
+      marginRatio: 0.2,
+      leverage: 20,
+      maxPositions: 8,
+      slippageBps: 2,
+      peakEquity: 0,
+    });
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    engine.marks.set('ETHUSDT', 50);
+    const signals: UnifiedTrendSignal[] = [
+      sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:803' }),
+      sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_UP', cycleId: 'ETHUSDT:L:804' }),
+    ];
+    const trader = makeTrader(signals, engine);
+    await trader.ensureStarted();
+    await openViaPending(signals, trader, 0); // BTC：margin = floor2(100 × 0.11875) = 11.87
+    signals[1] = nextBar(signals[1]!);
+    await trader.tick(); // ETH：权益扣掉一笔手续费后重算 11.875%
+    const rows = await openPositions();
+    expect(rows.length).toBe(2);
+    const floor2 = (v: number) => Math.floor((v + 1e-9) * 100) / 100;
+    const m1 = floor2(100 * (TREND_TRADE.MARGIN_SLOT_HEADROOM / 8)); // 11.87
+    const m2 = floor2((100 - m1 * 20 * TAKER_FEE) * (TREND_TRADE.MARGIN_SLOT_HEADROOM / 8)); // ≈11.86
+    const bySymbol = new Map(rows.map((r) => [r.symbol, r]));
+    expect(bySymbol.get('BTCUSDT')!.margin).toBeCloseTo(m1, 2);
+    expect(bySymbol.get('ETHUSDT')!.margin).toBeCloseTo(m2, 2);
+    // 关键断言：封顶生效——旧 sizing 会是 20.00（8×20%=160% 权益，第 5 仓起必然跳过）
+    expect(m1).toBeLessThan(12);
+    // 预算自洽：8 仓理论满仓占用 ≈ 95% 权益 + 手续费 ≈ 0.95%，不超预算
+    expect(m1 * 8).toBeLessThanOrEqual(100 * TREND_TRADE.MARGIN_SLOT_HEADROOM + 0.1);
   });
 
   test('T18 结束迹象首次报警（Task 56 语义，策略关闭提前离场）：END_PENDING 不平仓 + firstEndSignAt 持久化', async () => {
@@ -1100,6 +1137,22 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
 
   // ===== Task 57-c：参数控制台 =====
 
+  test('T29a effectiveMarginRatio 封顶表（Task 58）：仓数多时自动压缩，小仓数/低设定值原样生效', () => {
+    // ≤4 仓：20% 不触顶（与 Task 54 定版一致）
+    expect(effectiveMarginRatio(0.2, 1)).toBe(0.2);
+    expect(effectiveMarginRatio(0.2, 4)).toBe(0.2);
+    // 5/6/8 仓：95%÷仓数封顶
+    expect(effectiveMarginRatio(0.2, 5)).toBeCloseTo(0.19, 10);
+    expect(effectiveMarginRatio(0.2, 6)).toBeCloseTo(0.95 / 6, 10);
+    expect(effectiveMarginRatio(0.2, 8)).toBeCloseTo(0.11875, 10);
+    // 设定值低于封顶线：用户值原样生效
+    expect(effectiveMarginRatio(0.05, 8)).toBe(0.05);
+    // 高设定值同样被封顶（3 仓 × 50% = 150% 也不可能）
+    expect(effectiveMarginRatio(0.5, 3)).toBeCloseTo(0.95 / 3, 10);
+    // 退化入防：非法仓数回原值
+    expect(effectiveMarginRatio(0.2, 0)).toBe(0.2);
+  });
+
   test('T29 参数校验：未知键/超范围/类型错误拒绝；合法值通过（严格写路径）', () => {
     expect(() => sanitizeRuntimeParams({ NOPE: 1 })).toThrow(/未知参数/);
     expect(() => sanitizeRuntimeParams({ ENTRY_MIN_SCORE: 200 })).toThrow(/不能超过/);
@@ -1205,5 +1258,27 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
     await trader.tick();
     expect((await activePendings()).length).toBe(1);
     expect((await openPositions()).length).toBe(0);
+  });
+
+  test('T34 marginRatio 控制台参数（Task 58）：严格校验 + 持久化 + sizing 热生效 + 恢复默认', async () => {
+    // 严格写路径：范围拒绝（0.005 < 0.01；1.5 > 1），合法值通过
+    expect(() => sanitizeRuntimeParams({ marginRatio: 0.005 })).toThrow(/不能低于/);
+    expect(() => sanitizeRuntimeParams({ marginRatio: 1.5 })).toThrow(/不能超过/);
+    expect(sanitizeRuntimeParams({ marginRatio: 0.35 }).marginRatio).toBe(0.35);
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:1005' })];
+    const trader = makeTrader(signals, engine);
+    await trader.ensureStarted();
+    // 控制台调到 10%：持久化到 marginRatio 列（infra 域，下一 tick 生效）
+    await trader.setRuntimeParams({ marginRatio: 0.1 });
+    expect((await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME))?.marginRatio).toBe(0.1);
+    // sizing 生效：默认 3 仓不触顶 → margin = floor2(100 × 0.1) = 10.00（旧默认 0.2 会是 20.00）
+    await openViaPending(signals, trader);
+    const [pos] = await openPositions();
+    expect(pos!.margin).toBeCloseTo(10, 2);
+    // 恢复默认：marginRatio 回 0.2（列 NOT NULL，回代码默认值而非 null）
+    await trader.resetRuntimeParams();
+    expect((await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME))?.marginRatio).toBe(0.2);
   });
 });

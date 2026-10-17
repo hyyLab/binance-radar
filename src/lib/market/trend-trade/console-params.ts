@@ -150,6 +150,14 @@ export const PARAM_DEFS: ParamDef[] = [
     desc: '同一币种平仓后该时长内新信号只记录不执行，到期后重走完整门槛。防止同一波行情刚平仓又立刻反向追。',
     effect: '调小 → 平仓后更快允许再进；0 = 无冷却（磨损风险自担）；调大 → 更保守',
   },
+  // ===== H · 仓位与资金（基础设施；Task 58） =====
+  {
+    key: 'marginRatio', scope: 'infra', group: '仓位与资金（基础设施）',
+    label: '每仓保证金比例', type: 'number', default: TREND_TRADE.MARGIN_RATIO,
+    min: 0.01, max: 1, step: 0.05,
+    desc: '每仓初始保证金 = 开仓时账户权益 × 本比例（上限）。实际生效比例 = min(本值， 95% ÷ 持仓数)——持仓数多时自动压缩，保证设置的仓位数量实际开得满（如 8 仓时自动压到 11.875%，8 × 11.875% ≈ 95% 权益）；持仓数 ≤ 4 时本值原样生效。保证金 + 手续费超出可用余额时仍会跳过并记录。',
+    effect: '调大 → 单仓仓位更大、满仓总风险更高（超出 95%÷持仓数 的部分被封顶）；调小 → 单仓更轻、同权益下仓数更多，但注意单仓保证金低于 2 USDT 会被跳过',
+  },
 ];
 
 /** 键 → 定义索引（校验/合并用） */
@@ -186,7 +194,7 @@ function codeDefault(d: ParamDef): number | boolean {
  */
 export function effectiveRuntimeParams(
   strategyOverrides: Record<string, unknown> | null,
-  infra: { waitBarConfirm?: number | null; cooldownMs?: number | null },
+  infra: { waitBarConfirm?: number | null; cooldownMs?: number | null; marginRatio?: number | null },
 ): RuntimeParamValue[] {
   return PARAM_DEFS.map((d) => {
     let value = codeDefault(d);
@@ -197,6 +205,8 @@ export function effectiveRuntimeParams(
       value = infra.waitBarConfirm != null ? infra.waitBarConfirm !== 0 : true;
     } else if (d.key === 'cooldownMs') {
       if (infra.cooldownMs != null) value = infra.cooldownMs;
+    } else if (d.key === 'marginRatio') {
+      if (infra.marginRatio != null) value = infra.marginRatio;
     }
     const overridden = value !== codeDefault(d);
     return {
@@ -214,8 +224,8 @@ export function effectiveRuntimeParams(
  */
 export function sanitizeRuntimeParamsLenient(
   raw: unknown,
-): { strategyParams: ShortSwingParams; waitBarConfirm?: number; cooldownMs?: number } {
-  const out: { strategyParams: ShortSwingParams; waitBarConfirm?: number; cooldownMs?: number } = {
+): { strategyParams: ShortSwingParams; waitBarConfirm?: number; cooldownMs?: number; marginRatio?: number } {
+  const out: { strategyParams: ShortSwingParams; waitBarConfirm?: number; cooldownMs?: number; marginRatio?: number } = {
     strategyParams: {},
   };
   if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return out;
@@ -229,6 +239,7 @@ export function sanitizeRuntimeParamsLenient(
       if (def.max != null && n > def.max) continue;
       if (def.scope === 'strategy') (out.strategyParams as Record<string, number>)[key] = n;
       else if (key === 'cooldownMs') out.cooldownMs = Math.round(n);
+      else if (key === 'marginRatio') out.marginRatio = n;
     } else {
       if (typeof value !== 'boolean') continue;
       if (def.scope === 'strategy') (out.strategyParams as Record<string, boolean>)[key] = value;
@@ -247,6 +258,8 @@ export interface SanitizedRuntimeParams {
   strategyParams: ShortSwingParams;
   waitBarConfirm?: number;
   cooldownMs?: number;
+  /** 每仓保证金比例（Task 58；TrendAutoConfig.marginRatio 列，NOT NULL DEFAULT 0.2） */
+  marginRatio?: number;
 }
 
 export function sanitizeRuntimeParams(raw: unknown): SanitizedRuntimeParams {
@@ -268,6 +281,7 @@ export function sanitizeRuntimeParams(raw: unknown): SanitizedRuntimeParams {
       if (def.max != null && n > def.max) throw new Error(`${def.label}（${key}）不能超过 ${def.max}${def.unit ?? ''}`);
       if (def.scope === 'strategy') (out.strategyParams as Record<string, number>)[key] = n;
       else if (key === 'cooldownMs') out.cooldownMs = Math.round(n);
+      else if (key === 'marginRatio') out.marginRatio = n;
     } else {
       if (typeof value !== 'boolean') {
         throw new Error(`${def.label}（${key}）须为 true/false`);

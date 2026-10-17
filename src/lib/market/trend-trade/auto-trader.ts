@@ -6,9 +6,10 @@
 // - 独立账户 trend-auto-v1（PaperAccount.name 隔离；手动 default 盘完全不受影响）
 // - 开仓：确认趋势（CONFIRMED_UP/DOWN）+ 质量门槛（score/ER）+ 高周期过滤 + 二次确认
 //   （首次确认只建待入场记录，等下一根已收盘 K 线复核后开仓）+ 同币种冷却 5 分钟；
-//   每仓保证金 = 开仓时账户权益 × 20%（marginRatio），杠杆固定 20x；保证金+手续费超出
-//   可用余额直接跳过并记录（不变相提高比例/杠杆）；同一趋势周期只允许一笔（决策键幂等），
-//   不允许加仓摊平
+//   每仓保证金 = 开仓时账户权益 × min(marginRatio, 95%÷持仓数)（Task 58：持仓数多时
+//   自动压缩单仓比例保证满仓可开，≤4 仓行为与原 20% 定版一致），杠杆固定 20x；
+//   保证金+手续费超出可用余额直接跳过并记录（不变相提高比例/杠杆）；
+//   同一趋势周期只允许一笔（决策键幂等），不允许加仓摊平
 // - 离场：不设固定止盈止损——趋势结束必须满足「连续 END_CONFIRM_BARS 根不同且有效的
 //   已收盘 K 线持续出现结束证据」并由 lifecycle 判定 ENDED 后才离场，且 ENDED 必须
 //   归属于持仓绑定的同一 trendCycleId（旧周期 ENDED 不得误杀新周期持仓，§2.2）、
@@ -32,6 +33,7 @@ import type { UnifiedTrendSignal } from '../trend-watch/signal';
 import { TREND_WATCH } from '../trend-watch/config';
 import {
   TREND_TRADE,
+  effectiveMarginRatio,
   type HtfGateState,
   type TrendAutoMode,
   type TrendExitReason,
@@ -248,13 +250,15 @@ export class AutoPaperTrader {
    * 保存运行时参数（控制台「保存」入口）并热生效：
    * - strategyParams：当前策略的覆盖项（整体替换该 strategyId 的覆盖对象；传 {} = 全回默认）；
    *   非固定注入策略时重装配实例（轮次状态从 DB 恢复，语义不丢）。
-   * - waitBarConfirm / cooldownMs：基础设施参数，auto-trader 每 tick 重读配置，下一 tick 生效。
+   * - waitBarConfirm / cooldownMs / marginRatio：基础设施参数，auto-trader 每 tick 重读
+   *   配置，下一 tick 生效（marginRatio 实际比例 = min(设定值, 95%÷持仓数)，见 config.ts）。
    * 入参已在 control API 层严格校验（白名单 + 范围）。
    */
   async setRuntimeParams(patch: {
     strategyParams?: Record<string, unknown>;
     waitBarConfirm?: number;
     cooldownMs?: number;
+    marginRatio?: number;
   }): Promise<void> {
     const name = TREND_TRADE.ACCOUNT_NAME;
     const cfg = await this.repo.loadConfig(name);
@@ -263,6 +267,7 @@ export class AutoPaperTrader {
       strategyParamsJson?: string | null;
       waitBarConfirm?: number;
       cooldownMs?: number | null;
+      marginRatio?: number;
     } = {};
     let strategyChanged = false;
     if (patch.strategyParams !== undefined) {
@@ -273,17 +278,22 @@ export class AutoPaperTrader {
     }
     if (patch.waitBarConfirm !== undefined) dbPatch.waitBarConfirm = patch.waitBarConfirm;
     if (patch.cooldownMs !== undefined) dbPatch.cooldownMs = patch.cooldownMs;
+    if (patch.marginRatio !== undefined) dbPatch.marginRatio = patch.marginRatio;
     if (Object.keys(dbPatch).length === 0) return;
     await this.repo.updateRuntimeParams(name, dbPatch);
     if (strategyChanged && !this.fixedStrategy) {
       await this.applyStrategy(strategyId); // 热装配：新参数立即用于后续评估；轮次状态从 DB 恢复
       logDecision(`参数控制台：策略参数已更新并热应用（strategy=${strategyId} params=${JSON.stringify(patch.strategyParams)}）`);
     }
+    // marginRatio 为基础设施列：每 tick 重读 cfg，下一 tick 生效（无需重装配）
+    if (patch.marginRatio !== undefined) {
+      logDecision(`参数控制台：每仓保证金比例已更新为 ${patch.marginRatio}（下一 tick 生效；实际比例 = min(设定值, 95%÷持仓数)）`);
+    }
   }
 
   /**
    * 恢复全部控制台参数为代码默认（控制台「恢复默认」入口）：
-   * 清除当前策略的参数覆盖 + 二次确认开关回开 + 冷却回默认；轮次状态保留。
+   * 清除当前策略的参数覆盖 + 二次确认开关回开 + 冷却回默认 + 保证金比例回 20%；轮次状态保留。
    */
   async resetRuntimeParams(): Promise<void> {
     const name = TREND_TRADE.ACCOUNT_NAME;
@@ -295,6 +305,7 @@ export class AutoPaperTrader {
       strategyParamsJson: JSON.stringify(map),
       waitBarConfirm: 1,
       cooldownMs: null,
+      marginRatio: TREND_TRADE.MARGIN_RATIO, // 列 NOT NULL，回默认值而非 null
     });
     if (!this.fixedStrategy) {
       await this.applyStrategy(strategyId);
@@ -862,17 +873,20 @@ export class AutoPaperTrader {
     if (dup) {
       return { outcome: 'skipped', reason: '同币种已有持仓' };
     }
-    // ⑧ 仓位测算（每仓保证金 = 开仓时账户权益 × 20%；超出可用余额直接跳过）
+    // ⑧ 仓位测算（Task 58：每仓保证金 = 权益 × min(设定比例, 95%÷持仓数)——持仓数多时
+    //    自动压缩单仓比例保证满仓可开；超出可用余额直接跳过）
     const feeFactor = 1 + cfg.leverage * TAKER_FEE;
-    const targetMargin = floor2(eq.equity * cfg.marginRatio);
+    const effRatio = effectiveMarginRatio(cfg.marginRatio, cfg.maxPositions);
+    const effRatioPct = (effRatio * 100).toFixed(2).replace(/\.?0+$/, '');
+    const targetMargin = floor2(eq.equity * effRatio);
     const fee = targetMargin * cfg.leverage * TAKER_FEE;
     if (targetMargin + fee > eq.balance) {
-      const reason = `权益 20% 保证金 ${targetMargin.toFixed(2)} + 手续费 ${fee.toFixed(2)} 超出可用余额 ${eq.balance.toFixed(2)}（跳过不变通）`;
+      const reason = `权益 ${effRatioPct}% 保证金 ${targetMargin.toFixed(2)} + 手续费 ${fee.toFixed(2)} 超出可用余额 ${eq.balance.toFixed(2)}（跳过不变通）`;
       await this.recordSkipDb(signal.symbol, rKey, reason);
       return { outcome: 'skipped', reason };
     }
     if (targetMargin < TREND_TRADE.MIN_MARGIN) {
-      const reason = `权益 20% 保证金 ${targetMargin} 低于最小保证金 ${TREND_TRADE.MIN_MARGIN}`;
+      const reason = `权益 ${effRatioPct}% 保证金 ${targetMargin} 低于最小保证金 ${TREND_TRADE.MIN_MARGIN}`;
       await this.recordSkipDb(signal.symbol, rKey, reason);
       return { outcome: 'skipped', reason };
     }
@@ -952,7 +966,7 @@ export class AutoPaperTrader {
       logDecision(
         `开仓（${via === 'pending' ? '二次确认通过' : '直接开仓·二次确认关闭'}）strategy=${this.strategy.id} mode=${verdict.modeTag} ` +
           `round=${pendingRoundOf(rKey)} symbol=${signal.symbol} side=${side} posCycle=${posCycle} ` +
-          `positionId=${pos.id} margin=${targetMargin}(${Math.round(cfg.marginRatio * 100)}%权益) ` +
+          `positionId=${pos.id} margin=${targetMargin}(${effRatioPct}%权益=min(${Math.round(cfg.marginRatio * 100)}%,95%/${cfg.maxPositions}仓)) ` +
           `leverage=${cfg.leverage}x entryBar=${signal.lastBarTime}${waitedMs} ` +
           `score=${signal.score.toFixed(0)} er=${signal.features.efficiencyRatio.toFixed(2)} ` +
           `htf5m=${signal.htf5m.dir} htf15m=${signal.htf15m.dir}`,
@@ -1109,8 +1123,8 @@ export class AutoPaperTrader {
       lastBarTime: signal.lastBarTime,
       margin,
       leverage: cfg.leverage,
-      /** Task 56：sizing = 开仓时账户权益 × 20%（保证金 + 手续费超出余额则跳过） */
-      marginBasis: `equity × ${cfg.marginRatio} (skip if unaffordable)`,
+      /** Task 58：sizing = 开仓时权益 × min(设定比例, 95%÷持仓数)（保证金 + 手续费超出余额则跳过） */
+      marginBasis: `equity × min(${cfg.marginRatio}, ${TREND_TRADE.MARGIN_SLOT_HEADROOM}/${cfg.maxPositions}) (skip if unaffordable)`,
       entryEr: signal.features.efficiencyRatio,
       htf5mDir: signal.htf5m.dir,
       htf15mDir: signal.htf15m.dir,

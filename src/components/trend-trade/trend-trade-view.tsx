@@ -531,7 +531,7 @@ export function TrendTradeView() {
             </select>
           </label>
           {/* Task 55：持仓数量可选——更换即自动平仓原有持仓 */}
-          <label className="flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted-foreground" title="最大同时持仓数（与每仓保证金解耦）；更换数量会自动平仓原有持仓。每仓保证金 = 开仓时账户权益 × 20%，余额不足时跳过并记录">
+          <label className="flex items-center gap-1 rounded border border-border px-1.5 py-1 text-[11px] text-muted-foreground" title="最大同时持仓数；更换数量会自动平仓原有持仓。每仓保证金 = 开仓时权益 × min(设定比例, 95%÷持仓数)——持仓数多时自动压缩单仓比例保证满仓可开；余额不足时跳过并记录。比例可在参数控制台调整">
             持仓
             <select
               value={maxPositions}
@@ -841,7 +841,7 @@ export function TrendTradeView() {
                 {confirm?.type === 'changePositions' && (
                   <>
                     <span className="block">· 将自动平仓当前全部 {data?.positions.length ?? 0} 笔持仓（按标记价市价）</span>
-                    <span className="block">· 持仓数量仅约束同时持仓上限；每仓保证金 = 开仓时账户权益 × 20%（余额不足时跳过并记录）</span>
+                    <span className="block">· 持仓数量仅约束同时持仓上限；每仓保证金 = 开仓时权益 × min(设定比例， 95%÷持仓数)——持仓数多时自动压缩保证满仓可开（余额不足仍跳过并记录）</span>
                     <span className="block">· 新确认趋势按新口径开仓；被平掉的旧趋势周期不会立即重开</span>
                   </>
                 )}

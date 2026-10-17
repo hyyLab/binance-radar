@@ -2,7 +2,7 @@ import { NextResponse } from 'next/server';
 import { db } from '@/lib/db';
 import { getEnhancedEngine } from '@/lib/market/enhanced/engine';
 import { ensureTrendTradeSchema, trendTradeRepo } from '@/lib/market/trend-trade/repo';
-import { TREND_TRADE } from '@/lib/market/trend-trade/config';
+import { TREND_TRADE, effectiveMarginRatio } from '@/lib/market/trend-trade/config';
 import { listStrategies } from '@/lib/market/trend-trade/strategy/registry';
 import {
   effectiveRuntimeParams,
@@ -126,7 +126,13 @@ export async function GET() {
     const consoleParams = effectiveRuntimeParams(strategyOverrides, {
       waitBarConfirm: cfg?.waitBarConfirm ?? null,
       cooldownMs: cfg?.cooldownMs ?? null,
+      marginRatio: cfg?.marginRatio ?? null,
     });
+    // Task 58：当前仓位数下的实际单仓保证金比例（控制台/持仓下拉 tooltip 数据源）
+    const effMarginRatio = effectiveMarginRatio(
+      cfg?.marginRatio ?? TREND_TRADE.MARGIN_RATIO,
+      cfg?.maxPositions ?? TREND_TRADE.MAX_POSITIONS,
+    );
 
     return NextResponse.json(
       {
@@ -145,6 +151,8 @@ export async function GET() {
           accountName: TREND_TRADE.ACCOUNT_NAME,
           initialCapital,
           marginRatio: cfg?.marginRatio ?? TREND_TRADE.MARGIN_RATIO,
+          // Task 58：min(设定比例, 95%÷持仓数)——满仓可开的实际单仓比例
+          effMarginRatio,
           leverage: cfg?.leverage ?? TREND_TRADE.LEVERAGE,
           maxPositions: cfg?.maxPositions ?? TREND_TRADE.MAX_POSITIONS,
           slippageBps: cfg?.slippageBps ?? TREND_TRADE.SLIPPAGE_BPS,

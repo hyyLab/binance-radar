@@ -474,7 +474,7 @@ export function createTrendTradeRepo(client: RawClient = db) {
      *  只更新传入的字段；全部白名单列，无拼接注入面。调用方负责热应用。 */
     async updateRuntimeParams(
       name: string,
-      patch: { strategyParamsJson?: string | null; waitBarConfirm?: number; cooldownMs?: number | null },
+      patch: { strategyParamsJson?: string | null; waitBarConfirm?: number; cooldownMs?: number | null; marginRatio?: number },
     ): Promise<void> {
       const sets: string[] = ['updatedAt = ?'];
       const args: (string | number | Date | null)[] = [new Date()];
@@ -489,6 +489,10 @@ export function createTrendTradeRepo(client: RawClient = db) {
       if (patch.cooldownMs !== undefined) {
         sets.push('cooldownMs = ?');
         args.push(patch.cooldownMs);
+      }
+      if (patch.marginRatio !== undefined) {
+        sets.push('marginRatio = ?');
+        args.push(patch.marginRatio);
       }
       args.push(name);
       await client.$executeRawUnsafe(

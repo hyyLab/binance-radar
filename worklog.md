@@ -310,3 +310,22 @@ Stage Summary:
 - 全部恢复：5 个关键 API + 2 个页面 200；引擎 RUNNING、心跳正常（trendSignalCount 1→2）、lastError 空；测试 73/73 全绿；server 3000 全程未重启
 - 结论：非代码 bug，属「环境整机重启 → node_modules 重建不完整」事故。两处修复均无代码改动、无引擎 bump
 - 遗留观察：db/custom.db.rollback-backup-10170050/10170820 为今日 10:17 生成的历史备份，非本次事故产物，暂不清理
+
+---
+Task ID: 58
+Agent: main
+Task: 仓位测算修复——用户反馈「设置持仓 8 仓，只开出 4 仓就没保证金了」
+
+Work Log:
+- 根因：每仓保证金 = 权益 × 20% 与 maxPositions 完全解耦（T17 甚至把「解耦」当正确行为断言）——8 × 20% = 160% 权益物理上不可能开满，第 5 仓起必然「保证金+手续费 > 可用余额」跳过
+- 核心修复：effectiveMarginRatio(marginRatio, maxPositions) = min(设定比例, MARGIN_SLOT_HEADROOM 0.95 ÷ 持仓数)（config.ts 唯一定义）——≤4 仓行为与原 20% 定版完全一致；5/6/8 仓自动压缩为 19%/15.83%/11.875%，满仓合计 ≈ 95% 权益（5% 留给手续费+浮动缓冲）；唯一消费点 executeOpen ⑧（pending/direct 共用单点生效）
+- marginRatio 接入参数控制台为第 14 参数（infra 域「仓位与资金」组，0.01-1）：console-params 双路 sanitize + effectiveRuntimeParams + repo.updateRuntimeParams 白名单 + autoTrader setRuntimeParams/resetRuntimeParams（列 NOT NULL，reset 回 0.2 而非 null）；每 tick 重读即时生效，只影响新仓不动已有持仓
+- 文案全量同步：跳过原因/开仓日志（含 min(20%,95%/8仓) 明细）/openDetail.marginBasis/setMaxPositions note（顺带修掉初版 `?? MARGIN_RATIO*100` 运算符优先级 bug，改用上方已 load 的 current）/持仓下拉 tooltip/换仓确认弹窗/空仓文案口径
+- GET overview 新增 config.effMarginRatio（当前仓位数下实际单仓比例）；测试 T17 改语义 + 新增 T17b（8 仓 11.87/11.86 + 预算自洽断言）+ T29a 封顶表 + T34（marginRatio 校验/持久化/sizing 生效/恢复默认）；76/76 全绿；改动文件 typecheck/eslint 干净
+- 引擎单例 bump v13→v14（补上 v13 缺失的头注释；pickLegacyEngine 链插入 v13 时一度顶掉 v12，自查发现补回）；说明书 v1.1：manual-content.js 14 参数 + 3.14 保证金卡 + 速查表加行 + 封面版本号，gen-params-manual.js 重生成 + patch-manual-footers.py 页脚补丁
+- 线上验证（未重启 server）：v14 热接管（startedAt 更新、lastError=null、用户 11 个自定义参数全保留）；setRuntimeParams no-op 写 200 + 非法值 400「不能超过 1」；接管后新开 2 笔（PROM 13.00/NEAR 13.35）均为封顶比例 ≈11.875%（旧代码会因 ~22 > 可用余额跳过）；审计 marginBasis = "equity × min(0.2, 0.95/8)"
+
+Stage Summary:
+- 交付：满仓可开的封顶 sizing + marginRatio 控制台第 14 参数 + 说明书 v1.1（download/趋势机器人自动开仓参数说明书.docx）；76 测试全绿；引擎 v14 运行中
+- 行为预期：8 仓下每仓 ≈ 11.875% 权益（总名义敞口 ≈ 19 倍权益，8 仓 × 20x），强平敏感度显著高于小仓数配置——用户需知晓这是满仓的代价；存量旧仓（20% 保证金开的）自然轮换后新仓全部按封顶比例
+- 边界保留：余额不足仍跳过不变通；MIN_MARGIN 2 USDT 仍生效；marginRatio 调整不平已有仓（换仓位数才平）

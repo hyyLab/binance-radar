@@ -12,10 +12,16 @@ export const TREND_TRADE = {
   // ===== 运行参数（DB TrendAutoConfig 行为运行时真值；此处为首次播种/重置的默认值） =====
   /** 初始资金（USDT）——可配置（DB initialCapital），界面明确展示 */
   INITIAL_CAPITAL: 100,
-  /** 每笔保证金比例（用户定版 §一.1/§六）：每次自动开仓使用「开仓时账户权益 × 20%」
-   *  作为初始保证金（权益 = 可用余额 + 已占用保证金 + 未实现盈亏，与模拟账户口径一致）。
+  /** 每笔保证金比例（用户定版 §一.1/§六；Task 58 语义修订）：每次自动开仓使用
+   *  「开仓时账户权益 × min(本比例, 95% ÷ 持仓数)」作为初始保证金（权益 = 可用余额 +
+   *  已占用保证金 + 未实现盈亏，与模拟账户口径一致）。持仓数多时自动压缩单仓比例，
+   *  保证 maxPositions 个仓位实际开得满（用户反馈：设 8 仓只开出 4 仓就没余额——
+   *  8 × 20% = 160% 权益物理上不可能）。95% 头寸 = 预留 ~5% 给手续费与浮动亏损缓冲。
    *  保证金 + 开仓手续费超出可用余额时直接跳过该笔并记录原因，不得变相提高杠杆/比例。 */
   MARGIN_RATIO: 0.2,
+  /** 满仓头寸预算（Task 58）：全部 maxPositions 个仓位的保证金合计 ≈ 权益 × 本值，
+   *  剩余 ~5% 覆盖开仓手续费（20x 杠杆下全部仓位手续费 ≈ 权益 × 0.95%）与浮动亏损。 */
+  MARGIN_SLOT_HEADROOM: 0.95,
   /** 持仓数量（最大同时持仓数）可选项（界面下拉） */
   MAX_POSITIONS_OPTIONS: [1, 2, 3, 4, 5, 6, 8] as const,
   /** 固定杠杆（用户定版 20 倍） */
@@ -58,6 +64,17 @@ export const TREND_TRADE = {
 
 /** 自动账户运行模式（TrendAutoConfig.mode） */
 export type TrendAutoMode = 'RUNNING' | 'PAUSED' | 'STOPPED';
+
+/**
+ * 单仓有效保证金比例（Task 58 用户反馈修复）：min(设定比例, 95% ÷ 持仓数)。
+ * 持仓数 ≤ 4 时设定比例 20% 不触顶（行为与 Task 54 定版完全一致）；
+ * 5/6/8 仓时自动压缩为 19% / 15.83% / 11.875%，保证满仓可开。
+ * 唯一消费点：auto-trader executeOpen 仓位测算（pending 转换与直开共用，单点生效）。
+ */
+export function effectiveMarginRatio(marginRatio: number, maxPositions: number): number {
+  if (!(maxPositions > 0)) return marginRatio;
+  return Math.min(marginRatio, TREND_TRADE.MARGIN_SLOT_HEADROOM / maxPositions);
+}
 
 /** 平仓原因（TrendTradeMeta.exitReason；细分的模型结束原因见 TrendTradeMeta.exitEndReason） */
 export type TrendExitReason =

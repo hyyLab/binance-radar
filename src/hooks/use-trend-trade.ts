@@ -80,6 +80,8 @@ export interface TrendOverview {
     accountName: string;
     initialCapital: number;
     marginRatio: number;
+    /** Task 58：min(设定比例, 95%÷持仓数)——当前仓位数下满仓可开的实际单仓比例 */
+    effMarginRatio: number;
     leverage: number;
     maxPositions: number;
     slippageBps: number;
