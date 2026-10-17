@@ -449,6 +449,11 @@ export class AutoPaperTrader {
 
       // ③ 退出管理（暂停模式也执行：趋势结束/反向确认/策略离场照常执行）
       const signals = this.deps.getSignals();
+      // 更新事件的实时突破状态，让持仓在异动从有效变为 FALSE 时不必等趋势池/UTE。
+      if (this.isEventDrivenStrategy() && this.deps.getEvents && this.strategy.observeAnomalyEvent) {
+        const events = this.deps.getEvents(now);
+        for (const event of [...events.active, ...events.ended]) this.strategy.observeAnomalyEvent(event);
+      }
       const bySymbol = new Map(signals.map((s) => [s.symbol, s]));
       await this.manageExits(bySymbol);
 
@@ -782,7 +787,7 @@ export class AutoPaperTrader {
     const rows = await db.paperPosition.findMany({ where: { accountId, status: 'OPEN' } });
     const openSymbols = new Set(rows.map(p => p.symbol));
     const events = getEvents(Date.now()).active
-      .filter(e => e.state === 'ACTIVE' && e.level === 'MAJOR' && e.priority === 'P1')
+      .filter(e => e.state === 'ACTIVE' && e.level === 'MAJOR' && (e.priority === 'P1' || (e.peakPriority === 'P1' && e.breakout.status === 'FALSE')))
       .sort((a, b) => {
         const rank = (e: EnhancedEventDTO) => e.breakout.status === 'CONFIRMED' ? 3 : e.breakout.status === 'FALSE' ? 2 : 1;
         return rank(b) - rank(a) || (b.p1At ?? b.firstAt) - (a.p1At ?? a.firstAt);
