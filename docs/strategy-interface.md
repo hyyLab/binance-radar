@@ -23,7 +23,7 @@
 
 1. **普通趋势策略的选币不归算法管**。short-swing / universal-trend 使用 TrendWatchService 的候选池与统一趋势信号；事件驱动策略可实现 `evaluateAnomalyEntry`，直接接收 EnhancedEngine 的活动异动事件，不依赖趋势池。
 2. **资金与风控不归算法管**。保证金怎么算、最多几仓、重复开仓怎么防、强平怎么巡检、审计怎么落库，全部由 AutoPaperTrader（基础设施）统一提供。
-3. **算法只回答两个问题**：这个币**现在想不想开仓、往哪个方向**（`evaluateEntry`）；这笔持仓**现在要不要离场**（`evaluateExit`）。答案不同，策略就不同——这就是全部个性所在。
+3. **算法只回答入场与离场决策**：普通趋势策略使用 `evaluateEntry`；事件驱动算法可使用 `evaluateAnomalyEntry(event, ctx, priorCandles)` 直接处理重大异动，并通过 `observeAnomalyEvent` 更新持仓期间的突破状态；所有策略使用 `evaluateExit` 管理离场。
 
 ---
 
@@ -43,7 +43,7 @@ AutoPaperTrader（普通策略 10s；声明 `scanIntervalMs` 的策略可使用�
         │  ⑤开仓管理（待入场复核 → 新信号扫描）
         ▼
 TrendStrategy（你的算法，可插拔）
-        │  evaluateEntry / evaluateExit / nextRound / onOpen / onClose
+        │  evaluateEntry / evaluateExit / 可选 evaluateAnomalyEntry / 可选 observeAnomalyEvent / nextRound / onOpen / onClose
         ▼
 PaperEngine（模拟撮合，账户 trend-auto-v1，20x 杠杆、费率 0.02% 双边）
         │
