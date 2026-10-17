@@ -1,30 +1,46 @@
-// ---------- 策略：通用趋势引擎 v1（universal-trend-v1，Task 62：最开始的 UTE 算法化） ----------
+// ---------- 策略：通用趋势引擎 v1（universal-trend-v1，Task 62 上架 / Task 66 复盘定版） ----------
 //
 // 血缘（这是系统最开始的趋势算法）：vendor/universal-trend-engine = 最初的趋势判定内核
 // ——五因子证据分（区间收益 0.35 / 方向一致性 0.25 / 突破 0.20 / 量能 0.15 / 振幅扩张 0.05
 // + 异动加成 3 分）+ 候选→确认状态机（连续 3 根已收盘 1m K 线同向证据才确认）。
 // 该内核至今仍是唯一趋势来源（trend-watch/service 消费 vendor 包产出 UnifiedTrendSignal，
-// 纪律：绝不出现第二套方向算法），本策略 = 在这份信号之上的「UTE 直通车」决策层：
-// 信号确认了就顺着做，确认还在就拿着，确认走弱就先走——不添加 UTE 之外的任何判断。
+// 纪律：绝不出现第二套方向算法），本策略 = 在这份信号之上的决策层。
 //
-// 与「短周期套利」(short-swing-v1) 的区别（用户对比用，2026-10-17）：
-// ┌────────────┬──────────────────────────────┬────────────────────────────────┐
-// │ 维度        │ 通用趋势引擎（本策略）           │ 短周期套利（short-swing-v1）      │
-// ├────────────┼──────────────────────────────┼────────────────────────────────┤
-// │ 入场条件    │ 1m 确认即入场（纯确认制，        │ 确认 + 评分/ER 双门槛 + 5m 背景    │
-// │            │ ENTRY_MIN_SCORE 默认 0）        │ 分级（同向波段/震荡选向/反向不做）  │
-// │ 5m 背景     │ 不设门槛（单一标的自足，          │ 硬过滤：反向拒绝、震荡选向加严      │
-// │            │ 仅在审计留档）                   │                                │
-// │ 冲高落袋    │ 无（确认在就拿满周期）            │ SPIKE_TAKE 短窗脉冲落袋           │
-// │ 离场        │ 走弱先走（END_PENDING 同周期）    │ 冲高落袋 / 走弱先走（先落袋后走弱）  │
-// │ 持仓风格    │ 趋势跟随：拿整个确认周期           │ 短窗口脉冲套利：快进快出            │
-// └────────────┴──────────────────────────────┴────────────────────────────────┘
+// Task 66 用户定版（2026-10-17 复盘）——旧版两个问题与修复：
+// ①「建仓点位是提前预判，比如不是震荡之后的方向选择，就容易追涨/追空」
+//   → 入场改为「震荡后方向选择确认制」（REQUIRE_DIRECTION_PICK）：确认之外还要求
+//     features.breakout 与方向一致（收盘价刚越出近期区间高/低点 = 字面意义的「震荡之后
+//     的方向选择」）或 ER ≥ ENTRY_MIN_ER（突破后 1-2 根的单边延续段）；两者皆无 =
+//     震荡区间内部的噪声确认（预判性入场），拒绝。
+// ②「止盈止损门槛需要合理设置：已有盈利的情况下多少止盈、多少止损；出现了稍微回调一点
+//   就止损的情况，不合理」
+//   → 离场三层化：
+//     a) 硬止损 STOP_LOSS_PCT=1.0%（价格口径）：方向选择失败的单子砍在 -20% 保证金
+//        @20x，不拖到强平；对 1m 常态回调（ATR% 0.2~0.4%）足够宽容，不会被小回调扫掉。
+//     b) 移动止盈 TRAIL_ARM_PCT=15% / TRAIL_GIVEBACK_PCT=8%（保证金口径）：浮盈 ≥15%
+//        激活，从峰值回撤 ≥8% 落袋（TRAIL_TAKE）——不设固定止盈线（趋势要拿大段），
+//        但利润回吐有底线。
+//     c) 走弱先走需 WEAKNESS_MIN_EVIDENCE_BARS=2 根证据：旧版 END_PENDING 第一根证据
+//        即割（单根噪声 = 「稍微回调一点就止损」的根源）；2 根 = 连续两根独立收盘 K 线
+//        持续走弱，仍早于 ENDED 的 3 根确认。
 //
-// 控制台参数（用户定版 2026-10-17）：暂不注册 PARAM_DEFS，使用下方代码默认——参数结构
-// 已按「UTE_ 可覆盖」设计（构造器 withDefaults），将来要开放控制台按 docs/strategy-interface.md
+// 与「短周期套利」(short-swing-v1) 的区别（Task 66 版）：
+// ┌──────────┬──────────────────────────────────┬──────────────────────────────┐
+// │ 维度      │ 通用趋势引擎（本策略）              │ 短周期套利（short-swing-v1）    │
+// ├──────────┼──────────────────────────────────┼──────────────────────────────┤
+// │ 入场条件  │ 确认 + 震荡后方向选择证据（突破同向  │ 确认 + 评分/ER 双门槛 + 5m 背景 │
+// │          │ 或 ER 单边延续）                   │ 分级（同向波段/震荡选向/反向不做）│
+// │ 止盈      │ 移动止盈：峰值 15% 后回撤 8% 落袋    │ SPIKE_TAKE 冲高脉冲落袋（0.4%） │
+// │ 止损      │ 硬止损 1.0% 价格（≈20% 保证金 @20x） │ 无（走弱先走/ENDED/强平兜底）    │
+// │ 走弱离场  │ END_PENDING 证据 ≥2 根先走          │ END_PENDING 即走（1 根证据）     │
+// │ 持仓风格  │ 趋势跟随：拿趋势大段，利润回吐有底线  │ 短窗口脉冲套利：快进快出         │
+// └──────────┴──────────────────────────────────┴──────────────────────────────┘
+//
+// 控制台参数（用户定版 2026-10-17）：暂不注册 PARAM_DEFS，使用代码默认——参数结构已按
+// 「UTE_ 可覆盖」设计（构造器 withDefaults），将来要开放控制台按 docs/strategy-interface.md
 // §6.3 三步即可（键前缀 UTE_ 与 short-swing 的键天然不撞）。
 //
-// 红线：纯模拟；阈值为忠实 UTE 原味的工程初值、未经历史回放校准，不构成盈利能力声明；
+// 红线：纯模拟；阈值为复盘定版的工程初值、未经历史回放校准，不构成盈利能力声明；
 // 强平/ENDED 周期匹配/反向确认/二次确认/冷却等基础设施规则不受本策略影响。
 
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
@@ -38,16 +54,43 @@ import type {
   TrendStrategy,
 } from './types';
 
-/** 通用趋势引擎 v1 · 全部可调参数（唯一调参入口；忠实 UTE 原味的默认值） */
+/** 通用趋势引擎 v1 · 全部可调参数（唯一调参入口；Task 66 复盘定版：方向选择确认制 + 三层离场） */
 export const UNIVERSAL_TREND = {
   /** 入场评分下限（0 = 纯确认制：UTE 确认状态机已要求连续 3 根同向收盘证据，不再加门槛；
    *  调高可挡「刚过确认线的弱证据」杂音——这是 UTE 与短周期套利最大的差异旋钮） */
   ENTRY_MIN_SCORE: 0,
+  /** 震荡后方向选择确认制（用户定版 2026-10-17 复盘：「顺着震荡之后的方向选择的方向来做多
+   *  或者做空，而不是提前对趋势进行预判性做多或者做空」）：true = 确认之外还要求「方向选择」
+   *  证据——features.breakout 与方向一致（收盘价刚越出近期区间高/低点 = 字面意义的
+   *  「震荡之后的方向选择」）或 ER ≥ ENTRY_MIN_ER（突破后 1-2 根的单边延续段）；
+   *  两者皆无 = 震荡区间内部的噪声确认（预判性入场），拒绝。false = 旧版纯确认制 */
+  REQUIRE_DIRECTION_PICK: true,
+  /** 方向选择延续段的 ER 下限：突破标记只在突破瞬间出现，突破后 1-2 根收盘 ER 仍高
+   *  （走势高度单边）同样视为「方向选择进行中」；无突破伴随且低于该线 = 震荡噪声 */
+  ENTRY_MIN_ER: 0.3,
   /** 同一趋势周期最大开仓轮次（首次 + 走弱后走强的再入场；防同周期无限磨损的护栏） */
   MAX_ROUNDS_PER_CYCLE: 2,
   /** 同周期再入场最小间隔（上次平仓 → 下次评估开仓，防同一根 K 线内反复进出） */
   REENTRY_MIN_GAP_MS: 60_000,
-  /** 走弱是否提前离场（true = END_PENDING 同周期即走，配合轮次再入场——UTE 语义
+  /** 硬止损（价格 %，用户定版「多少止损」）：开仓后价格逆行 ≥ 该值立即止损。1.0% 价格
+   *  （20x 下 = 20% 保证金）对 1m 级别是深逆行（常态 ATR% 0.2~0.4%，正常回调远够不到），
+   *  不会「稍微回调就触发」；但把方向选择失败的深亏单砍在 -20% 而不是拖到强平线。
+   *  0 = 关闭（不推荐——20x 下无止损的单子 5% 逆行即近爆仓） */
+  STOP_LOSS_PCT: 1.0,
+  /** 移动止盈激活线（保证金 %，用户定版「已有盈利的情况下多少止盈」）：浮盈 ≥ 该值后
+   *  启用利润回撤保护。15% 保证金 = 0.75% 价格 @20x——不干扰主升段（正常回调的回吐
+   *  远够不到），只在趋势确实兑现过利润之后开始保护 */
+  TRAIL_ARM_PCT: 15,
+  /** 移动止盈回撤线（保证金 %）：激活后从持仓期峰值浮盈回撤 ≥ 该值 → 落袋（TRAIL_TAKE）
+   *  ——趋势模型的「利润兑现」：不设固定止盈线（要拿趋势大段），但利润回吐有底线。
+   *  8% 保证金 = 0.4% 价格 @20x。0 = 关闭 */
+  TRAIL_GIVEBACK_PCT: 8,
+  /** 走弱先走最小证据根数（用户定版 2026-10-17 复盘：修复「稍微回调一点就止损」的不合理
+   *  离场）：END_PENDING 结束证据（不同已收盘 K 线）≥ 该根数才先走——1 根证据可能是单根
+   *  噪声（旧版第一根就割在回撤深处），2 根 = 连续两根独立 K 线持续出现结束证据，仍早于
+   *  ENDED 的 3 根确认，保留「先走」优势又给趋势一根 K 线的容忍度 */
+  WEAKNESS_MIN_EVIDENCE_BARS: 2,
+  /** 走弱是否提前离场（true = END_PENDING 证据达标即走，配合轮次再入场——UTE 语义
    *  「确认不在即离场」；false = 等 ENDED/反向确认/强平的纯持有版，回撤可能更深） */
   WEAKNESS_EXIT_EARLY: true,
 };
@@ -77,8 +120,9 @@ export class UniversalTrendStrategy implements TrendStrategy {
   readonly id = 'universal-trend-v1';
   readonly name = '通用趋势引擎';
   readonly description =
-    '最开始的 Universal Trend Engine 直通车：1m 确认即顺势入场（不设评分/ER/5m 门槛），' +
-    '确认在就拿满周期、走弱先走（走强可再入场 ≤2 轮）；无冲高落袋';
+    'Universal Trend Engine 趋势跟随（Task 66 复盘定版）：1m 确认 + 震荡后方向选择证据' +
+    '（区间突破同向或 ER 单边延续）才入场，不做预判性单；离场三层：硬止损 1% 价格、' +
+    '移动止盈（峰值浮盈 15% 后回撤 8% 落袋）、走弱证据 2 根先走（走强可再入场 ≤2 轮）';
 
   /** 可调参数（构造器覆盖；生产默认值 = UTE 原味） */
   readonly params: typeof UNIVERSAL_TREND;
@@ -144,19 +188,49 @@ export class UniversalTrendStrategy implements TrendStrategy {
       };
     }
 
-    // 放行：纯确认制顺势单。5m 背景与 ER 仅留档（UTE 不设门槛——单一标的自足哲学，
-    // 与短周期套利的本质区别之一；这些值进审计供事后对比分析）
+    // ⑥ 震荡后方向选择确认制（用户定版 2026-10-17 复盘）：确认 ≠ 可交易——UTE 的确认
+    //    也可能发生在震荡区间内部（区间内连续 3 根同向收盘即确认），那是用户指出的
+    //    「提前对趋势进行预判性做多/做空」；只在「震荡之后的方向选择」上顺势：
+    //    a) 突破证据：features.breakout 与方向一致（收盘价刚越出近期区间高/低点）
+    //    b) 延续证据：ER ≥ ENTRY_MIN_ER（突破后 1-2 根的单边延续段——突破标记已回落
+    //       但走势仍高度单边 = 方向选择进行中）
+    //    两者皆无 = 区间内噪声确认，等真正的方向选择（属于预判性入场，拒绝）
+    const er = signal.features.efficiencyRatio;
+    if (this.params.REQUIRE_DIRECTION_PICK) {
+      const dir = signal.direction;
+      const bo = signal.features.breakout;
+      const byBreakout = (dir === 'up' && bo === 'up') || (dir === 'down' && bo === 'down');
+      const byContinuation = er >= this.params.ENTRY_MIN_ER;
+      if (!byBreakout && !byContinuation) {
+        return {
+          want: false, side: null, modeTag: 'NO_DIRECTION_PICK',
+          reason: `震荡内噪声确认（breakout=${bo}、ER ${er.toFixed(2)} < ${this.params.ENTRY_MIN_ER}）：等震荡之后的方向选择再顺势，不做预判性入场`,
+        };
+      }
+    }
+
+    // 放行：确认 + 方向选择证据的顺势单。5m 背景仅留档（UTE 不设背景门槛——单一标的
+    // 自足哲学，与短周期套利的本质区别之一；这些值进审计供事后对比分析）
     const h5dir = signal.htf5m.valid ? signal.htf5m.dir : '数据不足';
+    const bo = signal.features.breakout;
+    const pickDesc =
+      (signal.direction === 'up' && bo === 'up') || (signal.direction === 'down' && bo === 'down')
+        ? `区间突破（${bo}）`
+        : `单边延续 ER=${er.toFixed(2)}`;
     return {
       want: true, side, modeTag: 'UTE_CONFIRMED',
       reason:
-        `UTE 确认即顺势（${side === 'LONG' ? '确认上涨' : '确认下跌'}）score=${score.toFixed(0)} ` +
-        `er=${signal.features.efficiencyRatio.toFixed(2)}（5m 背景 ${h5dir} 仅留档不设门）` +
+        `UTE 确认 + 方向选择（${pickDesc}）顺势${side === 'LONG' ? '做多' : '做空'} score=${score.toFixed(0)} ` +
+        `er=${er.toFixed(2)}（5m 背景 ${h5dir} 仅留档不设门）` +
         `${nextRound > 1 ? ` 轮次#R${nextRound}` : ''}`,
     };
   }
 
-  // ============ 离场评估（走弱先走；无冲高落袋——确认在就拿满周期） ============
+  // ============ 离场评估（三层：硬止损 → 利润回撤保护 → 走弱先走证据达标版） ============
+  // Task 66 用户定版 2026-10-17 复盘：旧版只有「走弱先走」一层（END_PENDING 一根证据
+  // 即割 = 「稍微回调一点就止损」的不合理离场），且无止盈无止损（长周期大盈大亏）。
+  // 现为：① 硬止损（回答「多少止损」）② 移动止盈（回答「已有盈利的情况下多少止盈」）
+  // ③ 走弱先走（证据 ≥2 根才走，修复单根噪声即割）；ENDED/反向/强平仍由基础设施处理。
 
   evaluateExit(input: {
     meta: TrendTradeMetaRow;
@@ -165,22 +239,62 @@ export class UniversalTrendStrategy implements TrendStrategy {
     signal: UnifiedTrendSignal | null;
     now: number;
   }): StrategyExitVerdict {
-    const { meta, signal } = input;
+    const { meta, pos, mark, signal } = input;
+    const sign = pos.side === 'LONG' ? 1 : -1;
 
-    // 走弱先走：本周期出现结束迹象即离场（UTE 语义「确认不在即离场」的宽限版——
-    // END_PENDING 底层方向仍成立，比直接掉头温和；走强回确认后按轮次再入场。
-    // 异周期 END_PENDING 与本持仓无关，绝不误平）
-    if (this.params.WEAKNESS_EXIT_EARLY && signal && signal.phase === 'END_PENDING') {
+    // ① 硬止损：价格逆行 ≥ STOP_LOSS_PCT（价格 %）→ 止损。趋势确认不等于价格不逆行——
+    //    方向选择失败的持仓不允许拖到强平（20x 下 5% 逆行即近爆仓线）。口径 = 价格 %：
+    //    evaluateExit 无杠杆上下文，与杠杆解耦的绝对尺度更可解释（1% ≈ 20x 下 20% 保证金）
+    if (this.params.STOP_LOSS_PCT > 0 && pos.entryPrice > 0) {
+      const adversePct = ((pos.entryPrice - mark) / pos.entryPrice) * 100 * sign;
+      if (adversePct >= this.params.STOP_LOSS_PCT) {
+        return {
+          exit: true,
+          reason: 'STOP_LOSS',
+          detail: `硬止损：价格逆行 ${adversePct.toFixed(2)}% ≥ ${this.params.STOP_LOSS_PCT}%（方向选择失败，防拖到强平）`,
+        };
+      }
+    }
+
+    // ② 利润回撤保护（移动止盈）：浮盈曾达 TRAIL_ARM_PCT（保证金 %）激活后，从峰值回撤
+    //    ≥ TRAIL_GIVEBACK_PCT → 落袋（TRAIL_TAKE）。不设固定止盈线（趋势要拿大段），但
+    //    利润回吐有底线。峰值 = max(meta.mfe[上一 tick 落库的持仓期峰值], 当前实时浮盈)
+    //    ——当前 tick 刚创新高时立即按新峰值生效，不等下一 tick 落库
+    if (this.params.TRAIL_ARM_PCT > 0 && this.params.TRAIL_GIVEBACK_PCT > 0 && pos.margin > 0) {
+      const livePnlPct = ((mark - pos.entryPrice) * pos.qty * sign / pos.margin) * 100;
+      const peak = Math.max(meta.mfe ?? 0, livePnlPct);
+      if (peak >= this.params.TRAIL_ARM_PCT) {
+        const giveback = peak - livePnlPct;
+        if (giveback >= this.params.TRAIL_GIVEBACK_PCT) {
+          return {
+            exit: true,
+            reason: 'TRAIL_TAKE',
+            detail: `移动止盈：峰值浮盈 ${peak.toFixed(1)}% ≥ ${this.params.TRAIL_ARM_PCT}% 后回撤 ${giveback.toFixed(1)}% ≥ ${this.params.TRAIL_GIVEBACK_PCT}%，锁定利润离场`,
+          };
+        }
+      }
+    }
+
+    // ③ 走弱先走（证据达标版）：本周期 END_PENDING 结束证据 ≥ WEAKNESS_MIN_EVIDENCE_BARS
+    //    根（不同已收盘 K 线）才先走——1 根证据可能是单根噪声（旧版即割 = 「稍微回调一点
+    //    就止损」），2 根 = 连续两根独立 K 线持续走弱，仍早于 ENDED 的 3 根确认；走强回
+    //    确认后按轮次再入场。异周期 END_PENDING 与本持仓无关，绝不误平
+    if (
+      this.params.WEAKNESS_EXIT_EARLY &&
+      signal &&
+      signal.phase === 'END_PENDING' &&
+      signal.endEvidenceBars >= this.params.WEAKNESS_MIN_EVIDENCE_BARS
+    ) {
       if (signal.trendCycleId && signal.trendCycleId === meta.trendCycleId) {
         return {
           exit: true,
           reason: 'WEAKNESS_EARLY' as TrendExitReason,
-          detail: `UTE 确认走弱先走（END_PENDING 证据 ${signal.endEvidenceBars} 根），走强回确认可再入场`,
+          detail: `UTE 确认走弱先走（END_PENDING 证据 ${signal.endEvidenceBars} 根 ≥ ${this.params.WEAKNESS_MIN_EVIDENCE_BARS}），走强回确认可再入场`,
         };
       }
     }
-    // WEAKNESS_EXIT_EARLY=false：无策略性离场——等基础设施 ENDED 周期匹配 / 反向确认 /
-    // 强平处理（纯持有版：确认在就拿满整个周期）
+    // WEAKNESS_EXIT_EARLY=false：策略性离场只剩 ①②——等基础设施 ENDED 周期匹配 /
+    // 反向确认 / 强平处理（纯持有版：确认在就拿满整个周期）
 
     return { exit: false, reason: null, detail: '' };
   }

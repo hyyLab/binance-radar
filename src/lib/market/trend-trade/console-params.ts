@@ -97,6 +97,20 @@ export const PARAM_DEFS: ParamDef[] = [
     effect: '关 = 入场快约 1 根 K 线，但假信号直接进场；开 = 慢 1 根，进场质量更高（默认开）',
   },
   {
+    key: 'ENTRY_CHASE_PCT', scope: 'strategy', strategyId: 'short-swing-v1', group: '入场时机（滞后调节）',
+    label: '入场追入保护', type: 'number', default: SHORT_SWING.ENTRY_CHASE_PCT,
+    min: 0, max: 5, step: 0.1, unit: '%',
+    desc: '确认瞬间检测窗口内价格已顺该方向冲高 ≥ 该幅度 → 拒绝入场（脉冲末端不追，防接脉冲顶）。方向走强的第一时间才顺势；已经冲过头的等它消化。0 = 关闭。',
+    effect: '调高 → 允许追更长的脉冲（接顶风险大）；调低 → 更早拒绝追入（可能错过延续段）；0 = 不设防',
+  },
+  {
+    key: 'ENTRY_FRESH_MS', scope: 'strategy', strategyId: 'short-swing-v1', group: '入场时机（滞后调节）',
+    label: '确认新鲜窗', type: 'number', default: SHORT_SWING.ENTRY_FRESH_MS,
+    min: 0, max: 600_000, step: 30_000, unit: 'ms',
+    desc: '只做「周期确认时刻距现在 ≤ 该时长」的入场——确认刚发生的第一时间顺势单。确认已走老（如容量等待后信号重新被评估到）不再追入，防追已走完一段的行情。0 = 关闭。',
+    effect: '调大 → 更晚的确认也接受（追高风险）；调小 → 只吃确认后最新鲜的一小段；0 = 不设防',
+  },
+  {
     key: 'REENTRY_MIN_GAP_MS', scope: 'strategy', strategyId: 'short-swing-v1', group: '入场时机（滞后调节）',
     label: '同周期再入场最小间隔', type: 'number', default: SHORT_SWING.REENTRY_MIN_GAP_MS,
     min: 0, max: 600_000, step: 10_000, unit: 'ms',
@@ -108,8 +122,8 @@ export const PARAM_DEFS: ParamDef[] = [
     key: 'MAX_ROUNDS_PER_CYCLE', scope: 'strategy', strategyId: 'short-swing-v1', group: '再入场与轮次',
     label: '同周期最大开仓轮次', type: 'number', default: SHORT_SWING.MAX_ROUNDS_PER_CYCLE,
     min: 1, max: 6, step: 1, unit: '轮',
-    desc: '同一趋势周期最多开仓几次（首次 + 走弱后走强的再入场；轮次键 #R1/#R2…）。防单周期无限磨损的上限。',
-    effect: '调大 → 同一趋势里反复进出机会更多；调小/1 → 每个周期只做第一笔',
+    desc: '同一趋势周期最多开仓几次（轮次键 #R1/#R2…）。Task 66 复盘定版默认 1：只做方向刚走强的第一波——R2 再入场本质是「走强之后的回调后入场」，大趋势不继续时必然止损（历史统计 R2 合计 -5.6U 无优势）。',
+    effect: '调大 → 回调后的再入场机会更多（磨损风险）；1（默认）→ 每个周期只做第一笔，走弱离场后该周期不再进',
   },
   {
     key: 'WEAKNESS_EXIT_EARLY', scope: 'strategy', strategyId: 'short-swing-v1', group: '再入场与轮次',
@@ -122,7 +136,7 @@ export const PARAM_DEFS: ParamDef[] = [
     key: 'SPIKE_MOVE_PCT', scope: 'strategy', strategyId: 'short-swing-v1', group: '冲高套利（及时落袋）',
     label: '冲高幅度阈值', type: 'number', default: SHORT_SWING.SPIKE_MOVE_PCT,
     min: 0.1, max: 5, step: 0.05, unit: '%',
-    desc: '持仓浮盈时，检测窗口内标记价顺持仓方向快速运动 ≥ 该幅度 → 立即落袋（SPIKE_TAKE）。针对虚拟币冲高回落/下杀拉回的行为模式，是价格行为离场、不是固定比例止盈。',
+    desc: '持仓浮盈时，检测窗口内标记价顺持仓方向快速运动 ≥ 该幅度 → 立即落袋（SPIKE_TAKE）。Task 66 复盘定版 0.4%（20x 下 = 8% 保证金收益）：旧 0.6% 时浮盈卡在 0.3~0.6% 区间的单子全部被走弱离场割掉——这是够得着的落袋线。',
     effect: '调低 → 小冲高就走、落袋更频繁；调高 → 拿更大的波段、可能错过快速回落前的出场窗口',
   },
   {

@@ -23,6 +23,23 @@
 //    时候了，我们要在趋势起点入场就没有太高的分数。”
 //    → score 门槛只负责挡「证据不足的杂音」，不追求「走势已经走好」：模式 A 60→45、
 //      模式 B 70→55；ER 门槛保留（防震荡结构磨损，与「早」正交）。
+// ⑧ 顺势而为，不做回调低吸（用户定版 2026-10-17 复盘）：“短周期套利思路的原理应该是
+//    顺势而为……应该在某一个方向走强的时候去顺势，而不是在这个方向走强之后的回调去
+//    做低吸。如果大趋势没有继续运行反而走了一个短期的小趋势就会止损，这很显然有问题。”
+//    → 四处落地：
+//    a) MAX_ROUNDS_PER_CYCLE 2→1：同周期只做方向刚走强的第一波；走弱离场后该周期不再
+//       进。旧版 R2 再入场本质 = 「走强之后的回调后入场」（回调结束反弹重新确认时进），
+//       大趋势没继续反而走短期小趋势时必然止损——正是用户指出的行为；Task 65 统计
+//       R2 合计 -5.63U 无优势。
+//    b) ENTRY_CHASE_PCT：确认瞬间短窗内已顺向冲高 ≥ 该值 → 拒绝（方向确实走强但已到
+//       脉冲末端，追入即接脉冲顶，后面的正常回调会把自己扫出去；Task 65：17 笔入场
+//       即逆行的深亏单多为确认时已在脉冲顶的高分单）。
+//    c) ENTRY_FRESH_MS：确认时刻（trendStartedAt）距今超窗不入场——只做「方向刚走强」
+//       的第一时间顺势单，不做确认已走老之后的违和追入（容量等待恢复等场景）。
+//    d) SPIKE_MOVE_PCT 0.6→0.4：复盘 7 笔浮盈卡在 0.3~0.6% 价格区间（合计 -14.82U）
+//       够不到旧落袋线被走弱离场割掉；0.4% = 20x 下 8% 保证金收益，够得着。
+//    保留不变：冲高套利 SPIKE_TAKE（利润来源，+68.52U/31 笔）、走弱先走（其止损语义
+//    在「只做第一波」后 = 本周期终点，不再是回调后再进的中转站）。
 //
 // 红线：纯模拟；阈值为初始工程参数、未经历史回放校准，不构成盈利能力声明；
 // 强平/ENDED 周期匹配/反向确认/二次确认/冷却等基础设施规则不受本策略影响。
@@ -52,14 +69,23 @@ export const SHORT_SWING = {
   NEUTRAL_MIN_ER: 0.45,
   /** 是否允许 1m 方向与 5m 背景相反的逆势单（用户思路：短周期套利不做逆势 → false） */
   ALLOW_HTF_OPPOSED: false,
-  /** 同一趋势周期最大开仓轮次（首次 + 再入场；防同周期无限磨损） */
-  MAX_ROUNDS_PER_CYCLE: 2,
-  /** 同周期再入场最小间隔（上次平仓 → 下次评估开仓，防同一根 K 线内反复进出） */
+  /** 同一趋势周期最大开仓轮次（用户定版 2026-10-17 复盘：1 = 只做方向刚走强的第一波；
+   *  R2 再入场 = 「走强之后的回调后入场」，大趋势不继续时必然止损，默认关闭） */
+  MAX_ROUNDS_PER_CYCLE: 1,
+  /** 同周期再入场最小间隔（上次平仓 → 下次评估开仓，防同一根 K 线内反复进出；
+   *  仅 MAX_ROUNDS_PER_CYCLE ≥ 2 时有意义） */
   REENTRY_MIN_GAP_MS: 60_000,
+  /** 入场追入保护（%）：确认瞬间短窗（SPIKE_WINDOW_MS）内价格已顺该方向运动 ≥ 该值 →
+   *  拒绝入场——方向确实走强但已到脉冲末端，追入即接脉冲顶。0 = 关闭 */
+  ENTRY_CHASE_PCT: 1.2,
+  /** 确认新鲜窗（ms）：仅允许周期确认时刻距 now ≤ 该值的入场——只做「方向刚走强」的
+   *  第一时间顺势单，不做确认已走老之后的追入（容量等待恢复等场景的追高防护）。0 = 关闭 */
+  ENTRY_FRESH_MS: 180_000,
   /** 冲高检测窗口（ms）：该窗口内标记价顺向运动幅度作为「正在冲高/下杀」判据 */
   SPIKE_WINDOW_MS: 90_000,
-  /** 冲高幅度阈值（%）：窗口内顺向运动 ≥ 该值视为冲高（20x 下 0.6% ≈ 12% 保证金收益） */
-  SPIKE_MOVE_PCT: 0.6,
+  /** 冲高幅度阈值（%）：窗口内顺向运动 ≥ 该值视为冲高（20x 下 0.4% = 8% 保证金收益；
+   *  复盘定版：0.6 时浮盈卡在 0.3~0.6% 区间的单子全部被走弱离场割掉，够得着的落袋线） */
+  SPIKE_MOVE_PCT: 0.4,
   /** 冲高套利最短持仓时间（ms）：防开仓瞬间样本噪声即触发 */
   SPIKE_MIN_HOLD_MS: 45_000,
   /** 走弱是否提前离场（true = END_PENDING 同周期即走，配合轮次再入场；false = 等 ENDED） */
@@ -99,8 +125,8 @@ export class ShortSwingStrategy implements TrendStrategy {
   readonly id = 'short-swing-v1';
   readonly name = '短周期套利';
   readonly description =
-    '异动选币不问方向；1m 确认即定多空、趋势起点低分入场（5m 同向=波段 / 5m 震荡=选向稍严；5m 反向不做）；' +
-    '冲高/下杀及时落袋；走弱先走、同周期走强可再入场（≤2 轮）';
+    '异动选币不问方向；1m 确认即定多空，只做方向刚走强的第一时间顺势单（5m 同向=波段 / 5m 震荡=选向稍严；5m 反向不做）；' +
+    '脉冲末端不追、确认走老不追；冲高/下杀及时落袋；走弱先走、同周期只做第一波不再进';
 
   /** 可调参数（构造器覆盖；生产默认值） */
   readonly params: typeof SHORT_SWING;
@@ -162,13 +188,27 @@ export class ShortSwingStrategy implements TrendStrategy {
 
   // ============ 入场评估（① 选币已由池完成；②③④ 模式判定 + 门槛） ============
 
-  evaluateEntry(signal: UnifiedTrendSignal, _ctx: StrategyMarketCtx): StrategyEntryVerdict {
+  evaluateEntry(signal: UnifiedTrendSignal, ctx: StrategyMarketCtx): StrategyEntryVerdict {
     const sym = signal.symbol;
     // ① 短周期方向确定：仅 1m 确认相位（候选/观察/结束中的趋势不开仓——方向未定）
     if (signal.phase !== 'CONFIRMED_UP' && signal.phase !== 'CONFIRMED_DOWN') {
       return { want: false, side: null, modeTag: '-', reason: `1m 趋势未确认（phase=${signal.phase}），短周期方向不确定` };
     }
     const side: 'LONG' | 'SHORT' = signal.phase === 'CONFIRMED_UP' ? 'LONG' : 'SHORT';
+
+    // ⑧-c 确认新鲜窗：只做「方向刚走强」的第一时间顺势单（确认已走老再进 = 追已走完
+    //      一段的行情，正是复盘指出的追涨/追空；trendStartedAt 缺失时防御性放行不挡单）
+    if (
+      this.params.ENTRY_FRESH_MS > 0 &&
+      signal.trendStartedAt != null &&
+      ctx.now - signal.trendStartedAt > this.params.ENTRY_FRESH_MS
+    ) {
+      const ageMin = ((ctx.now - signal.trendStartedAt) / 60_000).toFixed(1);
+      return {
+        want: false, side: null, modeTag: 'STALE_CONFIRM',
+        reason: `确认已走老（${ageMin} 分钟前确认，超出新鲜窗 ${Math.round(this.params.ENTRY_FRESH_MS / 60_000)} 分钟），只做方向刚走强的第一时间顺势单`,
+      };
+    }
 
     // ⑤ 轮次约束：同周期走强再入场有上限（新周期自动从 1 开始）
     const st = this.states.get(sym);
@@ -198,6 +238,18 @@ export class ShortSwingStrategy implements TrendStrategy {
         want: false, side: null, modeTag: 'HTF_OPPOSED',
         reason: `1m ${dir === 'up' ? '看多' : '看空'}与 5m 背景（${h5.dir}）相反，短周期套利不做逆势`,
       };
+    }
+
+    // ⑧-b 入场追入保护：确认瞬间短窗内已顺向冲高过多 = 脉冲末端，不追（方向走强的
+    //      第一时间才顺势；冲过头的等它消化，消化后的新机会属于新周期/新确认）
+    if (this.params.ENTRY_CHASE_PCT > 0) {
+      const chase = this.spikePct(sym, side, ctx.now);
+      if (chase >= this.params.ENTRY_CHASE_PCT) {
+        return {
+          want: false, side: null, modeTag: 'CHASE_GUARD',
+          reason: `短窗已顺向冲高 ${chase.toFixed(2)}% ≥ ${this.params.ENTRY_CHASE_PCT}%（脉冲末端不追入，防接脉冲顶）`,
+        };
+      }
     }
 
     // 质量门槛：模式 A（同向）用常规线；模式 B（5m 震荡/数据不足，1m 先选向）用更严的线

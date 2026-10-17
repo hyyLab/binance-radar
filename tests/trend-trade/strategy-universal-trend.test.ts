@@ -1,12 +1,15 @@
 // ---------- 策略「通用趋势引擎 v1」单元测试（Task 62，纯内存无 DB） ----------
 // 验收要点 = UTE 直通车的身份特征（与短周期套利的差异即用例）：
-// U1 相位未确认 → 不开（确认状态机是唯一入场凭证）
-// U2 纯确认制：低分确认也入场（ENTRY_MIN_SCORE=0；评分/ER 不是 UTE 的门槛）
+// U1 相位未确认 → 不开（确认状态机是入场第一凭证）
+// U2 纯确认制（评分门槛 0）：低分确认也入场（Task 66：还需方向选择证据，fixture 以 breakout='up' 提供）
 // U3 5m 背景反向照样入场（UTE 单一标的自足、不做背景过滤——与 short-swing 本质区别）
 // U4 评分下限可调（构造器覆盖生效；调高后挡弱证据）+ 默认参数快照防漂移
 // U5 轮次：同周期上限 2 / 再入场需新收盘 K 线 + 最小间隔 / 新周期重置
-// U6 走弱先走：END_PENDING 同周期 exit（WEAKNESS_EARLY）；异周期不误平；参数可关
-// U7 无冲高落袋：浮盈再大也不触发策略性离场（SPIKE_TAKE 是 short-swing 专属）
+// U6 走弱先走（Task 66 证据达标版）：END_PENDING 证据 ≥2 根才走；1 根 = 单根噪声不割；异周期不误平
+// U7 无冲高落袋：浮盈未回撤不触发策略性离场（SPIKE_TAKE 是 short-swing 专属）
+// UE1 方向选择确认制（Task 66）：突破同向 / ER 单边延续放行；两者皆无 = 震荡内噪声确认拒绝
+// UE2 硬止损（Task 66）：价格逆行 ≥1.0% → STOP_LOSS；未达线不触发
+// UE3 移动止盈（Task 66）：峰值浮盈 ≥15% 激活后回撤 ≥8% → TRAIL_TAKE；未达线不触发
 // U8 状态导出/导入（重启恢复轮次语义）
 // CP1-4 console-params 按策略过滤（Task 62 机制：跨策略键拒绝/丢弃，infra 全局共享）
 
@@ -37,6 +40,8 @@ function sig(p: {
   htf5mValid?: boolean;
   endEvidenceBars?: number;
   lastBarTime?: number | null;
+  /** 区间突破标记（features.breakout）；默认 'none' */
+  breakout?: 'up' | 'down' | 'none';
 }): UnifiedTrendSignal {
   bar += 60_000;
   const dir =
@@ -58,7 +63,7 @@ function sig(p: {
     confirmCount: 3,
     features: {
       atr: 1, atrPct: 1.2, realizedVolPct: 40, volPercentile: 0.7, volRegime: 'HIGH',
-      efficiencyRatio: p.er ?? 0.5, upperWickPct: 0.1, lowerWickPct: 0.1, breakout: 'none',
+      efficiencyRatio: p.er ?? 0.5, upperWickPct: 0.1, lowerWickPct: 0.1, breakout: p.breakout ?? 'none',
       falseBreakout: false, barsUsed: 480,
     },
     htf5m: { dir: p.htf5mDir ?? dir, efficiencyRatio: 0.5, returnPct: 1, valid: p.htf5mValid ?? true, bars: 96 },
@@ -118,14 +123,21 @@ describe('通用趋势引擎 v1（universal-trend-v1）· 入场', () => {
     }
   });
 
-  test('U2 纯确认制：低分确认也入场（UTE 与 short-swing 的核心差异）', () => {
+  test('U2 评分门槛 0：低分确认 + 有方向选择证据也入场（UTE 与 short-swing 的核心差异）', () => {
     const s = new UniversalTrendStrategy();
-    // score 30 / ER 0.2 在 short-swing 模式 A（≥45 / ≥0.35）会被拒；UTE 确认即顺势
-    const v = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', score: 30, er: 0.2 }), ctx());
+    // score 30 / ER 0.2 在 short-swing 模式 A（≥45 / ≥0.35）会被拒；UTE 评分门槛 0，
+    // 方向选择证据由 breakout='up'（区间突破）提供
+    const v = s.evaluateEntry(
+      sig({ phase: 'CONFIRMED_UP', score: 30, er: 0.2, breakout: 'up' }),
+      ctx(),
+    );
     expect(v.want).toBe(true);
     expect(v.side).toBe('LONG');
     expect(v.modeTag).toBe('UTE_CONFIRMED');
-    const v2 = s.evaluateEntry(sig({ phase: 'CONFIRMED_DOWN', score: 35 }), ctx());
+    const v2 = s.evaluateEntry(
+      sig({ phase: 'CONFIRMED_DOWN', score: 35, breakout: 'down' }),
+      ctx(),
+    );
     expect(v2.want).toBe(true);
     expect(v2.side).toBe('SHORT');
   });
@@ -149,9 +161,15 @@ describe('通用趋势引擎 v1（universal-trend-v1）· 入场', () => {
     expect(ok.want).toBe(true);
   });
 
-  test('U4b 默认参数快照（防止无意漂移；用户定版：控制台暂不开放，代码默认即生效）', () => {
+  test('U4b 默认参数快照（防止无意漂移；Task 66 复盘定版）', () => {
     expect(UNIVERSAL_TREND.ENTRY_MIN_SCORE).toBe(0);
+    expect(UNIVERSAL_TREND.REQUIRE_DIRECTION_PICK).toBe(true); // 方向选择确认制
+    expect(UNIVERSAL_TREND.ENTRY_MIN_ER).toBe(0.3);
     expect(UNIVERSAL_TREND.MAX_ROUNDS_PER_CYCLE).toBe(2);
+    expect(UNIVERSAL_TREND.STOP_LOSS_PCT).toBe(1.0);
+    expect(UNIVERSAL_TREND.TRAIL_ARM_PCT).toBe(15);
+    expect(UNIVERSAL_TREND.TRAIL_GIVEBACK_PCT).toBe(8);
+    expect(UNIVERSAL_TREND.WEAKNESS_MIN_EVIDENCE_BARS).toBe(2);
     expect(UNIVERSAL_TREND.WEAKNESS_EXIT_EARLY).toBe(true);
   });
 });
@@ -217,23 +235,33 @@ describe('通用趋势引擎 v1 · 轮次与再入场', () => {
 });
 
 describe('通用趋势引擎 v1 · 离场', () => {
-  test('U6 走弱先走：END_PENDING 同周期 exit；异周期不误平', () => {
+  test('U6 走弱先走（证据达标版）：END_PENDING 证据 ≥2 根才走；1 根噪声不割；异周期不误平', () => {
     const s = new UniversalTrendStrategy();
     const cycle = 'BTCUSDT:L:100';
-    const v = s.evaluateExit({
+    // 1 根证据（单根噪声/普通回调）→ 不走（Task 66：修复「稍微回调一点就止损」）
+    const v1 = s.evaluateExit({
       meta: meta('BTCUSDT', cycle),
       pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG', openedAt: Date.now() - 120_000 },
-      mark: 99,
+      mark: 99.5, // 逆行 0.5% < 止损线 1.0%：隔离走弱维度（止损有 UE2 专测）
       signal: sig({ phase: 'END_PENDING', cycleId: cycle, endEvidenceBars: 1 }),
       now: Date.now(),
     });
-    expect(v.exit).toBe(true);
-    expect(v.reason).toBe('WEAKNESS_EARLY');
+    expect(v1.exit).toBe(false);
+    // 2 根证据（连续两根独立收盘 K 线持续走弱）→ 先走（仍早于 ENDED 的 3 根确认）
+    const v2 = s.evaluateExit({
+      meta: meta('BTCUSDT', cycle),
+      pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG', openedAt: Date.now() - 120_000 },
+      mark: 99.5, // 不触发硬止损（UE2 专测止损），专注走弱证据维度
+      signal: sig({ phase: 'END_PENDING', cycleId: cycle, endEvidenceBars: 2 }),
+      now: Date.now(),
+    });
+    expect(v2.exit).toBe(true);
+    expect(v2.reason).toBe('WEAKNESS_EARLY');
 
     const other = s.evaluateExit({
       meta: meta('BTCUSDT', 'BTCUSDT:L:100'),
       pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG', openedAt: Date.now() - 120_000 },
-      mark: 99,
+      mark: 99.5,
       signal: sig({ phase: 'END_PENDING', cycleId: 'BTCUSDT:L:999', endEvidenceBars: 3 }),
       now: Date.now(),
     });
@@ -246,7 +274,7 @@ describe('通用趋势引擎 v1 · 离场', () => {
     const v = s.evaluateExit({
       meta: meta('BTCUSDT', cycle),
       pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG', openedAt: Date.now() - 120_000 },
-      mark: 99,
+      mark: 99.5, // 不触发硬止损（UE2 专测止损），专注走弱证据维度
       signal: sig({ phase: 'END_PENDING', cycleId: cycle, endEvidenceBars: 2 }),
       now: Date.now(),
     });
@@ -267,6 +295,97 @@ describe('通用趋势引擎 v1 · 离场', () => {
     });
     expect(v.exit).toBe(false); // 浮盈大小不构成 UTE 离场理由（SPIKE_TAKE 属于 short-swing）
     expect(v.reason).toBeNull();
+  });
+});
+
+describe('通用趋势引擎 v1 · Task 66 复盘定版（方向选择确认制 + 三层离场）', () => {
+  test('UE1 方向选择确认制：突破同向 / ER 单边延续放行；两者皆无 = 震荡内噪声确认拒绝', () => {
+    const s = new UniversalTrendStrategy();
+    // a) 突破证据：breakout='up' 与 CONFIRMED_UP 一致（字面意义的「震荡之后的方向选择」），
+    //    即使 ER 低（0.1，震荡结构）也放行
+    const byBo = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', er: 0.1, breakout: 'up' }), ctx());
+    expect(byBo.want).toBe(true);
+    expect(byBo.reason).toContain('区间突破');
+    // b) 延续证据：ER 0.5 ≥ 0.3（突破后 1-2 根的单边延续段，breakout 已回落）
+    const byEr = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', er: 0.5, breakout: 'none' }), ctx());
+    expect(byEr.want).toBe(true);
+    expect(byEr.reason).toContain('单边延续');
+    // c) 两者皆无：breakout='none' + ER 0.1 → 震荡区间内的噪声确认（预判性入场），拒绝
+    const noise = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', er: 0.1, breakout: 'none' }), ctx());
+    expect(noise.want).toBe(false);
+    expect(noise.modeTag).toBe('NO_DIRECTION_PICK');
+    expect(noise.reason).toContain('方向选择');
+    // d) 突破反向：CONFIRMED_UP 但 breakout='down'（向上确认与向下突破矛盾）+ ER 低 → 拒绝
+    const contra = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', er: 0.1, breakout: 'down' }), ctx());
+    expect(contra.want).toBe(false);
+    // e) 可关：REQUIRE_DIRECTION_PICK=false 回到旧版纯确认制
+    const off = new UniversalTrendStrategy({ REQUIRE_DIRECTION_PICK: false });
+    const legacy = off.evaluateEntry(sig({ phase: 'CONFIRMED_UP', er: 0.1, breakout: 'none' }), ctx());
+    expect(legacy.want).toBe(true);
+  });
+
+  test('UE2 硬止损：价格逆行 ≥1.0%（价格口径）→ STOP_LOSS；未达线不触发', () => {
+    const s = new UniversalTrendStrategy();
+    const cycle = 'BTCUSDT:L:100';
+    const base = {
+      meta: meta('BTCUSDT', cycle),
+      pos: { entryPrice: 100, qty: 4, margin: 20, side: 'LONG' as const, openedAt: Date.now() - 300_000 },
+      signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
+    };
+    // 逆行 1.2% ≥ 1.0% → 止损（20x 下 = 24% 保证金回撤即砍，不拖到强平）
+    const loss = s.evaluateExit({ ...base, mark: 98.8, now: Date.now() });
+    expect(loss.exit).toBe(true);
+    expect(loss.reason).toBe('STOP_LOSS');
+    // 逆行 0.8% < 1.0%（常态 ATR 级回调）→ 不止损（容忍正常波动，不「稍微回调就割」）
+    const ok = s.evaluateExit({ ...base, mark: 99.2, now: Date.now() });
+    expect(ok.exit).toBe(false);
+    // SHORT 对称：entry 100 逆行到 101.2（+1.2%）→ 止损
+    const shortLoss = s.evaluateExit({
+      meta: meta('ETHUSDT', 'ETHUSDT:S:1', 'SHORT'),
+      pos: { entryPrice: 100, qty: 4, margin: 20, side: 'SHORT', openedAt: Date.now() - 300_000 },
+      mark: 101.2, signal: null, now: Date.now(),
+    });
+    expect(shortLoss.exit).toBe(true);
+    expect(shortLoss.reason).toBe('STOP_LOSS');
+  });
+
+  test('UE3 移动止盈：峰值浮盈 ≥15% 激活后回撤 ≥8% → TRAIL_TAKE；未达线不触发', () => {
+    const s = new UniversalTrendStrategy();
+    const cycle = 'BTCUSDT:L:100';
+    // DB 统计的持仓期峰值 MFE=25%（保证金口径）→ 已激活
+    const m = { ...meta('BTCUSDT', cycle), mfe: 25 } as unknown as TrendTradeMetaRow;
+    const pos = { entryPrice: 100, qty: 4, margin: 20, side: 'LONG' as const, openedAt: Date.now() - 600_000 };
+    // 当前浮盈 15%：回撤 25-15=10 ≥ 8 → 落袋（保住 ≥15% 利润）
+    const take = s.evaluateExit({
+      meta: m, pos, mark: 100.75,
+      signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
+      now: Date.now(),
+    });
+    expect(take.exit).toBe(true);
+    expect(take.reason).toBe('TRAIL_TAKE');
+    // 当前浮盈 22%：回撤 3 < 8 → 继续拿（趋势模型的「确认在就拿大段」不被小回撤打扰）
+    const hold = s.evaluateExit({
+      meta: m, pos, mark: 101.1,
+      signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
+      now: Date.now(),
+    });
+    expect(hold.exit).toBe(false);
+    // 未激活：MFE 只有 10%（< 15% 激活线）→ 即便当前回撤大也不触发（没有利润可保护）
+    const m2 = { ...meta('BTCUSDT', cycle), mfe: 10 } as unknown as TrendTradeMetaRow;
+    const notArmed = s.evaluateExit({
+      meta: m2, pos, mark: 100.2,
+      signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
+      now: Date.now(),
+    });
+    expect(notArmed.exit).toBe(false);
+    // 实时创新高：meta.mfe 缺失（旧数据/同 tick）时用实时浮盈当峰值
+    const m3 = { ...meta('BTCUSDT', cycle), mfe: null } as unknown as TrendTradeMetaRow;
+    const live = s.evaluateExit({
+      meta: m3, pos, mark: 102, // 实时浮盈 40%（已激活）
+      signal: sig({ phase: 'CONFIRMED_UP', cycleId: cycle }),
+      now: Date.now(),
+    });
+    expect(live.exit).toBe(false); // 峰值=实时=40%，回撤 0 → 不触发
   });
 });
 
@@ -297,10 +416,14 @@ describe('console-params 按算法过滤（Task 62 机制）', () => {
     expect(items.map((p) => p.key).sort()).toEqual(['cooldownMs', 'marginRatio', 'waitBarConfirm']);
   });
 
-  test('CP2 short-swing-v1：行为不变（11 策略参数 + 3 infra）', () => {
+  test('CP2 short-swing-v1：13 策略参数（Task 66 新增 ENTRY_CHASE_PCT/ENTRY_FRESH_MS）+ 3 infra', () => {
     const items = effectiveRuntimeParams('short-swing-v1', null, INFRA);
-    expect(items.filter((p) => p.scope === 'strategy').length).toBe(11);
+    expect(items.filter((p) => p.scope === 'strategy').length).toBe(13);
     expect(items.filter((p) => p.scope === 'infra').length).toBe(3);
+    // 新参数确实出现在 short-swing 控制台且不属于 UTE
+    const keys = items.filter((p) => p.scope === 'strategy').map((p) => p.key);
+    expect(keys).toContain('ENTRY_CHASE_PCT');
+    expect(keys).toContain('ENTRY_FRESH_MS');
   });
 
   test('CP3 严格写路径：UTE 下提交 short-swing 键 → 明确报错（不错位存储）', () => {

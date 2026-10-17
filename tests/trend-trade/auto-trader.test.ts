@@ -233,7 +233,9 @@ function sig(partial: {
     direction: dir,
     trendCycleId:
       partial.cycleId !== undefined ? partial.cycleId : `${partial.symbol}:${cycleDir}:${barClock}`,
-    trendStartedAt: partial.phase.startsWith('CONFIRMED') ? barClock : null,
+    // Task 66：确认新鲜窗（ENTRY_FRESH_MS=180s）生效——fixture 语义 = 「刚确认」的信号，
+    // 与 cycleId 生成用的 barClock 解耦（后者保持老时钟以服务轮次/幂等键测试）
+    trendStartedAt: partial.phase.startsWith('CONFIRMED') ? Date.now() - 15_000 : null,
     endPendingSince: null,
     endEvidenceBars: 0,
     endedAt: partial.phase === 'ENDED' ? barClock : null,
@@ -428,8 +430,9 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
       signals,
       engine,
       // 默认策略思路（走弱先走）；REENTRY_MIN_GAP_MS=0：真实时钟不可快进，60s 间隔已由
-      // 策略单元测试 S7b 覆盖，这里聚焦轮次化决策键与再入场全链路
-      new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0 }),
+      // 策略单元测试 S7b 覆盖，这里聚焦轮次化决策键与再入场全链路。
+      // Task 66：MAX_ROUNDS_PER_CYCLE 默认改 1（只做第一波）——本用例测 R2 机制需显式开 2 轮
+      new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0, MAX_ROUNDS_PER_CYCLE: 2 }),
     ); // 默认策略：走弱先走
     await trader.ensureStarted();
     await openViaPending(signals, trader);
@@ -470,6 +473,42 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
     const m2 = await trendTradeRepo.getMeta(rows[0]!.id);
     expect(m2?.trendCycleId).toBe(meta.trendCycleId); // 同周期
     expect(m2?.entryRound).toBe(2); // 第二轮
+  });
+
+  test('T4c 默认轮次=1（Task 66 顺势化）：同周期走弱离场后不再进（有新 K 线也不建待入场）', async () => {
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:843' })];
+    const trader = makeTrader(signals, engine, new ShortSwingStrategy({ REENTRY_MIN_GAP_MS: 0 }));
+    await trader.ensureStarted();
+    await openViaPending(signals, trader);
+    expect((await openPositions()).length).toBe(1);
+    const meta = (await trendTradeRepo.loadMetasByStatus('OPEN'))[0]!;
+    // 同周期 END_PENDING（1 根证据，短周期套利证据门槛未开启）→ 提前离场
+    signals[0] = {
+      ...keepSig(signals[0]!),
+      phase: 'END_PENDING',
+      direction: 'up',
+      endEvidenceBars: 1,
+      endPendingSince: Date.now(),
+      trendCycleId: meta.trendCycleId,
+    };
+    await trader.tick();
+    expect((await openPositions()).length).toBe(0);
+    // 走强回确认 + 新 K 线 + 冷却已过——但默认 MAX_ROUNDS_PER_CYCLE=1 → 不再进（R2 被顺势定版关闭）
+    await backdateLastClose('BTCUSDT', 6);
+    signals[0] = {
+      ...keepSig(signals[0]!),
+      phase: 'CONFIRMED_UP',
+      direction: 'up',
+      endEvidenceBars: 0,
+      endPendingSince: null,
+      trendCycleId: meta.trendCycleId,
+      lastBarTime: (signals[0]!.lastBarTime ?? 0) + 600_000,
+    };
+    await trader.tick();
+    expect(await trendTradeRepo.getActivePendingBySymbol('BTCUSDT')).toBeNull();
+    expect((await openPositions()).length).toBe(0);
   });
 
   test('T5 趋势确认结束（ENDED 同周期 + 证据晚于开仓）→ 平仓 TREND_ENDED；滑点/手续费/净盈亏口径正确', async () => {

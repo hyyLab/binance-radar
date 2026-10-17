@@ -466,3 +466,25 @@ Stage Summary:
 - 交付：动态槽位配额 sizing——单一持仓开最大仓（权益 × 95%），并发自动均分剩余配额；「要 N 仓并发」由静态压缩改为用户自调上限（cap ≤ 95%/N）
 - 语义变化明示：marginRatio 从「每仓固定比例」变为「每仓占比上限」；0.95 + 20x 下单仓逆行 5% 即近爆仓线（纯模拟环境如实呈现，强平机制兜底）；余额不足时跳过不变通（原红线保持）
 - 未验证假设：满配单仓在高波动 1m 行情的强平频率未回放校准；两笔并发（47.5%×2=95%）恰好触顶预算，手续费可能挤掉第二仓（跳过并记录，可接受）
+
+---
+Task ID: 66
+Agent: Super Z (main)
+Task: 两算法复盘定版（用户 2026-10-17 复盘）——短周期套利顺势化 + 通用趋势引擎方向选择确认制与三层离场
+
+Work Log:
+- 实施前核对：两策略全文 + strategy/types + signal.ts（trendStartedAt/endEvidenceBars/features.breakout 可用）+ indicators.ts（breakout=收盘价越出近 3 根区间高/低点）+ auto-trader 装配链与 MFE 增量更新（meta.mfe/mfeDrawdown 每 tick 落库，trailing 数据基础现成）+ console-params 校验链 + 测试 fixture；**sqlite3 CLI 不存在改 python sqlite3 查库**：运行库当前 strategyId=short-swing-v1（非 Task 65 时的 UTE）、strategyParamsJson 全 11 参数覆盖（MAX_ROUNDS_PER_CYCLE=2/SPIKE_MOVE_PCT=0.6——改代码默认必须同步 DB，否则被覆盖压过）
+- short-swing 顺势化（用户：「顺势而为……应该在某一个方向走强的时候去顺势，而不是在这个方向走强之后的回调去做低吸」）：① MAX_ROUNDS_PER_CYCLE 2→1（R2 再入场本质=回调后入场，Task 65 统计 R2 合计 -5.63U；同周期走弱离场后不再进，新周期照常第一波）② SPIKE_MOVE_PCT 0.6→0.4（复盘 7 笔浮盈卡 0.3~0.6% 区间合计 -14.82U 够不到落袋线被走弱割掉；0.4%=20x 下 8% 保证金收益）③ 新增 ENTRY_CHASE_PCT=1.2（确认瞬间短窗已顺向冲高 ≥1.2% 拒绝——脉冲末端不追，复盘 17 笔入场即逆行的深亏单多为确认时已在脉冲顶的高分单；SHORT 方向对称看跌幅不误伤）④ 新增 ENTRY_FRESH_MS=180_000（确认时刻距今超 3 分钟不入场——只做方向刚走强的第一时间顺势单，容量等待恢复等场景的追高防护；trendStartedAt 缺失防御性放行）
+- universal-trend 复盘定版（用户：①「顺着震荡之后的方向选择的方向来做多或者做空，而不是提前对趋势进行预判性做多或者做空」②「已有盈利的情况下多少止盈、多少止损」③「稍微回调一点就止损不合理」）：① 入场方向选择确认制 REQUIRE_DIRECTION_PICK=true：确认之外要求 features.breakout 与方向一致（字面意义的「震荡之后的方向选择」）或 ER ≥ ENTRY_MIN_ER=0.3（突破后 1-2 根单边延续段），两者皆无=震荡区间内噪声确认拒绝（modeTag NO_DIRECTION_PICK）② 硬止损 STOP_LOSS_PCT=1.0%（价格口径）：逆行 ≥1% 即 STOP_LOSS（=20% 保证金 @20x，常态 ATR 0.2~0.4% 的正常回调远够不到，不「稍微回调就触发」；方向选择失败防拖到强平）③ 移动止盈 TRAIL_ARM_PCT=15/TRAIL_GIVEBACK_PCT=8（保证金口径）：浮盈 ≥15% 激活、从峰值回撤 ≥8% 落袋；峰值=max(meta.mfe 上一 tick 落库, 实时浮盈)——当前 tick 创新高立即生效；④ 走弱先走证据门槛 WEAKNESS_MIN_EVIDENCE_BARS=2：END_PENDING 1 根证据可能是单根噪声（旧版第一根就割=「稍微回调一点就止损」的根源），2 根=连续两根独立收盘 K 线持续走弱，仍早于 ENDED 的 3 根确认；WEAKNESS_EXIT_EARLY=false 的纯持有版语义不变（①②仍在）
+- config.ts：TrendExitReason 新增 'TRAIL_TAKE'/'STOP_LOSS'（UI/审计/统计兼容——exitReason 为自由字符串列，旧数据不受影响）；console-params：MAX_ROUNDS/SPIKE 文案更新 + ENTRY_CHASE_PCT/ENTRY_FRESH_MS 注册进控制台（short-swing-v1 归属，第 13/14 个策略参数）；UTE 保持 Task 62 定版不注册控制台（代码默认）；auto-trader 头注释开仓/离场规则段同步；strategy/README.md 对比表 Task 66 版（含追高防护/止盈/止损/走弱/再入场五行）
+- 引擎单例 bump v17→v18 五处（头注释条目/globalThis 类型声明/pickLegacyEngine 签名+链首插 v17/getEnhancedEngine/resetEnhancedEngine）——python assert 式替换（第一次 pickLegacyEngine old 笔误「??(」多括号 assert 挂整脚本未写盘，修正后重跑全过）
+- 过程中坐实并绕过两处环境级字符漂移（与 Task 62 同源）：Edit 回显的中文字符与参数名后缀存在不可见变形——对策=①关键逻辑改动用 python assert 式替换 ②以 tsc 类型错误当字节级裁判（参数键名若漂移必报 TS2339，本次零误报证明键名全部字节级一致）③rg/grep 只信匹配成功这个事实不信显示内容
+- 测试适配与新增（100/100 全绿，原 92→100）：short-swing fixture trendStartedAt 改 Date.now()-15s（老 barClock 会被新新鲜窗全量挡掉）+ S7 注入 MAX_ROUNDS=2 保机制测试 + S7c 默认 1 轮不再进 + S10/S10b 追入保护（含 SHORT 对称不误伤）+ S11 新鲜窗 + S9 快照更新；UTE fixture 加 breakout 参数 + U2 补突破证据 + U4b 快照 9 断言 + U6 改「1 根不走/2 根走」+ U6b mark 99→99.5（**新硬止损 1.0% 恰好与测试 mark=99 同线——U6/U6b 三处失败根因，mark 99.5 隔离走弱维度**）+ UE1 方向选择五场景（突破同向/ER 延续/双无拒绝/突破反向拒绝/可关回旧版）+ UE2 硬止损三断言（LONG/未达线/SHORT 对称）+ UE3 移动止盈四断言（回撤超限落袋/未达线继续拿/未激活不触发/实时创新高）；auto-trader fixture trendStartedAt 新鲜化 + T4b 注入 MAX_ROUNDS=2 保 R2 全链路 + 新增 T4c 默认 1 轮不再建待入场；CP2 计数 11→13（顺手修掉 python 替换引入的 effect 重复键 TS1117）
+- DB 同步：strategyParamsJson 的 short-swing-v1 组 MAX_ROUNDS_PER_CYCLE 2→1、SPIKE_MOVE_PCT 0.6→0.4（python sqlite3 读写回验）
+- 线上验证（未重启 server）：curl /api/trend-trading 触发热重载 → v18 接管（service.startedAt 刷新、lastError=null、lastTickAt 10s 内）；控制台 4 关键参数=新默认（ENTRY_CHASE_PCT=1.2/ENTRY_FRESH_MS=180000/MAX_ROUNDS_PER_CYCLE=1/SPIKE_MOVE_PCT=0.4）；最近决策键全部 #R1（QUSDT/NMRUSDT/CAKEUSDT 的 OPEN/CLOSE 为同一轮配对记录非 R2）——顺势定版线上运行中；NMRUSDT 开仓 score=45 恰好命中 45 门槛线（质量门槛生效实证）
+
+Stage Summary:
+- 交付：short-swing-v1 顺势化四改动（R2 关闭/落袋线 0.4/追入保护/新鲜窗）+ universal-trend-v1 复盘定版（方向选择确认制 + 硬止损 1% + 移动止盈 15/8 + 走弱证据 2 根）；100/100 测试全绿；v18 运行中
+- 语义变化明示：短周期套利同周期只做第一波（走弱离场=周期终点，不再有回调后再进）；通用趋势引擎从「无止盈无止损纯走弱」变三层离场（新增 TRAIL_TAKE/STOP_LOSS 两种平仓原因，历史表可区分）；两算法的入场都收敛到「方向刚走强/刚选向」的第一时间顺势
+- 边界保留：基础设施 ENDED 周期匹配/反向确认/强平/冷却/二次确认全部不动；UTE 轮次上限 2 保留（走强回确认仍可 R2——用户批评的 R2 是短周期的回调再进场模式）；short-swing 未加硬止损（用户复盘未提，走弱/ENDED/强平兜底）
+- 未验证假设：全部阈值为复盘定版的工程初值未经回放校准（TRAIL 15/8、STOP 1.0%、CHASE 1.2%、FRESH 3min、方向选择 ER 0.3）；方向选择确认制对入场频率的压缩幅度待实盘观察；满配单仓 + 短周期无硬止损的强平风险与前版相同（QUSDT 单 MAE -84% 为旧版行为代价样本）

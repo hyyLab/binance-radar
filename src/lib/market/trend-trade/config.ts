@@ -91,6 +91,8 @@ export type TrendExitReason =
   | 'REVERSE_CONFIRMED' // 反向趋势确认，关闭原方向持仓
   | 'SPIKE_TAKE' // Task 57 策略离场：冲高/下杀短窗快速运动，浮盈及时落袋
   | 'WEAKNESS_EARLY' // Task 57 策略离场：短周期走弱（END_PENDING 同周期）先走，走强可再入场
+  | 'TRAIL_TAKE' // Task 66 策略离场：移动止盈——峰值浮盈达标后回撤超限，锁定利润
+  | 'STOP_LOSS' // Task 66 策略离场：硬止损——价格逆行超限（方向选择失败，防拖到强平）
   | 'LIQUIDATED' // 强平（杠杆模拟执行结果，不伪装模型止损）
   | 'MANUAL'; // 人工平仓 / 全部平仓 / 换仓数量调整 / 切换算法清场
 
