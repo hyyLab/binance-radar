@@ -550,3 +550,21 @@ Stage Summary:
 - binance-radar 已在 /home/z/my-project 成功部署并运行（Next.js 16 + Turbopack dev，端口 3000）
 - 数据库历史数据完整保留，趋势交易服务 v20 自动运行，两页面浏览器验证零报错
 - 唯一待恢复项：币安 IP 限流到期后行情采集自动恢复（无需人工干预）
+
+---
+Task ID: deploy-2（Task 69）
+Agent: Super Z (main)
+Task: 修复「全站无数据 + 页面报错」——币安 418 封禁期白名单降级建池
+
+Work Log:
+- 根因定位：沙箱共享出口 IP 被币安 fapi 418 封禁至次日 11:29（exchangeInfo/行情全部 HTTP 418），而品种白名单硬绑币安 exchangeInfo（futures-collector assignShards/rebuildMerged 以 binance.instruments 为本体）→ 白名单空 → 分片/聚合/引擎跟踪全停 → 全站 0 数据；「报错」= 状态栏币安U本位红点悬停可见「HTTP 418 @ fapi/v1/exchangeInfo」+ 封禁提示（设计内降级展示，但数据面没有兜底）
+- 修复（futures-collector.ts，bump v4→v5）：新增 applyDegradedWhitelistIfNeeded——币安清单为空（或降级清单超 1h 陈旧）且 Bybit/Gate 清单就绪时，以 Bybit∩Gate 交集临时建池（条目取 Bybit：币安同构命名+tickSize），挂到 binance.instruments 并标记 instrumentsDegraded；调用点 = refreshInstruments('binance') 失败路径 + rebuildMerged 幂等前置；真 exchangeInfo 到货（解封后小时级刷新）自动覆盖回真白名单、降级标记归位，分片保持单次分配纪律不重排
+- 配套：SourceState/构造器交接/freshSource 增加 instrumentsDegraded 字段；FuturesSourceHealth（types.ts）暴露可选 instrumentsDegraded；enhanced-view 状态栏悬停追加「品种池降级：Bybit∩Gate 交集代管，币安解封后自动恢复真白名单」+ 币安U本位标签带 * 角标
+- 工程坑（Task 67 同款二次实锤）：enhanced-view 中文字面量 Edit/MultiEdit 三连「No replacement was performed」但前序编辑已落盘（原子性失效）→ 改用 python 行号定位 + ASCII 子串锚定替换（scripts/task69_title_patch.py）一次成功
+- eslint 改动 3 文件 0 报错；tsc 零新增（存量 ma7/paper 无关报错与 HEAD 一致）
+- 线上验证（热重载 v5 接管）：45s 内 tracked 0→76、baselineReady 76/76；2 分钟后 tracked 103、基线 103、活跃事件 5（P2 池 ALT/AVA 实卡）、tierCounts HIGH36/MID63/LOW116、tickers 530、引擎出站 286 req；Bybit 供价 412 / Gate 287 / 币安 home=125 预留；趋势服务 lastError=null、trendSignalCount 4；浏览器悬停提示完整呈现降级说明；审计面板展开正常、console/页面零报错
+
+Stage Summary:
+- 币安封禁期数据链路全通：白名单降级（Bybit∩Gate 交集）→ 分片 → 供价（Bybit/Gate）→ K 线（挂起源跳过）→ 引擎基线 → 异动/趋势信号，全站数据恢复
+- 解封自愈路径明确：refreshInstruments('binance') 在 bannedUntil 后自动重试 → 真白名单覆盖 → instrumentsDegraded=false，Top125 分片归属已预留、恢复后币安自动回到供价/K 线主力位
+- 语义代价明示：降级期品种池 ≈ 445 个（交集）而非币安全量 525+；tickSize/成交额口径按 Bybit/Gate（展示层影响极小，模拟盘规则仍币安语义）；K 线历史为 Bybit/Gate 口径（行情大差不差设计前提内）

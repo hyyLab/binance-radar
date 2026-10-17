@@ -54,6 +54,8 @@ export interface FuturesSourceHealth {
   /** Task 60：418/429 封禁硬截止（epoch ms；币安 retry-after/banned until 给出）。
    *  封禁期内偶发成功（边缘节点分差）不提前解锁；0 = 无封禁。 */
   bannedUntil: number;
+  /** Task 69：白名单降级标记（币安封禁期 Bybit∩Gate 交集代管；真 exchangeInfo 到货后消失） */
+  instrumentsDegraded?: boolean;
   lastPriceOkAt: number;
   last24hOkAt: number;
   symbols: number; // 该源当前供价的符号数（含对挂起源的临时降级代供）

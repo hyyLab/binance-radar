@@ -72,6 +72,8 @@ interface VolSample {
 interface SourceState {
   instruments: InstrumentsMap;
   instrumentsAt: number;
+  /** Task 69：币安封禁期白名单降级标记（Bybit∩Gate 交集代管；真 exchangeInfo 到货后置 false） */
+  instrumentsDegraded: boolean;
   lastPriceAt: number;
   last24hAt: number;
   nextStatsAt: number; // 下次 24hr 轮询到期时间（每源差异化间隔）
@@ -136,6 +138,7 @@ export class FuturesCollector {
         const fresh = this.sources[s];
         fresh.instruments = old.instruments;
         fresh.instrumentsAt = old.instrumentsAt;
+        fresh.instrumentsDegraded = old.instrumentsDegraded ?? false;
         fresh.lastPriceAt = old.lastPriceAt;
         fresh.last24hAt = old.last24hAt;
         fresh.priceHist = old.priceHist;
@@ -156,6 +159,7 @@ export class FuturesCollector {
     return {
       instruments: new Map(),
       instrumentsAt: 0,
+      instrumentsDegraded: false,
       lastPriceAt: 0,
       last24hAt: 0,
       nextStatsAt: 0,
@@ -209,6 +213,7 @@ export class FuturesCollector {
     try {
       st.instruments = await fetchInstruments(source);
       st.instrumentsAt = Date.now();
+      st.instrumentsDegraded = false; // 真 exchangeInfo 到货，降级代管自动作废
       st.failStreak = 0;
       if (Date.now() >= st.bannedUntil) {
         st.suspendUntil = 0;
@@ -220,9 +225,34 @@ export class FuturesCollector {
       // 418/429 同样按 retry-after 长挂起（instruments 撞墙也是撞墙）
       this.applyRateLimitSuspend(source, e);
       st.lastError = errMsg(e);
+      // Task 69：币安清单不可得时用 Bybit∩Gate 交集临时建池（白名单空 → 分片/聚合全停）
+      if (source === 'binance') this.applyDegradedWhitelistIfNeeded();
       const wait = Math.max(60_000, st.suspendUntil - Date.now() + 5_000);
       setTimeout(() => void this.refreshInstruments(source), wait);
     }
+  }
+
+  /** 币安封禁期品种池降级（Task 69）：Bybit ∩ Gate 交集代管白名单。
+   *  背景：白名单本体 = 币安 exchangeInfo，币安 418 封禁期它也拿不到 → 白名单空 →
+   *  assignShards/rebuildMerged 全停 → 全站无数据（实测封禁可达 18h+）。
+   *  两所同时上线的 USDT 永续 ≈ 币安主流品种池（行情大差不差、异动方向一致），
+   *  据此交集临时建池；条目取 Bybit（币安同构命名 + tickSize）。供价/K 线本就有
+   *  「挂起源跳过」降级，建池后自然全走 Bybit/Gate；币安解封后 refreshInstruments
+   *  正常覆盖回真白名单（instrumentsDegraded 归位），分片不重排（单次分配纪律不变）。 */
+  private applyDegradedWhitelistIfNeeded(): void {
+    const bin = this.sources.binance;
+    const now = Date.now();
+    const stale = now - bin.instrumentsAt > INSTRUMENT_REFRESH_MS; // 交集也按小时级刷新
+    if (bin.instruments.size > 0 && !(bin.instrumentsDegraded && stale)) return;
+    const by = this.sources.bybit.instruments;
+    const gt = this.sources.gate.instruments;
+    if (by.size === 0 || gt.size === 0) return; // 两源清单未就绪，等下轮
+    const inter: InstrumentsMap = new Map();
+    for (const [sym, ins] of by) if (gt.has(sym)) inter.set(sym, ins);
+    if (inter.size === 0) return;
+    bin.instruments = inter;
+    bin.instrumentsAt = now;
+    bin.instrumentsDegraded = true;
   }
 
   // ============ 价格轮询（每 5s 全源并行） ============
@@ -471,8 +501,9 @@ export class FuturesCollector {
     return null;
   }
 
-  /** 重建聚合行情：白名单 = 币安 U 本位永续（只做币安包含的品种） */
+  /** 重建聚合行情：白名单 = 币安 U 本位永续（封禁期降级为 Bybit∩Gate 交集代管，Task 69） */
   private rebuildMerged(): void {
+    this.applyDegradedWhitelistIfNeeded(); // 白名单为空时按两所交集临时建池（幂等，秒级开销）
     this.assignShards(); // 首次统计就绪时分配（幂等）
     const now = Date.now();
     const whitelist = this.sources.binance.instruments;
@@ -587,6 +618,7 @@ export class FuturesCollector {
         ok: now - st.lastPriceAt < PRICE_FRESH_MS && st.instruments.size > 0,
         suspended: now < st.suspendUntil,
         bannedUntil: st.bannedUntil,
+        instrumentsDegraded: st.instrumentsDegraded,
         lastPriceOkAt: st.lastPriceAt,
         last24hOkAt: st.last24hAt,
         symbols,
@@ -714,11 +746,14 @@ export class FuturesCollector {
 // bump 重建继承封禁状态不探针）。旧 3 分钟短挂起会反复撞墙，每次 418 刷新币安累犯
 // 计数、把封禁时长一路升级（实测 24h）。v3（Task 51 续）：K 线兜底「非币安优先，
 // 币安末位」+ klineReqs 计数 + isSharded 门控。v1/v2 已退役。
+// v5（Task 69）：币安封禁期白名单降级——Bybit∩Gate 交集代管品种池（白名单空则
+// 分片/聚合全停、全站无数据），解封后真 exchangeInfo 到货自动覆盖回真白名单。
 const g = globalThis as typeof globalThis & {
   __binanceRadarFutures_v1?: FuturesCollector; // v1：全量币安供价（Task 50，已退役）
   __binanceRadarFutures_v2?: FuturesCollector; // v2：分片首版（K 线兜底仍偏币安，已退役）
   __binanceRadarFutures_v3?: FuturesCollector; // v3：兜底重排（418 短挂起旧纪律，已退役）
-  __binanceRadarFutures_v4?: FuturesCollector;
+  __binanceRadarFutures_v4?: FuturesCollector; // v4：封禁硬截止（Task 60，已退役）
+  __binanceRadarFutures_v5?: FuturesCollector;
   __binanceRadarFuturesActive?: FuturesCollector;
 };
 
@@ -735,15 +770,16 @@ function clearFuturesTimers(c: unknown): void {
 }
 
 export const futuresCollector: FuturesCollector = (() => {
-  const existing = g.__binanceRadarFutures_v4;
+  const existing = g.__binanceRadarFutures_v5;
   if (existing) {
     g.__binanceRadarFuturesActive = existing; // 每次图评估都刷新稳定别名
     return existing;
   }
-  const legacy = g.__binanceRadarFutures_v3 ?? g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
+  const legacy =
+    g.__binanceRadarFutures_v4 ?? g.__binanceRadarFutures_v3 ?? g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
   if (legacy) clearFuturesTimers(legacy); // 遗留实例停表
   const fresh = new FuturesCollector(legacy); // 状态交接（清单/价格史/统计/分片/封禁状态）
-  g.__binanceRadarFutures_v4 = fresh;
+  g.__binanceRadarFutures_v5 = fresh;
   g.__binanceRadarFuturesActive = fresh;
   return fresh;
 })();

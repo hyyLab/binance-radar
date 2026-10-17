@@ -339,6 +339,7 @@ function StatsBar(props: {
     ok: boolean;
     suspended: boolean;
     bannedUntil?: number; // Task 60：418/429 封禁硬截止（epoch ms；0/缺省 = 无）
+    instrumentsDegraded?: boolean; // Task 69：白名单降级（Bybit∩Gate 交集代管）
     symbols: number;
     homeSymbols: number;
     klineReqs: number;
@@ -360,6 +361,10 @@ function StatsBar(props: {
             const banHint = banned
               ? `IP 被服务方限频封禁，${new Date(s.bannedUntil as number).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 自动恢复（期间 Bybit/Gate 代供）`
               : '';
+            // Task 69：白名单降级提示（币安 exchangeInfo 不可得，Bybit∩Gate 交集代管）
+            const degradedHint = s.instrumentsDegraded
+              ? '品种池降级：Bybit∩Gate 交集代管，币安解封后自动恢复真白名单'
+              : '';
             const state = s.ok
               ? '供价中'
               : banned
@@ -371,7 +376,7 @@ function StatsBar(props: {
               <span
                 key={s.source}
                 className="inline-flex items-center gap-1"
-                title={`${s.label} · ${state} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个 · K 线已承接 ${s.klineReqs} req${s.lastError ? ` · ${s.lastError}` : ''}`}
+                title={`${s.label} · ${state}${degradedHint ? ` · ${degradedHint}` : ''} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个 · K 线已承接 ${s.klineReqs} req${s.lastError ? ` · ${s.lastError}` : ''}`}
               >
                 <span
                   className={cn(
