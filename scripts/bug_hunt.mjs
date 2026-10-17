@@ -1,0 +1,17 @@
+import { PrismaClient } from '@prisma/client';
+const db = new PrismaClient();
+const ACC = 'cmvbspxtg00fln1u2x9f0wvyb';
+const fmt = (d) => d ? new Date(d).toISOString().slice(11,23) : '-';
+console.log('== 全部持仓（含已平，按开仓时间） ==');
+const poses = await db.paperPosition.findMany({ where: { accountId: ACC }, orderBy: { openedAt: 'asc' } });
+for (const p of poses) console.log(`${fmt(p.openedAt)}→${fmt(p.closedAt)} ${p.symbol.padEnd(10)} ${p.side.padEnd(5)} mgn=${p.margin.toFixed(2)} open=${p.entryPrice} exit=${p.exitPrice ?? '-'} pnl=${p.pnl?.toFixed(2) ?? '-'} ${p.status}`);
+console.log(`\n== PaperTrade 全部（${(await db.paperTrade.count({ where: { accountId: ACC } }))} 条） ==`);
+const trades = await db.paperTrade.findMany({ where: { accountId: ACC }, orderBy: { createdAt: 'asc' } });
+for (const t of trades) console.log(`${fmt(t.createdAt)} ${t.symbol.padEnd(10)} ${t.action.padEnd(6)} px=${t.price} qty=${t.qty.toFixed(4)} fee=${t.fee?.toFixed(3) ?? '-'} pnl=${t.pnl?.toFixed(3) ?? '-'}`);
+console.log('\n== 账户 ==');
+const acc = await db.paperAccount.findUnique({ where: { id: ACC } });
+console.log(JSON.stringify(acc));
+console.log('\n== 配置 ==');
+const cfg = await db.trendAutoConfig.findUnique({ where: { id: 'trend-auto:trend-auto-v1' } });
+console.log(JSON.stringify(cfg));
+await db.$disconnect();

@@ -598,3 +598,20 @@ Stage Summary:
 - 结论：非 bug。5.45U ≈ 权益91.8 × 11.875%（95%÷8舱）× 0.5（MAJOR_MOMENTUM 半舱倍率）；同批 BTW 因判为 PLATFORM_BREAKOUT 拿满舱 10.95U。舱位均分（Task 67）仍成立，均分之上叠加了远端 MAJOR P1 策略的入场质量分级倍率（Task 70 拉入）
 - 历史口径互洽：SUSDT 95U=权益100×95%（当时 maxPositions=1）；16:13 两笔 ≈11.2U=权益×47.5%（当时 maxPositions=2）
 - 若用户想改：调 maxPositions/marginRatio（参数控制台）或 major-p1-breakout.ts 内各形态 riskMultiplier
+
+---
+Task ID: deploy-4 / Task 71（前端文案 bug 修复，已推送 GitHub）
+Agent: main
+Task: 用户报告「出了一个运行时 bug」——排查趋势自动交易开仓金额显示与实际不符
+
+Work Log:
+- 浏览器 + dev.log + DB 三路排查：页面无 JS 报错、服务 RUNNING 无 lastError、交互（K线弹窗/控制台）正常
+- 还原时间线：18:18-18:29 major-p1-breakout-v1 开了 5 笔（倍率 0.55/0.5/0.7 与舱位 2 仓口径均自洽）；18:29-18:32 用户调参数控制台（恢复默认×2 + 应用 MP1 参数×2）；18:32:27 点重置（自动平 OGN/AVA、清库、资金回 100）；18:34 ICNT MAJOR P1 事件触发按默认 8 舱 ×0.55 倍率开 6.53U
+- 定位根因：trend-trade-view.tsx 头部/空态硬编码「每仓 = 开仓时权益 × 20%」（Task 56 时代旧文案），与 Task 67 舱位公式（min(设定比例, 95%÷舱位数)）及 major-p1 形态倍率严重不符 → 用户视角「开仓金额奇怪」
+- 修复：scripts/task71_ratio_text_patch.py（Python 锚定替换，规避 Edit 中文行原子性问题）三处改动——派生变量 effRatioPct/isMajorP1、头部文案动态化、空态文案动态化；eslint/tsc 零报错；浏览器验证头部显示「× 11.875%（按入场形态再乘 0.5~1.0 风险倍率）」
+- 提交 500b14a 推送 origin/main；dev.log 中「策略离场 ajor-p1-…」缺字为工具链 ANSI 剥离伪影（[m 被吃），非代码 bug
+
+Stage Summary:
+- 根因是显示层硬编码旧文案而非开仓逻辑：开仓数学（舱位均分×形态倍率）全程按设计执行（含重置后 ICNT 6.53U=100×11.875%×0.55）
+- 页面现在如实展示单仓比例与倍率说明；重置后「恢复默认参数」会把舱位数回 8 舱（重置端点语义如此，已向用户说明）
+- 教训：文案随公式演进必须跟数据源联动，禁止硬编码派生数值
