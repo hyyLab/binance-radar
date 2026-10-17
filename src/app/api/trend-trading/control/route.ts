@@ -18,6 +18,8 @@ export const dynamic = 'force-dynamic';
  * - deposit  ：给机器人账户充值（Task 55：增加可用余额与 ROI 本金基数，不计入盈亏）
  * - setMaxPositions：设置持仓数量/最大同时持仓数（Task 55：可选；更换时自动平仓
  *   原有持仓，每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配）
+ * - reset    ：重置机器人账户（Task 55：按标记价平掉全部持仓并清空持仓/流水/趋势关联
+ *   与决策审计，资金回到初始 100 USDT、ROI 本金基准归零；运行模式与持仓数量保持不变）
  *
  * ⚠️ 纯模拟；不接入真实下单。暂停与全部平仓是两个独立操作，不混为一谈。
  */
@@ -116,9 +118,21 @@ export async function POST(req: Request) {
           }。每仓保证金改为「可用余额 ÷ 剩余仓位数」均分，新确认趋势按新口径开仓`,
         });
       }
+      // Task 55：重置机器人账户——先按标记价正常平掉全部持仓，再清空持仓/流水/趋势
+      // 关联与决策审计；资金回到初始 100 USDT（totalDeposited 归零，ROI 本金基准 = 100）。
+      // ⚠️ 破坏性操作：前端弹窗二次确认后才调用；手动盘 default 账户完全不受影响。
+      case 'reset': {
+        const r = await engine.autoTrader.resetAccount();
+        return NextResponse.json({
+          ok: true,
+          closed: r.closed,
+          balance: TREND_TRADE.INITIAL_CAPITAL,
+          note: `机器人账户已重置：资金回到 ${TREND_TRADE.INITIAL_CAPITAL} USDT，已按标记价平掉 ${r.closed} 笔持仓并清空全部历史交易与决策审计（运行模式与持仓数量保持不变）`,
+        });
+      }
       default:
         return NextResponse.json(
-          { ok: false, error: `未知操作：${body.action ?? '(空)'}；支持 start/pause/resume/closeAll/close/deposit/setMaxPositions` },
+          { ok: false, error: `未知操作：${body.action ?? '(空)'}；支持 start/pause/resume/closeAll/close/deposit/setMaxPositions/reset` },
           { status: 400 },
         );
     }

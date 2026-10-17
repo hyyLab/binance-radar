@@ -7,8 +7,10 @@
 // - 开仓：确认趋势（CONFIRMED_UP/DOWN）才开；Task 55 sizing = 可用余额 ÷ 剩余仓位数
 //   （持仓数量界面可选，更换时自动平仓原有持仓；分子预留开仓手续费）；
 //   杠杆固定 20x；同一趋势周期只允许一笔（决策键幂等）
-// - 不设固定止盈止损：趋势确认结束（ENDED）平仓；反向趋势确认平仓（先平后开，
-//   新方向须由晚于平仓时刻的已收盘 K 线再次确认）；保留强平机制（独立巡检任务）
+// - 不设固定止盈止损：模型判断趋势有问题即自行平仓（Task 55 用户定版，不让人工兜底）——
+//   END_PENDING（结束迹象：反向候选/深回撤/结构失效）立即离场，不等确认根数；
+//   ENDED（任意周期归属，含周期回收/重启恢复后的残留持仓）离场；反向趋势确认离场
+//   （先平后开，新方向须由晚于平仓时刻的已收盘 K 线再次确认）；保留强平机制（独立巡检任务）
 // - 数据不可用（DATA_UNAVAILABLE/过期）：不新开仓、不伪装趋势结束、继续按标记价
 //   管理强平；暂停模式：只停新开仓，继续退出管理与强平巡检
 // - 成本口径：开/平仓手续费按 PaperEngine Taker 0.05% 双边；滑点按可配基点估算，
@@ -245,17 +247,39 @@ export class AutoPaperTrader {
 
   // ============ 退出管理 ============
 
+  /**
+   * 退出管理 v2（Task 55 用户定版：模型判断有问题 → 机器人自行平仓，不让人工兜底）：
+   * ① ENDED（任意周期归属）——旧规则要求 trendCycleId 与持仓一致，周期回收/重启恢复
+   *    （ORPHAN）等场景会漏配，残留持仓永远等不到退出只能人工平仓；现只要当前无已确认
+   *    趋势背书即离场。
+   * ② END_PENDING（同周期）——结束迹象（反向候选/深回撤/结构失效）= 模型已报警，立即
+   *    离场，不再等 END_CONFIRM_BARS 根收盘 K 线确认（防插针确认根数服务于池内生命周期
+   *    展示；对 20x 杠杆持仓，模型报警即离场）。证据明细留存 exitSignalJson。
+   * ③ 反向趋势确认（任意周期归属、方向与持仓相反）→ 先平，反手开仓仍受独立性规则约束。
+   * 跨周期中间态（不同周期 END_PENDING/OBSERVING/CANDIDATE_*）：不误平，由 ①/③ 在数根
+   * K 线内自然收敛（恢复确认→③；确认结束→①）。
+   */
   private async manageExits(bySymbol: Map<string, UnifiedTrendSignal>): Promise<void> {
     const openMetas = await this.repo.loadMetasByStatus('OPEN');
     for (const meta of openMetas) {
       const signal = bySymbol.get(meta.symbol);
       if (!signal) continue; // 信号缺失（标的退池/未评估）：不误平仓，仅强平/人工管理
-      if (signal.phase === 'ENDED' && signal.trendCycleId === meta.trendCycleId) {
+      const favorable = meta.side === 'LONG' ? signal.direction === 'up' : signal.direction === 'down';
+
+      // ① 趋势已结束（ENDED，任意周期归属）→ 自行平仓
+      if (signal.phase === 'ENDED') {
         await this.closePosition(meta, 'TREND_ENDED', signal);
-      } else if (
+        continue;
+      }
+      // ② 本周期出现结束迹象（模型已判定趋势有问题）→ 立即自行平仓
+      if (signal.phase === 'END_PENDING' && signal.trendCycleId === meta.trendCycleId) {
+        await this.closePosition(meta, 'TREND_ENDED', signal);
+        continue;
+      }
+      // ③ 反向趋势已确认 → 自行平仓（反手开仓见 manageEntries 独立性守卫）
+      if (
         (signal.phase === 'CONFIRMED_UP' || signal.phase === 'CONFIRMED_DOWN') &&
-        signal.trendCycleId !== meta.trendCycleId &&
-        (meta.side === 'LONG' ? signal.direction === 'down' : signal.direction === 'up')
+        !favorable
       ) {
         await this.closePosition(meta, 'REVERSE_CONFIRMED', signal);
       }
@@ -619,6 +643,37 @@ export class AutoPaperTrader {
       }
     }
     return { closed, skipped, totalPnlWithSlip: total };
+  }
+
+  /**
+   * 重置机器人账户（Task 55 用户定版：重置后资金回到 100 USDT）：
+   * ① 先按标记价正常平掉全部 OPEN 持仓（走引擎平仓：释放保证金、记录流水与 MANUAL 审计）；
+   * ② 清空该账户全部持仓与成交流水（PaperPosition/PaperTrade）；
+   * ③ 清空趋势关联与决策审计（TrendTradeMeta/TrendAutoDecision——仅趋势自动账户使用，
+   *    不带账户维度，全表清空安全）；
+   * ④ 余额 = initialCapital（100）、totalDeposited = 0（ROI 本金基准 = initialCapital +
+   *    totalDeposited，回到 100）、权益峰值归零；
+   * ⑤ 运行模式与持仓数量等配置保持不变。手动盘 default 账户完全不受影响。
+   */
+  async resetAccount(): Promise<{ closed: number }> {
+    const r = await this.closeAllManual();
+    const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+    if (acc) {
+      await db.paperPosition.deleteMany({ where: { accountId: acc.id } });
+      await db.paperTrade.deleteMany({ where: { accountId: acc.id } });
+    }
+    await db.$executeRawUnsafe(`DELETE FROM TrendTradeMeta`);
+    await db.$executeRawUnsafe(`DELETE FROM TrendAutoDecision`);
+    const cfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+    const capital = cfg?.initialCapital ?? TREND_TRADE.INITIAL_CAPITAL;
+    if (acc) {
+      await db.paperAccount.update({
+        where: { id: acc.id },
+        data: { balance: capital, totalDeposited: 0 },
+      });
+    }
+    await this.repo.resetPeakEquity(TREND_TRADE.ACCOUNT_NAME);
+    return { closed: r.closed };
   }
 
   mode(): Promise<TrendAutoMode | null> {

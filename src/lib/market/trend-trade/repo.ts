@@ -201,6 +201,15 @@ export function createTrendTradeRepo(client: RawClient = db) {
       );
     },
 
+    /** 峰值无条件归零（Task 55-2 重置账户专用；updatePeakEquity 是峰值语义，写入 0 不生效） */
+    async resetPeakEquity(name: string): Promise<void> {
+      await client.$executeRawUnsafe(
+        `UPDATE TrendAutoConfig SET peakEquity = 0, updatedAt = ? WHERE name = ?`,
+        new Date(),
+        name,
+      );
+    },
+
     // ===== 幂等决策（数据库唯一约束兜底） =====
     /** INSERT OR IGNORE：返回 true = 本进程抢占成功（首次决策）；false = 已存在（重复信号/重启重放） */
     async claimDecision(input: {

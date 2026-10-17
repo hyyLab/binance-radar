@@ -6,6 +6,10 @@
 //          ② 持仓数量可选（每仓保证金 = 可用余额 ÷ 剩余仓位数 平均分配；
 //             更换数量时自动平仓原有持仓，新仓按新口径开）
 //          ③ 点击持仓卡片 → 打开该币种 K 线（叠加成本线/强平线/开仓时点标记）
+// Task 55-2：④ 持仓数量更换/全部平仓/重置改用页内 AlertDialog（不再用浏览器原生 confirm）
+//            ⑤ 重置按钮：清空持仓与历史，资金回到 100 USDT（ROI 基准归零）
+//            ⑥ 模型判定趋势有问题时机器人自行平仓（后端 manageExits v2），无需人工兜底
+//            ⑦ 历史交易展示开仓时间 + 平仓时间
 // ⚠️ 纯模拟交易；趋势评分为启发式证据分；趋势确认 ≠ 买卖指令；强平如实统计。
 
 import { useMemo, useState } from 'react';
@@ -17,6 +21,7 @@ import {
   Pause,
   Play,
   Plus,
+  RotateCcw,
   Square,
   Wallet,
 } from 'lucide-react';
@@ -32,6 +37,17 @@ import {
 import { CoinDialog } from '@/components/market/coin-dialog';
 import type { ChartPriceLine, ChartTradeMarker } from '@/components/market/kline-chart';
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from '@/components/ui/dialog';
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from '@/components/ui/alert-dialog';
+import { toast } from '@/hooks/use-toast';
 import { Input } from '@/components/ui/input';
 
 /** 与服务端 TREND_TRADE.MAX_POSITIONS_OPTIONS 保持一致 */
@@ -40,6 +56,22 @@ const POSITION_OPTIONS = [1, 2, 3, 4, 5, 6, 8];
 const DEPOSIT_PRESETS = [100, 500, 1000, 5000];
 const MIN_DEPOSIT = 10;
 const MAX_DEPOSIT = 1_000_000;
+
+/** 历史交易用：月-日 时:分:秒（fmtTime 仅时分秒，跨天历史需要日期；title 展示完整日期） */
+function fmtStamp(iso: string | number | null): string {
+  if (iso == null) return '—';
+  const d = typeof iso === 'number' ? new Date(iso) : new Date(iso);
+  return Number.isNaN(d.getTime())
+    ? '—'
+    : d.toLocaleString('zh-CN', {
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false,
+      });
+}
 
 const EXIT_REASON_LABEL: Record<string, string> = {
   TREND_ENDED: '趋势结束',
@@ -175,7 +207,7 @@ function PositionCard({
       )}
       {p.waitingEndConfirm && (
         <div className="mt-1 flex items-center gap-1 text-[10px] text-gold">
-          <CircleAlert className="h-3 w-3" /> 持仓等待趋势结束确认（连续收盘 K 线判定，防插针误离场）
+          <CircleAlert className="h-3 w-3" /> 模型已判定趋势有问题（出现结束迹象），机器人将自行平仓（下一轮巡检执行，无需人工操作）
         </div>
       )}
     </div>
@@ -190,10 +222,21 @@ function TradeRow({ t, onDetail }: { t: TrendTradeRow; onDetail: (id: string) =>
   return (
     <button
       onClick={() => onDetail(t.positionId)}
-      className="grid w-full grid-cols-[64px_60px_44px_1fr_1fr_70px_90px] items-center gap-1 rounded px-2 py-1 text-left text-[11px] tabular-nums hover:bg-secondary/40 sm:grid-cols-[80px_64px_52px_1fr_1fr_76px_96px]"
+      className="grid w-full grid-cols-[76px_76px_48px_40px_1fr_1fr_54px_76px] items-center gap-1 rounded px-2 py-1 text-left text-[11px] tabular-nums hover:bg-secondary/40 sm:grid-cols-[92px_92px_60px_44px_1fr_1fr_64px_88px]"
       title="点击查看开仓依据与趋势变化详情"
     >
-      <span className="truncate text-muted-foreground">{fmtTime(t.closedAt)}</span>
+      <span
+        className="truncate text-muted-foreground"
+        title={`开仓 ${new Date(t.openedAt).toLocaleString('zh-CN')} → 持仓 ${t.holdMinutes ?? '—'} 分钟`}
+      >
+        {fmtStamp(t.openedAt)}
+      </span>
+      <span
+        className="truncate text-muted-foreground"
+        title={t.closedAt ? `平仓 ${new Date(t.closedAt).toLocaleString('zh-CN')} · 持仓 ${t.holdMinutes ?? '—'} 分钟` : ''}
+      >
+        {fmtStamp(t.closedAt)}
+      </span>
       <span className="truncate font-mono font-semibold">{t.base}</span>
       <span className={cn('font-bold', t.side === 'LONG' ? 'text-up' : 'text-down')}>
         {t.side === 'LONG' ? '多' : '空'}
@@ -211,6 +254,22 @@ function TradeRow({ t, onDetail }: { t: TrendTradeRow; onDetail: (id: string) =>
         {net != null ? net.toFixed(3) : '—'}
       </span>
     </button>
+  );
+}
+
+/** 历史明细表头（与 TradeRow 同网格：开仓时间/平仓时间两列明确标注） */
+function TradeHeader() {
+  return (
+    <div className="grid grid-cols-[76px_76px_48px_40px_1fr_1fr_54px_76px] gap-1 px-2 text-[10px] text-muted-foreground/70 sm:grid-cols-[92px_92px_60px_44px_1fr_1fr_64px_88px]">
+      <span>开仓时间</span>
+      <span>平仓时间</span>
+      <span>币种</span>
+      <span>方向</span>
+      <span>开仓 → 平仓</span>
+      <span>费·滑</span>
+      <span>原因</span>
+      <span className="text-right">净盈亏(含滑)</span>
+    </div>
   );
 }
 
@@ -254,6 +313,10 @@ export function TrendTradeView() {
   const [depositOpen, setDepositOpen] = useState(false);
   const [depositAmount, setDepositAmount] = useState('');
   const [klineSymbol, setKlineSymbol] = useState<string | null>(null);
+  // Task 55-2：操作确认内部弹窗（持仓数量更换 / 全部平仓 / 重置）——替代浏览器原生 confirm
+  const [confirm, setConfirm] = useState<
+    null | { type: 'changePositions'; value: number } | { type: 'closeAll' } | { type: 'reset' }
+  >(null);
 
   const mode = data?.mode ?? 'RUNNING';
   const busy = control.isPending;
@@ -268,17 +331,18 @@ export function TrendTradeView() {
     positionId?: string,
     value?: number,
     amount?: number,
-    /** 配置变更类操作（换仓位数/充值）需要弹窗确认结果；常规操作由界面状态反馈 */
+    /** 配置变更类操作（换仓位数/充值/重置）成功后用 toast 展示服务端说明；常规操作由界面状态反馈 */
     alertNote?: boolean,
   ) =>
     control.mutate(
       { action, positionId, value, amount },
       {
         onSuccess: (r) => {
-          if (!r.ok && r.error) window.alert(r.error);
-          else if (alertNote && r.note) window.alert(r.note);
+          if (!r.ok && r.error)
+            toast({ title: '操作失败', description: r.error, variant: 'destructive' });
+          else if (alertNote && r.note) toast({ title: '操作成功', description: r.note });
         },
-        onError: (e) => window.alert(`操作失败：${e.message}`),
+        onError: (e) => toast({ title: '操作失败', description: e.message, variant: 'destructive' }),
       },
     );
 
@@ -337,15 +401,10 @@ export function TrendTradeView() {
     ];
   }, [klinePosition]);
 
+  // Task 55-2：改用页内 AlertDialog 确认（不再用浏览器原生 confirm）
   const changePositions = (v: number) => {
     if (v === maxPositions) return;
-    if (
-      window.confirm(
-        `确认将持仓数量改为 ${v} 仓？\n\n· 将自动平仓当前全部 ${data?.positions.length ?? 0} 笔持仓（按标记价市价）\n· 每仓保证金改为「可用余额 ÷ 剩余仓位数」均分\n· 新确认趋势按新口径开仓`,
-      )
-    ) {
-      act('setMaxPositions', undefined, v, undefined, true);
-    }
+    setConfirm({ type: 'changePositions', value: v });
   };
 
   return (
@@ -407,12 +466,19 @@ export function TrendTradeView() {
           <button
             className="inline-flex items-center gap-1 rounded border border-down/50 px-2 py-1 text-[11px] font-semibold text-down hover:bg-down/10 disabled:opacity-40"
             disabled={busy || (data?.positions.length ?? 0) === 0}
-            onClick={() => {
-              if (window.confirm('确认按标记价市价平掉全部自动持仓？')) act('closeAll');
-            }}
+            onClick={() => setConfirm({ type: 'closeAll' })}
             title="全部平仓（不影响运行模式）"
           >
             <Square className="h-3 w-3" /> 全部平仓
+          </button>
+          {/* Task 55-2：重置机器人账户——清空持仓与历史，资金回到 100 USDT */}
+          <button
+            className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] font-semibold text-muted-foreground hover:border-gold/50 hover:text-gold disabled:opacity-40"
+            disabled={busy}
+            onClick={() => setConfirm({ type: 'reset' })}
+            title="重置机器人账户：清空全部持仓与历史交易，资金重置为 100 USDT（不可撤销）"
+          >
+            <RotateCcw className="h-3 w-3" /> 重置
           </button>
         </div>
       </div>
@@ -508,6 +574,7 @@ export function TrendTradeView() {
             </div>
             {history.data && history.data.trades.length > 0 && (
               <div className="space-y-0.5">
+                <TradeHeader />
                 {history.data.trades.map((t) => (
                   <div key={t.positionId}>
                     <TradeRow t={t} onDetail={openDetail} />
@@ -637,6 +704,63 @@ export function TrendTradeView() {
         extraPriceLines={klinePriceLines}
         extraMarkers={klineMarkers}
       />
+
+      {/* Task 55-2：操作确认内部弹窗（持仓数量更换 / 全部平仓 / 重置）——替代浏览器原生 confirm */}
+      <AlertDialog open={confirm !== null} onOpenChange={(o) => !o && setConfirm(null)}>
+        <AlertDialogContent className="w-[min(420px,95vw)]">
+          <AlertDialogHeader>
+            <AlertDialogTitle className="text-base font-bold">
+              {confirm?.type === 'changePositions' && `确认将持仓数量改为 ${confirm.value} 仓？`}
+              {confirm?.type === 'closeAll' && '确认全部平仓？'}
+              {confirm?.type === 'reset' && '确认重置机器人账户？'}
+            </AlertDialogTitle>
+            <AlertDialogDescription asChild>
+              <div className="space-y-1 text-xs leading-relaxed">
+                {confirm?.type === 'changePositions' && (
+                  <>
+                    <span className="block">· 将自动平仓当前全部 {data?.positions.length ?? 0} 笔持仓（按标记价市价）</span>
+                    <span className="block">· 每仓保证金改为「可用余额 ÷ 剩余仓位数」均分</span>
+                    <span className="block">· 新确认趋势按新口径开仓；被平掉的旧趋势周期不会立即重开</span>
+                  </>
+                )}
+                {confirm?.type === 'closeAll' && (
+                  <>
+                    <span className="block">· 按标记价市价平掉全部 {data?.positions.length ?? 0} 笔自动持仓</span>
+                    <span className="block">· 不影响运行模式（运行/暂停状态保持不变）</span>
+                  </>
+                )}
+                {confirm?.type === 'reset' && (
+                  <>
+                    <span className="block">· 先按标记价平掉全部持仓，再清空全部历史交易与决策审计记录</span>
+                    <span className="block">· 资金重置为 100 USDT，ROI 本金基准归零；运行模式与持仓数量保持不变</span>
+                    <span className="block font-semibold text-down">· 此操作不可撤销，请谨慎确认</span>
+                  </>
+                )}
+              </div>
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={busy}>取消</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={busy}
+              className={cn(
+                confirm?.type === 'reset' && 'bg-down text-white hover:bg-down/90',
+                confirm?.type === 'closeAll' && 'bg-down/90 text-white hover:bg-down',
+              )}
+              onClick={() => {
+                if (!confirm) return;
+                if (confirm.type === 'changePositions') act('setMaxPositions', undefined, confirm.value, undefined, true);
+                else if (confirm.type === 'closeAll') act('closeAll');
+                else act('reset', undefined, undefined, undefined, true);
+              }}
+            >
+              {confirm?.type === 'changePositions' && '确认更换'}
+              {confirm?.type === 'closeAll' && '全部平仓'}
+              {confirm?.type === 'reset' && '确认重置'}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

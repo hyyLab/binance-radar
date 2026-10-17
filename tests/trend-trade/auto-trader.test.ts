@@ -5,7 +5,8 @@
 // 7) 数据过期不开仓、不误判结束  8) 手续费/滑点/净盈亏口径
 // 9) 暂停后不开新仓但持仓仍受监控（含强平）  10) 重启恢复持仓关联（reconcile）
 // 11) 最大持仓数与保证金限制  12) 强平记录正确；附：先平后开独立性、人工平仓/全部平仓、
-//     充值（Task 55）、持仓数量变更持久化（Task 55）
+//     充值（Task 55）、持仓数量变更持久化（Task 55）、
+//     结束迹象即自行平仓/残留持仓自行离场/重置账户（Task 55-2）
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
@@ -607,5 +608,80 @@ describe('AutoPaperTrader（趋势自动模拟交易）', () => {
     const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
     const openNow = await client.paperPosition.findMany({ where: { accountId: acc!.id, status: 'OPEN' } });
     expect(openNow.length).toBe(2);
+  });
+
+  test('T18 结束迹象即自行平仓（Task 55-2）：END_PENDING 不再等确认根数，机器人自行离场', async () => {
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:918' })];
+    const trader = makeTrader(signals, engine);
+    await trader.ensureStarted();
+    await trader.tick();
+    expect((await openPositions()).length).toBe(1);
+    // 同周期出现结束迹象（END_PENDING = 模型已判定趋势有问题：反向候选/深回撤/结构失效）
+    const meta = (await trendTradeRepo.loadMetasByStatus('OPEN'))[0]!;
+    signals[0] = {
+      ...keepSig(signals[0]!),
+      phase: 'END_PENDING',
+      direction: 'up',
+      endEvidenceBars: 1,
+      endPendingSince: Date.now(),
+      trendCycleId: meta.trendCycleId,
+    };
+    await trader.tick();
+    expect((await openPositions()).length).toBe(0);
+    const m = await trendTradeRepo.getMeta(meta.positionId);
+    expect(m?.status).toBe('CLOSED');
+    expect(m?.exitReason).toBe('TREND_ENDED');
+    // 结束证据明细留存（exitSignalJson 含完整信号，可回溯结束报警上下文）
+    expect(m?.exitSignalJson).toContain('END_PENDING');
+  });
+
+  test('T19 残留持仓自行离场（Task 55-2）：ENDED 任意周期归属（周期回收/ORPHAN 漏配）也平仓', async () => {
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:919' })];
+    const trader = makeTrader(signals, engine);
+    await trader.ensureStarted();
+    await trader.tick();
+    const [pos] = await openPositions();
+    expect(pos).toBeDefined();
+    // 旧规则要求周期归属一致：周期回收/恢复场景漏配 → 残留持仓只能人工平；现应自行离场
+    signals[0] = { ...keepSig(signals[0]!), phase: 'ENDED', trendCycleId: 'BTCUSDT:L:999-rebuilt' };
+    await trader.tick();
+    expect((await openPositions()).length).toBe(0);
+    const m = await trendTradeRepo.getMeta(pos!.id);
+    expect(m?.exitReason).toBe('TREND_ENDED');
+  });
+
+  test('T20 重置账户（Task 55-2）：平掉持仓并清空流水/趋势关联/决策，资金回到 100 U、ROI 基准归零', async () => {
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    engine.marks.set('ETHUSDT', 50);
+    const trader = makeTrader(
+      [
+        sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:920' }),
+        sig({ symbol: 'ETHUSDT', phase: 'CONFIRMED_DOWN', cycleId: 'ETHUSDT:S:920' }),
+      ],
+      engine,
+    );
+    await trader.ensureStarted();
+    await trader.tick();
+    expect((await openPositions()).length).toBe(2);
+    // 充值改变余额/totalDeposited 后重置：都应回到初始态
+    await new PaperEngine(TREND_TRADE.ACCOUNT_NAME).deposit(500);
+    const r = await trader.resetAccount();
+    expect(r.closed).toBe(2);
+    expect((await openPositions()).length).toBe(0);
+    const acc = await client.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+    expect(acc!.balance).toBe(TREND_TRADE.INITIAL_CAPITAL);
+    expect(acc!.totalDeposited).toBe(0); // ROI 本金基准 = initialCapital + totalDeposited = 100
+    expect(await client.paperPosition.count()).toBe(0);
+    expect(await client.paperTrade.count()).toBe(0);
+    expect(await trendTradeRepo.loadMetasByStatus('OPEN')).toHaveLength(0);
+    expect(await trendTradeRepo.loadMetasByStatus('CLOSED')).toHaveLength(0);
+    expect(await trendTradeRepo.recentDecisions(10)).toHaveLength(0);
+    const cfg = await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+    expect(cfg!.peakEquity).toBe(0);
   });
 });

@@ -496,9 +496,11 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v7（Task 55-2）：AutoPaperTrader 退出管理 v2（END_PENDING/ENDED 任意周期归属即自行平仓）
+//   + resetAccount（重置账户到 100 U）。改行为必 bump key；旧实例 stop() 会同步停掉
+//   autoTrader 主循环，新实例从 DB 恢复持仓关联（reconcile）。
 // v6（Task 54b）：修复 TrendWatchService 生命周期状态未写回 map 的 bug（回放发现——
-// END_PENDING/ENDED 永不推进）。改行为必 bump key；新实例从 DB 恢复全部状态。
-// v5（Task 54）：集成 AutoPaperTrader + TrendWatchService v2。v4/v3/v2/v1 已退役。
+//   END_PENDING/ENDED 永不推进）。v5（Task 54）：集成 AutoPaperTrader + TrendWatchService v2。
 
 const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced?: EnhancedEngine; // v1（现货，遗留）
@@ -507,6 +509,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v4?: EnhancedEngine;
   __binanceRadarEnhanced_v5?: EnhancedEngine;
   __binanceRadarEnhanced_v6?: EnhancedEngine;
+  __binanceRadarEnhanced_v7?: EnhancedEngine;
 };
 
 function pickLegacyEngine(g: typeof globalThis & {
@@ -516,6 +519,7 @@ function pickLegacyEngine(g: typeof globalThis & {
   __binanceRadarEnhanced_v4?: EnhancedEngine;
 }): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v6 ??
     g.__binanceRadarEnhanced_v5 ??
     g.__binanceRadarEnhanced_v4 ??
     g.__binanceRadarEnhanced_v3 ??
@@ -551,20 +555,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v6;
+  const existing = g.__binanceRadarEnhanced_v7;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v6 = fresh;
+  g.__binanceRadarEnhanced_v7 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v6 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v7 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v6 = fresh;
+  g.__binanceRadarEnhanced_v7 = fresh;
   return fresh;
 }
