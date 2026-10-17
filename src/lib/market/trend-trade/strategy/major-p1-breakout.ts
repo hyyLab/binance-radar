@@ -128,7 +128,7 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     } else {
       const pending = e.evidence.some(x => x.kind === 'BREAKOUT_UP_PENDING' || x.kind === 'BREAKOUT_DOWN_PENDING');
       const spike = e.evidence.some(x => x.kind === (e.dir === 'UP' ? 'SPIKE_UP' : 'SPIKE_DOWN'));
-      if (pending) {
+      if (pending || e.breakout.status === 'PENDING') {
         side = e.dir === 'UP' ? 'LONG' : 'SHORT';
         modeTag = platform ? 'PLATFORM_BREAKOUT_PENDING' : 'BREAKOUT_PENDING';
         riskMultiplier = platform ? this.params.MP1B_PLATFORM_PENDING_RISK_MULTIPLIER : this.params.MP1B_PENDING_BREAKOUT_RISK_MULTIPLIER;
