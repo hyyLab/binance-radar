@@ -50,7 +50,10 @@ export interface FuturesSourceHealth {
   source: string;
   label: string;
   ok: boolean; // 价格流新鲜（15s 内有成功轮询）且清单已加载
-  suspended: boolean; // 连续失败被挂起（60s 后自动重试；418/429 挂 180s）
+  suspended: boolean; // 连续失败被挂起（60s 后自动重试；418/429 按服务方 retry-after 挂满封禁期）
+  /** Task 60：418/429 封禁硬截止（epoch ms；币安 retry-after/banned until 给出）。
+   *  封禁期内偶发成功（边缘节点分差）不提前解锁；0 = 无封禁。 */
+  bannedUntil: number;
   lastPriceOkAt: number;
   last24hOkAt: number;
   symbols: number; // 该源当前供价的符号数（含对挂起源的临时降级代供）

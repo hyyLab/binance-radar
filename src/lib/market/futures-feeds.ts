@@ -35,9 +35,14 @@ const BASES: Record<FuturesSourceName, string[]> = {
 const sticky: Record<FuturesSourceName, number> = { binance: 0, bybit: 0, gate: 0 };
 
 export class FuturesFetchError extends Error {
-  constructor(message: string) {
+  /** 418/429 限频封禁：服务方给出的解封等待毫秒（retry-after 头 / body banned until；无则 0）。
+   *  Task 60：采集器据此挂起到解封为止——短挂起会反复撞墙，每次 418 都刷新币安
+   *  累犯计数、把封禁时长一路升级（实测已被顶到 24h）。 */
+  readonly retryAfterMs: number;
+  constructor(message: string, retryAfterMs = 0) {
     super(message);
     this.name = 'FuturesFetchError';
+    this.retryAfterMs = Math.max(0, Math.floor(retryAfterMs));
   }
 }
 
@@ -111,7 +116,26 @@ async function sFetch<T>(
         signal: AbortSignal.timeout(timeoutMs),
         headers: { Accept: 'application/json' },
       });
-      if (!res.ok) throw new FuturesFetchError(`HTTP ${res.status} @ ${bases[idx]}${path}`);
+      if (!res.ok) {
+        // 418/429（币安 IP 封禁/限频）：读取解封等待——优先 body 的 banned until <epochMs>
+        //（418 专属，最准），其次 retry-after 头（秒）；拿不到 = 0（调用方用默认短挂起）
+        let retryAfterMs = 0;
+        if (res.status === 418 || res.status === 429) {
+          const raSec = Number(res.headers.get('retry-after'));
+          if (Number.isFinite(raSec) && raSec > 0) retryAfterMs = raSec * 1000;
+          try {
+            const body = (await res.text()).slice(0, 500);
+            const m = body.match(/banned until (\d{13})/);
+            if (m) {
+              const until = Number(m[1]);
+              if (Number.isFinite(until)) retryAfterMs = Math.max(retryAfterMs, until - Date.now());
+            }
+          } catch {
+            // body 读取失败不影响主错误抛出
+          }
+        }
+        throw new FuturesFetchError(`HTTP ${res.status} @ ${bases[idx]}${path}`, retryAfterMs);
+      }
       const json = (await res.json()) as T;
       sticky[source] = idx; // 记住可用域名
       return json;

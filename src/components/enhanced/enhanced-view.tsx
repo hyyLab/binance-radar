@@ -338,6 +338,7 @@ function StatsBar(props: {
     label: string;
     ok: boolean;
     suspended: boolean;
+    bannedUntil?: number; // Task 60：418/429 封禁硬截止（epoch ms；0/缺省 = 无）
     symbols: number;
     homeSymbols: number;
     klineReqs: number;
@@ -353,22 +354,36 @@ function StatsBar(props: {
       {/* 多源分片供价：币安 Top125，其余 ~400 由 Bybit/Gate 平分；源挂掉自动降级 */}
       {props.sources.length > 0 && (
         <span className="flex items-center gap-2.5">
-          {props.sources.map((s) => (
-            <span
-              key={s.source}
-              className="inline-flex items-center gap-1"
-              title={`${s.label} · ${s.ok ? '供价中' : s.suspended ? '异常挂起，稍后自动重试' : '连接中'} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个 · K 线已承接 ${s.klineReqs} req${s.lastError ? ` · ${s.lastError}` : ''}`}
-            >
+          {props.sources.map((s) => {
+            // Task 60：封禁中的源在悬停里给出明确解封时刻（而非笼统「稍后重试」）
+            const banned = (s.bannedUntil ?? 0) > Date.now();
+            const banHint = banned
+              ? `IP 被服务方限频封禁，${new Date(s.bannedUntil as number).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit' })} 自动恢复（期间 Bybit/Gate 代供）`
+              : '';
+            const state = s.ok
+              ? '供价中'
+              : banned
+                ? banHint
+                : s.suspended
+                  ? '异常挂起，稍后自动重试'
+                  : '连接中';
+            return (
               <span
-                className={cn(
-                  'h-1.5 w-1.5 rounded-full',
-                  s.ok ? 'bg-up' : s.suspended ? 'bg-down' : 'animate-pulse bg-muted-foreground/60',
-                )}
-              />
-              {s.label}
-              <span className="tabular-nums text-muted-foreground/80">{s.homeSymbols}</span>
-            </span>
-          ))}
+                key={s.source}
+                className="inline-flex items-center gap-1"
+                title={`${s.label} · ${state} · 分片归属 ${s.homeSymbols} 个品种 · 当前供价 ${s.symbols} 个 · K 线已承接 ${s.klineReqs} req${s.lastError ? ` · ${s.lastError}` : ''}`}
+              >
+                <span
+                  className={cn(
+                    'h-1.5 w-1.5 rounded-full',
+                    s.ok ? 'bg-up' : s.suspended ? 'bg-down' : 'animate-pulse bg-muted-foreground/60',
+                  )}
+                />
+                {s.label}
+                <span className="tabular-nums text-muted-foreground/80">{s.homeSymbols}</span>
+              </span>
+            );
+          })}
         </span>
       )}
       <span className="tabular-nums">

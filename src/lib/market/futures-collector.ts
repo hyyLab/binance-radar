@@ -20,6 +20,7 @@ import {
   fetchInstruments,
   fetchKlines,
   fetchPrices,
+  FuturesFetchError,
   type FuturesCandle,
   type FuturesSourceName,
   type InstrumentsMap,
@@ -34,7 +35,11 @@ const INSTRUMENT_REFRESH_MS = 60 * 60_000; // 合约清单每小时刷新
 const MIN_QV_DISPLAY = 100_000; // 展示门槛：24h 成交额 ≥ 10 万 USDT
 const TOP_BACKFILL = 120;
 const SUSPEND_MS = 60_000; // 源连续失败挂起时长
-const RATE_LIMIT_SUSPEND_MS = 180_000; // 418/429 限频封禁挂起时长（封禁期内不撞墙，行情自动降级下一源）
+// 418/429 限频：仅在拿不到服务方 retry-after 时用的兕底挂起。Task 60 根治封禁升级：
+// 封禁时长以币安 retry-after/banned until 为准（挂满整个封禁期），实测被短挂起反复
+// 撞墙升级到 24h 的教训——挂起期内任何模块（含 instruments 刷新）不得出站该源
+const RATE_LIMIT_SUSPEND_MS = 180_000;
+const RATE_LIMIT_BAN_CAP_MS = 72 * 3600_000; // 封禁挂起安全上限（币安最严禁令 3 天）
 const FAIL_STREAK_LIMIT = 4; // 连续失败次数阈值（≈20s 全失败即挂起）
 const PRICE_FRESH_MS = 15_000; // 供价源数据新鲜度要求
 
@@ -72,6 +77,9 @@ interface SourceState {
   nextStatsAt: number; // 下次 24hr 轮询到期时间（每源差异化间隔）
   failStreak: number;
   suspendUntil: number;
+  /** Task 60：418/429 封禁硬截止（epoch ms；0 = 无）。挂起期内偶发成功不提前解锁，
+   *  杜绝「解锁→突发→再 418→累犯升级」循环 */
+  bannedUntil: number;
   lastError: string;
   klineReqs: number; // 该源实际承接的 K 线请求数（分片分配观测）
   priceHist: Map<string, PricePoint[]>;
@@ -134,6 +142,10 @@ export class FuturesCollector {
         fresh.stats24 = old.stats24;
         fresh.lastVolSnap = old.lastVolSnap;
         fresh.volSamples = old.volSamples;
+        // Task 60：封禁状态跨 bump 交接——重建实例不探针（避免封禁期撞墙刷新累犯计数）
+        fresh.suspendUntil = old.suspendUntil ?? 0;
+        fresh.bannedUntil = old.bannedUntil ?? 0;
+        fresh.lastError = old.lastError ?? '';
       }
       this.shards = carry.shards ?? new Map<string, FuturesSourceName>(); // v1 遗留实例无分片字段
       this.shardsAt = carry.shardsAt ?? 0;
@@ -149,6 +161,7 @@ export class FuturesCollector {
       nextStatsAt: 0,
       failStreak: 0,
       suspendUntil: 0,
+      bannedUntil: 0,
       lastError: '',
       klineReqs: 0,
       priceHist: new Map(),
@@ -187,16 +200,28 @@ export class FuturesCollector {
 
   private async refreshInstruments(source: FuturesSourceName): Promise<void> {
     const st = this.sources[source];
+    // Task 60：挂起期间不出站（418 封禁期内打 instruments 同样刷新累犯计数、延长封禁）
+    const now = Date.now();
+    if (now < st.suspendUntil) {
+      setTimeout(() => void this.refreshInstruments(source), st.suspendUntil - now + 5_000);
+      return;
+    }
     try {
       st.instruments = await fetchInstruments(source);
       st.instrumentsAt = Date.now();
       st.failStreak = 0;
-      st.suspendUntil = 0;
-      st.lastError = '';
+      if (Date.now() >= st.bannedUntil) {
+        st.suspendUntil = 0;
+        st.bannedUntil = 0;
+        st.lastError = '';
+      }
       setTimeout(() => void this.refreshInstruments(source), INSTRUMENT_REFRESH_MS);
     } catch (e) {
+      // 418/429 同样按 retry-after 长挂起（instruments 撞墙也是撞墙）
+      this.applyRateLimitSuspend(source, e);
       st.lastError = errMsg(e);
-      setTimeout(() => void this.refreshInstruments(source), 60_000);
+      const wait = Math.max(60_000, st.suspendUntil - Date.now() + 5_000);
+      setTimeout(() => void this.refreshInstruments(source), wait);
     }
   }
 
@@ -212,8 +237,12 @@ export class FuturesCollector {
           const rows = await fetchPrices(s, st.instruments);
           this.ingestPrices(s, rows);
           st.failStreak = 0;
-          st.suspendUntil = 0;
-          st.lastError = '';
+          // Task 60：封禁期内偶发成功（边缘节点执行不一致）不提前解锁，挂满到 bannedUntil
+          if (Date.now() >= st.bannedUntil) {
+            st.suspendUntil = 0;
+            st.bannedUntil = 0;
+            st.lastError = '';
+          }
         } catch (e) {
           this.noteFailure(s, e);
         }
@@ -275,8 +304,12 @@ export class FuturesCollector {
           const rows = await fetch24h(s, st.instruments);
           this.ingestStats(s, rows, Date.now());
           st.failStreak = 0;
-          st.suspendUntil = 0;
-          st.lastError = '';
+          // Task 60：封禁期内偶发成功不提前解锁（同价格轮询口径）
+          if (Date.now() >= st.bannedUntil) {
+            st.suspendUntil = 0;
+            st.bannedUntil = 0;
+            st.lastError = '';
+          }
         } catch (e) {
           st.nextStatsAt = now + STATS_RETRY_MS; // 失败快速重试
           this.noteFailure(s, e);
@@ -317,16 +350,32 @@ export class FuturesCollector {
     st.last24hAt = now;
   }
 
+  /** Task 60：418/429 封禁挂起（挂满服务方告知的整个封禁期）。
+   *  命中返回 true（调用方跳过常规失败计数）；未命中返回 false。
+   *  ⚠️ 本方法与「成功路径清挂起」的协作语义：封禁期内偶发成功（币安边缘节点
+   *  封禁执行不一致）不得解锁——见各成功路径的 bannedUntil 检查。 */
+  private applyRateLimitSuspend(source: FuturesSourceName, e: unknown): boolean {
+    const msg = errMsg(e);
+    if (!msg.includes('HTTP 418') && !msg.includes('HTTP 429')) return false;
+    const st = this.sources[source];
+    const ra = e instanceof FuturesFetchError ? e.retryAfterMs : 0;
+    const until =
+      Date.now() +
+      Math.min(Math.max(ra, RATE_LIMIT_SUSPEND_MS) + 60_000, RATE_LIMIT_BAN_CAP_MS);
+    st.suspendUntil = Math.max(st.suspendUntil, until);
+    st.bannedUntil = Math.max(st.bannedUntil, until);
+    st.failStreak = 0;
+    st.lastError = msg;
+    return true;
+  }
+
   private noteFailure(source: FuturesSourceName, e: unknown) {
     const st = this.sources[source];
     const msg = errMsg(e);
     st.lastError = msg;
-    // 418/429 = 币安限频/封禁：直接长挂起，避免封禁期内反复撞墙延长封禁
-    if (msg.includes('HTTP 418') || msg.includes('HTTP 429')) {
-      st.suspendUntil = Date.now() + RATE_LIMIT_SUSPEND_MS;
-      st.failStreak = 0;
-      return;
-    }
+    // 418/429 = 限频/IP 封禁：按服务方 retry-after 挂满封禁期（封禁期内零出站，
+    // 避免反复撞墙刷新币安累犯计数、把封禁时长越顶越高）
+    if (this.applyRateLimitSuspend(source, e)) return;
     st.failStreak++;
     if (st.failStreak >= FAIL_STREAK_LIMIT) {
       st.suspendUntil = Date.now() + SUSPEND_MS;
@@ -537,6 +586,7 @@ export class FuturesCollector {
         label: SOURCE_LABEL[source],
         ok: now - st.lastPriceAt < PRICE_FRESH_MS && st.instruments.size > 0,
         suspended: now < st.suspendUntil,
+        bannedUntil: st.bannedUntil,
         lastPriceOkAt: st.lastPriceAt,
         last24hOkAt: st.last24hAt,
         symbols,
@@ -659,12 +709,16 @@ export class FuturesCollector {
 }
 
 // ---------- 全局单例（HMR 安全，同 Task 44/collector 规则） ----------
-// v3（Task 51 续）：K 线兜底顺序改「非币安优先，币安末位」+ 每源 klineReqs 计数 +
-// isSharded 门控。v2（分片首版）与 v1（全量币安供价）已退役，切换时停表并交接状态。
+// v4（Task 60）：封禁升级根治——418/429 解析服务方 retry-after/banned until，挂满整个
+// 封禁期（bannedUntil 硬截止：挂起期内偶发成功不提前解锁、instruments 刷新停手、
+// bump 重建继承封禁状态不探针）。旧 3 分钟短挂起会反复撞墙，每次 418 刷新币安累犯
+// 计数、把封禁时长一路升级（实测 24h）。v3（Task 51 续）：K 线兜底「非币安优先，
+// 币安末位」+ klineReqs 计数 + isSharded 门控。v1/v2 已退役。
 const g = globalThis as typeof globalThis & {
   __binanceRadarFutures_v1?: FuturesCollector; // v1：全量币安供价（Task 50，已退役）
   __binanceRadarFutures_v2?: FuturesCollector; // v2：分片首版（K 线兜底仍偏币安，已退役）
-  __binanceRadarFutures_v3?: FuturesCollector;
+  __binanceRadarFutures_v3?: FuturesCollector; // v3：兜底重排（418 短挂起旧纪律，已退役）
+  __binanceRadarFutures_v4?: FuturesCollector;
   __binanceRadarFuturesActive?: FuturesCollector;
 };
 
@@ -681,15 +735,15 @@ function clearFuturesTimers(c: unknown): void {
 }
 
 export const futuresCollector: FuturesCollector = (() => {
-  const existing = g.__binanceRadarFutures_v3;
+  const existing = g.__binanceRadarFutures_v4;
   if (existing) {
     g.__binanceRadarFuturesActive = existing; // 每次图评估都刷新稳定别名
     return existing;
   }
-  const legacy = g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
+  const legacy = g.__binanceRadarFutures_v3 ?? g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
   if (legacy) clearFuturesTimers(legacy); // 遗留实例停表
-  const fresh = new FuturesCollector(legacy); // 状态交接（清单/价格史/统计/分片）
-  g.__binanceRadarFutures_v3 = fresh;
+  const fresh = new FuturesCollector(legacy); // 状态交接（清单/价格史/统计/分片/封禁状态）
+  g.__binanceRadarFutures_v4 = fresh;
   g.__binanceRadarFuturesActive = fresh;
   return fresh;
 })();

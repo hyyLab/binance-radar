@@ -349,3 +349,27 @@ Stage Summary:
 - 自动账户 trend-auto-v1 手续费已切至双边各 0.02%（v15 热替换生效，全程未重启 server）；手动模拟盘保持 0.05% Taker 完全不受影响
 - 费率真值下沉为 PaperEngine 实例属性（feeRate），预检与结算同源；三次单例 bump（paper v9 / paperAuto v2 / enhanced v15）均按「改行为必 bump」纪律执行
 - 手续费暂为代码常量（config.ts FEE_RATE）；如需运行时可调可仿 marginRatio 接入参数控制台（DB 列 + PARAM_DEFS），用户提出即可做
+
+---
+Task ID: 60
+Agent: Super Z (main)
+Task: 用户报「币安U本位一直红，IP 被封了吗」——诊断 + 封禁升级根治（418 retry-after 纪律）
+
+Work Log:
+- 实锤诊断：状态接口 binance ok=False/suspended=True、lastError=HTTP 418 @ /fapi/v1/ticker/price；本机直探 fapi 返回 418 {"code":-1003,"msg":"...IP(8.212.10.159) banned until 1792322420917"}、retry-after 84253s ≈ 23.4h（累犯升级封禁，约次日 19:20-19:40 北京时间解封）；Bybit/Gate ok=True 价格 3s 新鲜——多源代供正常，行情/K线/模拟交易全程未受影响
+- 根因 A（自身，已修复）：futures-collector 旧纪律 418/429 只挂起 3 分钟（RATE_LIMIT_SUSPEND_MS=180s），币安实际封禁远长于此 → 每 3 分钟再撞墙 → 每次 418 刷新币安累犯计数、封禁时长逐次升级（2min→…→24h）；且 refreshInstruments 失败 60s 重试完全不看挂起状态、封禁期每分钟都在撞；封禁期内偶发成功（币安边缘节点封禁执行不一致，实测 /time 200、/ping 418）会清零挂起 → 立即恢复轮询 → 又 418，循环放大
+- 修复（futures-feeds.ts + futures-collector.ts + types.ts + enhanced-view.tsx）：
+  ① FuturesFetchError 增加 readonly retryAfterMs——sFetch 对 418/429 读取 retry-after 头（秒）与 body「banned until <epochMs>」（418 专属最准，取两者大者）
+  ② SourceState 新增 bannedUntil（硬截止）；applyRateLimitSuspend：挂起时长 = retry-after+60s（缺头兜底 180s，上限 72h），suspendUntil/bannedUntil 双写
+  ③ 三个成功路径（价格/24h/instruments）bannedUntil 感知：封禁期内偶发成功不再清挂起，仅到期后首个成功清零恢复
+  ④ refreshInstruments 挂起期入口守卫（不出站，改期到 suspendUntil+5s）；catch 里 418/429 同样按 retry-after 长挂起
+  ⑤ 构造器交接补 suspendUntil/bannedUntil/lastError——bump 重建不探针（封禁期重建零撞墙）
+  ⑥ getSourcesHealth 暴露 bannedUntil；状态条悬停封禁中显示「IP 被服务方限频封禁，HH:MM 自动恢复（期间 Bybit/Gate 代供）」
+  ⑦ 采集器单例 bump v3→v4（改行为必 bump）
+- 根因 B（外因，不受控）：修复后实测我们应用完全静默（v4 binance klineReqs 60s 恒 0）期间，fapi x-mbx-used-weight-1m 仍阵发 1526/1629/684/1169/1270 等无规律流量（自身探针仅 1/min）——出口 IP 8.212.10.159（阿里云 HK 共享 NAT）上有其他租户流量在打币安；共享 IP 连坐封禁解释了「令牌桶 480/min ≪ 币安 2400/min 限额却反复被封」。解封后若邻居继续滥打，v4 会按新纪律吃一个 418 即挂满新封禁期、不再放大
+- 验证：bun test 76/76、eslint 0、tsc 改动文件 0 新增报错（7 处均为 Ma7/PaperAddResponse 历史遗留）；线上 v4 生效（binance suspended=True 封禁至 bannedUntil、Bybit/Gate 代供、/trend-trading 与 / 全 200），未重启 server
+
+Stage Summary:
+- 「一直红」= IP 确被币安 418 封禁（累犯升级至 24h），但功能零影响（多源分片设计兑现）；状态条悬停现可直读解封时刻
+- 封禁纪律重构完成：币安说的解封时间就是唯一真值——挂满封禁期、封禁期零出站、偶发成功不提前解锁、instruments 同样停手、重建继承封禁状态
+- 外因（共享出口 IP 邻居流量）已用数据坐实；建议如解封后仍频繁连坐，考虑独立 EIP
