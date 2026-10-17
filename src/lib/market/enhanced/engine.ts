@@ -496,6 +496,12 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v16（Task 62）：通用趋势引擎算法化——最开始的 Universal Trend Engine（vendor 包，
+//   系统唯一趋势信号源）整理为可插拔算法 universal-trend-v1 注册进 STRATEGY_FACTORIES
+//   （确认即顺势 / 无评分·ER·5m 门槛 / 走弱先走 ≤2 轮；默认算法仍 short-swing-v1 不变，
+//   切换走 UI 下拉）。console-params 参数按策略归属过滤（ParamDef.strategyId）。
+//   改行为必 bump key；旧实例 stop() 会同步停掉 autoTrader 主循环，新实例从 DB 恢复
+//   持仓关联（reconcile）与策略轮次状态（TrendStrategyState 按 strategyId 存取）。
 // v15（Task 59）：手续费 0.02% 双边——用户定版「买入卖出都是 0.02%」。费率改为
 //   PaperEngine 实例属性（构造第二参 feeRate）：自动账户 trend-auto-v1 注入
 //   TREND_TRADE.FEE_RATE=0.02%（开仓预检与引擎结算同一实例费率，口径不脱钩），
@@ -562,6 +568,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v13?: EnhancedEngine;
   __binanceRadarEnhanced_v14?: EnhancedEngine;
   __binanceRadarEnhanced_v15?: EnhancedEngine;
+  __binanceRadarEnhanced_v16?: EnhancedEngine; // v16（Task 62）：注册通用趋势引擎 universal-trend-v1
 };
 
 function pickLegacyEngine(
@@ -579,10 +586,12 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v11?: EnhancedEngine;
     __binanceRadarEnhanced_v12?: EnhancedEngine;
     __binanceRadarEnhanced_v13?: EnhancedEngine;
+    __binanceRadarEnhanced_v15?: EnhancedEngine;
     __binanceRadarEnhanced_v14?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v15 ??
     g.__binanceRadarEnhanced_v14 ??
     g.__binanceRadarEnhanced_v13 ??
     g.__binanceRadarEnhanced_v12 ??
@@ -627,20 +636,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v15;
+  const existing = g.__binanceRadarEnhanced_v16;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v15 = fresh;
+  g.__binanceRadarEnhanced_v16 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v15 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v16 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v15 = fresh;
+  g.__binanceRadarEnhanced_v16 = fresh;
   return fresh;
 }

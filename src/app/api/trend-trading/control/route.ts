@@ -178,7 +178,13 @@ export async function POST(req: Request) {
       case 'setRuntimeParams': {
         let sanitized;
         try {
-          sanitized = sanitizeRuntimeParams(body.params);
+          // Task 62：严格校验携带当前算法 id——strategy 域键必须归属当前算法
+          // （防止「控制台显示 A 算法参数、实际存进 B 算法覆盖」的错位）
+          const cfgForParams = await trendTradeRepo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+          sanitized = sanitizeRuntimeParams(
+            body.params,
+            cfgForParams?.strategyId ?? TREND_TRADE.DEFAULT_STRATEGY_ID,
+          );
         } catch (e) {
           return NextResponse.json(
             { ok: false, error: e instanceof Error ? e.message : '参数校验失败' },

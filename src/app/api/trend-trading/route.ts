@@ -123,7 +123,7 @@ export async function GET() {
     // Task 57-c：参数控制台数据源——参数定义 + 当前生效值（默认+DB 覆盖合并）
     const strategyIdNow = cfg?.strategyId ?? TREND_TRADE.DEFAULT_STRATEGY_ID;
     const strategyOverrides = parseStrategyParamsMap(cfg?.strategyParamsJson)[strategyIdNow] ?? null;
-    const consoleParams = effectiveRuntimeParams(strategyOverrides, {
+    const consoleParams = effectiveRuntimeParams(strategyIdNow, strategyOverrides, {
       waitBarConfirm: cfg?.waitBarConfirm ?? null,
       cooldownMs: cfg?.cooldownMs ?? null,
       marginRatio: cfg?.marginRatio ?? null,

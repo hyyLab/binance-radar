@@ -23,6 +23,7 @@ export function ParamsConsole({
   busy,
   onSave,
   onReset,
+  strategyName,
 }: {
   open: boolean;
   onOpenChange: (o: boolean) => void;
@@ -32,6 +33,8 @@ export function ParamsConsole({
   onSave: (values: Record<string, number | boolean>) => void;
   /** 恢复代码默认值 */
   onReset: () => void;
+  /** 当前算法展示名（Task 62：无策略参数时提示「内置默认参数」用） */
+  strategyName?: string;
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -44,7 +47,13 @@ export function ParamsConsole({
           当前值与代码默认不同。1m 趋势确认固定需 3 根已收盘 K 线（平台状态机设计，不在可调范围）。
         </DialogDescription>
         {open && (
-          <ParamsForm params={params} busy={busy} onSave={onSave} onReset={onReset} />
+          <ParamsForm
+            params={params}
+            busy={busy}
+            onSave={onSave}
+            onReset={onReset}
+            strategyName={strategyName}
+          />
         )}
       </DialogContent>
     </Dialog>
@@ -56,11 +65,13 @@ function ParamsForm({
   busy,
   onSave,
   onReset,
+  strategyName,
 }: {
   params: RuntimeParamItem[];
   busy: boolean;
   onSave: (values: Record<string, number | boolean>) => void;
   onReset: () => void;
+  strategyName?: string;
 }) {
   // 挂载时初始化一次（number 用字符串编辑，避免中途 NaN）
   const [draft, setDraft] = useState<Record<string, string | boolean>>(() => {
@@ -102,6 +113,14 @@ function ParamsForm({
 
   return (
     <div className="space-y-3">
+      {/* Task 62：当前算法未注册控制台参数（如通用趋势引擎用代码默认参数）时明确告知，
+          避免用户以为参数丢了——此时仅展示基础设施组 */}
+      {!params.some((p) => p.scope === 'strategy') && (
+        <div className="rounded-lg border border-border/60 bg-secondary/10 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+          当前算法{strategyName ? `「${strategyName}」` : ''}使用内置默认参数，暂无控制台可调项；
+          下方为全部算法共享的基础设施参数。
+        </div>
+      )}
       {groups.map((g) => (
         <div key={g.group} className="rounded-lg border border-border/60 bg-secondary/10 p-2.5">
           <div className="mb-1.5 text-[11px] font-bold text-foreground/80">{g.group}</div>

@@ -679,6 +679,7 @@ const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => T
 
 - **id 命名**：`{算法名}-v{序号}` 全小写连字符（如 `pullback-v1`）。id 会被持久化到 `TrendAutoConfig.strategyId` 并作为策略状态表的命名空间——**上线后不可改名**；日后行为变更开 `xxx-v2` 新 id 而不是改 v1。
 - **UI 自动出现**：策略下拉与切换确认弹窗读 `listStrategies()`（id/name/description），注册即见，无需改前端。
+- **真实案例**：`universal-trend-v1`（通用趋势引擎，Task 62）即按本章流程接入——实现 `TrendStrategy` → 注册一行 → 未接控制台参数（代码默认）→ bump v15→v16，全程未重启 server。
 - **未知 id 兜底**：`createStrategy` 对未注册 id 回落 `DEFAULT_STRATEGY_ID`（short-swing-v1），绝不抛错阻断交易循环——所以注册表改坏时的爆炸半径 = 退回默认算法，可控。
 - 同一时刻只有一个策略在跑（`TrendAutoConfig.strategyId` 全局一行），没有组合/加权等花活；要并行跑两个算法，以后再加多账户。
 
@@ -703,15 +704,17 @@ const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => T
 2. **未注册的键在装配时被静默丢弃**：`applyStrategy` 用 `sanitizeRuntimeParamsLenient` 清洗 DB 覆盖项——不在 `PARAM_DEFS` 里的键直接丢弃（回退代码默认）。也就是说：**参数不进 PARAM_DEFS = 控制台写了也不生效**。
 3. **热生效链路**：控制台「保存」→ control API 严格校验（白名单/类型/范围，非法直接 400 报错给用户）→ `strategyParamsJson` 按 strategyId 分桶落库 → `applyStrategy` 重装配实例（`createStrategy(id, 覆盖)` + `importState` 从 DB 恢复轮次）→ 下一 tick 生效。infra 域参数（`waitBarConfirm`/`cooldownMs`/`marginRatio`）走配置列，每 tick 重读，同样下 tick 生效；`marginRatio` 实际生效值 = min(设定值, 95% ÷ 持仓数)。
 
+4. **参数按算法归属过滤（Task 62，多算法时代机制）**：每个 strategy 域 `ParamDef` 标注 `strategyId` 归属，控制台只展示「属于当前算法」的条目（如 universal-trend-v1 未注册 DEFS → strategy 域为空，仅剩 infra 组，UI 显示「使用内置默认参数」提示）。校验同样带算法上下文：严格写路径（control API）收到非当前算法的 strategy 键直接 400（「参数 X 不属于当前算法」）；宽松装配路径（applyStrategy）丢弃跨策略键回退代码默认。infra 域参数全局共享，不受算法切换影响。
+
 ### 6.4 第四步 · bump 引擎单例（改行为必 bump，铁律）
 
-**为什么**：enhanced 引擎（含 AutoPaperTrader 与策略实例）以 `globalThis.__binanceRadarEnhanced_v15` 驻留进程。dev server 热重载只替换模块代码，不替换 `globalThis` 上的旧实例——不 bump，你的新策略代码永远跑在旧实例的旧闭包里，看起来「改了没生效」。bump = 换 key = 强制用新代码重建实例；旧实例 `stop()` 被链式调用（停掉全部定时器，含 autoTrader 主循环），新实例从 DB reconcile 恢复持仓关联与轮次状态。**全程无需重启 server 3000。**
+**为什么**：enhanced 引擎（含 AutoPaperTrader 与策略实例）以 `globalThis.__binanceRadarEnhanced_v16` 驻留进程。dev server 热重载只替换模块代码，不替换 `globalThis` 上的旧实例——不 bump，你的新策略代码永远跑在旧实例的旧闭包里，看起来「改了没生效」。bump = 换 key = 强制用新代码重建实例；旧实例 `stop()` 被链式调用（停掉全部定时器，含 autoTrader 主循环），新实例从 DB reconcile 恢复持仓关联与轮次状态。**全程无需重启 server 3000。**
 
 ```ts
 // src/lib/market/enhanced/engine.ts —— 共四处
 const g = globalThis as typeof globalThis & {
-  // ...v2~v15 声明原样保留...
-  __binanceRadarEnhanced_v16?: EnhancedEngine;           // ① 类型声明加一行
+  // ...v2~v16 声明原样保留...
+  __binanceRadarEnhanced_v17?: EnhancedEngine;           // ① 类型声明加一行
 };
 // ② pickLegacyEngine 回收链补一段 v15 → v16（旧实例停表 + 状态/K线仓库交接）
 // ③ getEnhancedEngine / resetEnhancedEngine 的读写 key 切到 v16

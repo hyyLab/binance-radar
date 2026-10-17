@@ -216,7 +216,9 @@ export class AutoPaperTrader {
       const cfgNow = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
       const raw = parseStrategyParamsMap(cfgNow?.strategyParamsJson)[strategyId];
       if (raw && typeof raw === 'object') {
-        params = sanitizeRuntimeParamsLenient(raw).strategyParams as Record<string, unknown>;
+        // Task 62：宽松校验按当前算法过滤——strategy 域键只保留归属当前 strategyId 的
+        // （跨策略遗留键丢弃回默认），infra 键照常收敛
+        params = sanitizeRuntimeParamsLenient(raw, strategyId).strategyParams;
       }
     } catch {
       params = undefined; // 配置读取失败回退代码默认

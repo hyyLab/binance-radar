@@ -814,6 +814,7 @@ export function TrendTradeView() {
         busy={busy}
         onSave={(values) => act('setRuntimeParams', undefined, undefined, undefined, true, values)}
         onReset={() => act('resetRuntimeParams', undefined, undefined, undefined, true)}
+        strategyName={currentStrategy?.name}
       />
 
       {/* Task 55：持仓/历史交易 K 线弹窗（合约多源 K 线；持仓=成本线/强平线/开仓标记，历史=开平仓价线/时点标记） */}

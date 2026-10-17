@@ -1154,16 +1154,19 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
   });
 
   test('T29 参数校验：未知键/超范围/类型错误拒绝；合法值通过（严格写路径）', () => {
-    expect(() => sanitizeRuntimeParams({ NOPE: 1 })).toThrow(/未知参数/);
-    expect(() => sanitizeRuntimeParams({ ENTRY_MIN_SCORE: 200 })).toThrow(/不能超过/);
-    expect(() => sanitizeRuntimeParams({ waitBarConfirm: 'yes' })).toThrow(/true\/false/);
-    expect(() => sanitizeRuntimeParams({ ENTRY_MIN_ER: -1 })).toThrow(/不能低于/);
-    const ok = sanitizeRuntimeParams({
-      ENTRY_MIN_SCORE: 50,
-      ENTRY_MIN_ER: 0.3,
-      waitBarConfirm: false,
-      cooldownMs: 60_000,
-    });
+    expect(() => sanitizeRuntimeParams({ NOPE: 1 }, 'short-swing-v1')).toThrow(/未知参数/);
+    expect(() => sanitizeRuntimeParams({ ENTRY_MIN_SCORE: 200 }, 'short-swing-v1')).toThrow(/不能超过/);
+    expect(() => sanitizeRuntimeParams({ waitBarConfirm: 'yes' }, 'short-swing-v1')).toThrow(/true\/false/);
+    expect(() => sanitizeRuntimeParams({ ENTRY_MIN_ER: -1 }, 'short-swing-v1')).toThrow(/不能低于/);
+    const ok = sanitizeRuntimeParams(
+      {
+        ENTRY_MIN_SCORE: 50,
+        ENTRY_MIN_ER: 0.3,
+        waitBarConfirm: false,
+        cooldownMs: 60_000,
+      },
+      'short-swing-v1',
+    );
     expect(ok.strategyParams.ENTRY_MIN_SCORE).toBe(50);
     expect(ok.strategyParams.ENTRY_MIN_ER).toBe(0.3);
     expect(ok.waitBarConfirm).toBe(0);
@@ -1262,9 +1265,9 @@ describe('AutoPaperTrader（趋势自动模拟交易 · Task 56）', () => {
 
   test('T34 marginRatio 控制台参数（Task 58）：严格校验 + 持久化 + sizing 热生效 + 恢复默认', async () => {
     // 严格写路径：范围拒绝（0.005 < 0.01；1.5 > 1），合法值通过
-    expect(() => sanitizeRuntimeParams({ marginRatio: 0.005 })).toThrow(/不能低于/);
-    expect(() => sanitizeRuntimeParams({ marginRatio: 1.5 })).toThrow(/不能超过/);
-    expect(sanitizeRuntimeParams({ marginRatio: 0.35 }).marginRatio).toBe(0.35);
+    expect(() => sanitizeRuntimeParams({ marginRatio: 0.005 }, 'short-swing-v1')).toThrow(/不能低于/);
+    expect(() => sanitizeRuntimeParams({ marginRatio: 1.5 }, 'short-swing-v1')).toThrow(/不能超过/);
+    expect(sanitizeRuntimeParams({ marginRatio: 0.35 }, 'short-swing-v1').marginRatio).toBe(0.35);
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
     const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', cycleId: 'BTCUSDT:L:1005' })];

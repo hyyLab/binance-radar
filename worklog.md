@@ -391,3 +391,26 @@ Stage Summary:
 - 交付：docs/strategy-interface.md（仓库长期维护）+ download/趋势自动交易-算法接口文档.pdf（24 页可读版）+ 封面 HTML 源码
 - 零代码实施：本任务未改任何 src/ 文件、未 bump 引擎单例（文档不改运行时行为），server 3000 全程未动
 - 后续按图施工即可：新算法 = 实现 TrendStrategy（照 §5 示例）→ registry 一行 → 可选 PARAM_DEFS → bump v15→v16；用户已可用该文档评审接口设计并决定下一个算法
+
+---
+Task ID: 62
+Agent: Super Z (main)
+Task: 最开始的 Universal Trend Engine 算法化（universal-trend-v1 上架）+ strategy 目录清晰化 + 控制台按算法过滤（用户定版：UTE 先用代码默认参数，控制台暂不配置）
+
+Work Log:
+- 血缘核实：vendor/universal-trend-engine = 系统最初的趋势判定内核（五因子评分 0.35/0.25/0.20/0.15/0.05 + candidate→confirmed 连续 3 根状态机），至今仍是唯一趋势信号源（trend-watch 消费产出 UnifiedTrendSignal，signal.ts 纪律「绝不出现第二套方向算法」）→ 算法化形态定为「UTE 信号直通车」决策层：确认即顺势、确认在就拿满、走弱先走，不自建评分
+- 新增 strategy/universal-trend.ts（UniversalTrendStrategy，id=universal-trend-v1）：入场 = 仅 CONFIRMED_* 相位 + 轮次/间隔/新收盘 K 线三道防磨损护栏 + ENTRY_MIN_SCORE（默认 0=纯确认制，UTE 原味）；离场 = WEAKNESS_EXIT_EARLY（END_PENDING 同周期走弱先走，默认开；关=纯持有版等基础设施 ENDED/反向/强平）；observe 空实现（tick 采样是 short-swing 的 SPIKE_TAKE 专属，UTE 只信已收盘 K 线证据）；无冲高落袋；状态持久化与 short-swing 同构（states map + bindPersistence 落 TrendStrategyState）
+- registry.ts 注册 + 头注释算法清单表（short-swing-v1 / universal-trend-v1 双行）；DEFAULT_STRATEGY_ID 保持 short-swing-v1（线上运行行为不变，切换由用户在 UI 下拉决定）；strategy/README.md 新建（目录说明 + 两算法对比表 + 新增三步指引，指向 docs/strategy-interface.md）
+- console-params.ts 参数按算法过滤机制（Task 62 核心）：ParamDef 加 strategyId 归属字段，11 个 short-swing 参数全部挂 short-swing-v1；effectiveRuntimeParams(strategyId, overrides, infra) 只返回「infra 全部 + 归属当前算法」条目（UTE 下 strategy 域为空）；sanitizeRuntimeParams(严格写路径) 跨策略键 400「不属于当前算法」；sanitizeRuntimeParamsLenient(宽松装配) 跨策略键丢弃回默认；返回类型 ShortSwingParams→Record<string, unknown> 更诚实；三处调用点适配（auto-trader applyStrategy / control setRuntimeParams 先查当前 strategyId / overview route 传 strategyIdNow）
+- params-console.tsx：strategy 域为空时显示「当前算法「X」使用内置默认参数，暂无控制台可调项」提示条（props 加 strategyName，view 传 currentStrategy?.name）；修复 ParamsForm 解构漏参（TS2304）
+- 测试 tests/trend-trade/strategy-universal-trend.test.ts 16 用例（U1-U8 + CP1-4）：纯确认制低分入场/5m 反向照样入场（与 short-swing 的差异断言）/评分门槛可调/轮次上限 2/再入场新 K 线+间隔/走弱先走可关/无冲高落袋/状态往返/参数按算法过滤四路径；fixture 修正两处（verdict 无 lastBarTime→从 signal 取；TrendTradeMetaRow 补齐 exitReason/exitSignalJson/netPnlWithSlip/openDecisionAt/closedAt 必填）；全量 92/92 绿（76 存量+16 新增）
+- 引擎单例 bump v15→v16（scripts/bump-engine-v16.py 机械化：读写点 4 处/声明区 v16 新增 v15 保留/pickLegacyEngine 链首插 v15/头注释 v16 条目；python 直读文件绕开 shell 回显噪声）；typecheck 改动文件 0 错误、eslint 0
+- 线上验证（未重启 server）：v16 热接管 lastError=null、lastTickAt 正常；strategies 下拉出现 universal-trend-v1「通用趋势引擎」；当前策略 short-swing-v1 下 params=11 strategy+3 infra 与升级前逐项一致（过滤机制不破坏现状）；5 持仓 reconcile 完好、equity 109.6、33 已平仓胜率 54.5%
+- docs/strategy-interface.md 同步（scripts/sync-doc-task62.py）：§6.2 补 universal-trend-v1 真实接入案例、§6.3 机制列表追加第 4 条「参数按算法归属过滤」、§6.4 bump 表述 v15→v16
+- 过程教训（再次坐实）：shell 回显会随机吞字符/变形（w-[min( 被渲染成 w-in( 、setRuntimeParams 显示成 setRuntimeParams、sed 输出字母抖动）——本任务两次 MultiEdit 假拒绝（第一次部分应用：strategyName props 已落盘但报「No replacement」）+ 一次基于幻觉 old_str 的误判（Dialog 宽度类其实是好的，od 字节级证伪）；对策固化=编辑后 grep 核验 + 关键内容用 python 直读文件做 assert 式替换 + 测试运行结果作为唯一真值
+
+Stage Summary:
+- 交付：通用趋势引擎 universal-trend-v1 上架（最开始的 UTE 直通车）+ strategy 目录说明 + 控制台按算法过滤机制 + 接口文档同步；92 测试全绿；引擎 v16 运行中；全程未重启 server
+- 用户预期管理：默认算法仍是短周期套利（线上交易行为零变化）；UTE 在 UI 算法下拉可选，切换会先自动平仓清场再热装配（control API 既有语义）；UTE 控制台无参数可调（代码默认=纯确认制+走弱先走+2 轮上限），用户了解两算法区别后如需调参再按 docs §6.3 注册 DEFS（键前缀 UTE_ 不撞名）
+- 两算法核心区别（给用户的一句话）：短周期套利=确认+分数/ER 门槛+5m 背景分级+冲高落袋（在 UTE 之上加过滤）；通用趋势引擎=确认就做、确认在就拿、走弱才走（UTE 裸哲学）；同一信号源，决策层不同
+- 未验证假设：UTE 默认参数（ENTRY_MIN_SCORE=0 纯确认制）未做历史回放校准，切换后交易频率预计高于短周期套利（无 ER/背景/分数过滤）；轮次上限 2 与 60s 再入场间隔为防磨损护栏非优化值
