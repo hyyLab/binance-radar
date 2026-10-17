@@ -66,3 +66,21 @@ Stage Summary:
 - 请求预算：≤20 标的 × 1req/60s ≈ 20 req/min（多源分片自动承接，Bybit/Gate 为主），不扫全市场
 - 参数集中于 trend-watch/config.ts（入池分/迟滞/TTL/宽限/并发/UTE lookbackBars=12/minMovePct=0.35/confirmObservations=3），全部为初始工程参数，未经回放校准
 - ⚠️ 未验证假设：趋势评分盈利能力未验证（UTE score 是启发式证据分）；未做数周级历史回放对比假阳/漏检/确认延迟分布；confirmed→idle 的 changedAt 语义依赖 UTE 内部行为；趋势确认≠买卖指令，第一版无自动交易，模拟盘逻辑零改动
+
+---
+Task ID: 53-b（回滚恢复）
+Agent: main
+Task: 网站被平台回滚到 10-13 快照（Task 49 时代），从 GitHub 恢复全部工作并验证
+
+Work Log:
+- 核查发现本地 HEAD=155242e（Task 49，34 commits），丢失 Task 50~53 共 10 个提交；运行中 dev server 仍是旧代码
+- 备份回滚快照的 db/custom.db → db/custom.db.rollback-backup-10170050（含 10-13 时期 3 个旧模拟持仓）
+- 一次性 token URL fetch GitHub；发现远程比预期多一个提交：439aafb（Task 53 UTE 集成已完成并推送）
+- git reset --hard 439aafb 恢复全部代码；bun install 装回 vendor/universal-trend-engine（file: 依赖）
+- bunx prisma generate 重新生成含 TrendWatchSymbol 的 client；验证 /api/enhanced/trends 200、restoredFromDb:13、趋势池已开始评估（1 个 candidate）；首页 200
+- 核实评分实现：UTE 趋势分公式（vendor dist/engine.js）+ 入池候选分（trend-watch/config.ts、service.ts scoreOf）
+
+Stage Summary:
+- 工作区恢复至 439aafb（=远程 main），网站功能完整恢复；趋势候选池从 DB 恢复 13 标的
+- 模拟盘账户现为 10-16 状态（余额 10.00、无持仓，与推送前一致）；10-13 快照含 3 个旧持仓，已备份可回取
+- 未验证假设：无（恢复性操作，未改任何业务代码）
