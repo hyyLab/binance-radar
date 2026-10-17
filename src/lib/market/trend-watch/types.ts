@@ -1,9 +1,12 @@
 // ---------- 趋势跟踪 · 类型定义 ----------
-// 数据流：EnhancedEngine.events() → 候选筛选/评分 → 候选池（去重迟滞）
-//        → fetchKlinesFor(1m) → WatchOhlcvSeries → scanAnomalyCandidates()
-//        → TrendSignal（阶段/方向/评分）→ 持久化 + /api/enhanced/trends
+// 数据流：EnhancedEngine.events() + 主动探针 → 候选筛选/评分 → 候选池（去重迟滞）
+//        → fetchKlinesFor(1m×480) → WatchOhlcvSeries → scanAnomalyCandidates()
+//        → TrendSignal（UTE 阶段/方向/评分）→ lifecycle（END_PENDING/ENDED/DATA_UNAVAILABLE）
+//        → UnifiedTrendSignal（面板/自动交易/回放共同消费）→ 持久化 + /api/enhanced/trends
 
 import type { TrendSignal, TrendState } from 'universal-trend-engine';
+import type { HtfAssessment, VolatilityFeatures } from './indicators';
+import type { TrendCycleId, TrendEndReason, TrendPhaseV2 } from './signal';
 
 /** K 线行（与 FuturesCandle 同形，避免跨层类型耦合） */
 export interface TrendCandle {
@@ -43,20 +46,40 @@ export interface TrendPoolEntry {
   dataMissing: boolean;
   /** 趋势从 confirmed 回落 idle 的时刻（宽限退出判定用；重启后丢失，按保守处理） */
   confirmedLeftAt: number | null;
+  /** 入池通道：异动事件 / 主动探针（展示用） */
+  entryChannel: 'anomaly' | 'probe' | 'restored';
 }
 
 /** 趋势方向（UTE）映射为中文展示的辅助 */
 export type TrendPhase = 'idle' | 'candidate' | 'confirmed';
 export type TrendDir = 'up' | 'down' | 'flat';
 
-/** 对外 DTO（/api/enhanced/trends 池行） */
+/** 对外 DTO（/api/enhanced/trends 池行；v2 字段为 Task 54 统一信号投影） */
 export interface TrendWatchRow {
   symbol: string;
   base: string;
-  /** UTE 相位：观察中 idle / 候选趋势 candidate / 已确认趋势 confirmed */
+  /** UTE 相位：观察中 idle / 候选趋势 candidate / 已确认趋势 confirmed（兼容字段） */
   phase: TrendPhase;
-  /** UTE 方向：上行 up / 下行 down / 无明确方向 flat */
+  /** UTE 方向：上行 up / 下行 down / 无方向 flat（兼容字段） */
   direction: TrendDir;
+  // —— Task 54 v2 生命周期 ——
+  phaseV2: TrendPhaseV2;
+  trendCycleId: TrendCycleId | null;
+  trendStartedAt: number | null;
+  endPendingSince: number | null;
+  endEvidenceBars: number;
+  endedAt: number | null;
+  endReason: TrendEndReason | null;
+  /** 方向强度 0-1（UTE returnStrength 口径） */
+  strength: number;
+  // —— 波动率特征与高周期过滤 ——
+  vol: VolatilityFeatures | null;
+  htf5m: HtfAssessment | null;
+  htf15m: HtfAssessment | null;
+  htfAgree: boolean | null;
+  dataFresh: boolean;
+  dataUnavailableReason: string | null;
+  entryChannel: 'anomaly' | 'probe' | 'restored';
   /** UTE 趋势评分 0-100（启发式证据分，非概率、非盈利承诺） */
   score: number;
   /** UTE 评估依据（一句话） */
@@ -110,6 +133,9 @@ export interface TrendWatchStats {
   confirmed: number;
   candidate: number;
   watching: number;
+  endPending: number;
+  dataUnavailable: number;
+  probeReqs: number;
   klineReqs: number;
   dbWrites: number;
   dbErrors: number;
@@ -143,6 +169,11 @@ export interface TrendWatchRecord {
   lastScore: number;
   lastBarTime: number | null;
   lastKlineAt: number | null;
+  // —— Task 54 v2 ——
+  lifecycleStateJson?: string;
+  trendCycleId?: string | null;
+  lastPhaseV2?: TrendPhaseV2;
+  endReason?: TrendEndReason | null;
 }
 
 /** 持久化接口（生产用 Prisma repo；测试用内存实现） */
@@ -165,6 +196,8 @@ export interface TrendWatchDeps {
   };
   /** 持久化 */
   repo: TrendWatchRepo;
+  /** 主动探针通道开关（Task 54；生产 true，测试注入默认关闭以保证确定性） */
+  probe?: boolean;
 }
 
 /** 服务所需的异动事件最小形状（EnhancedEventDTO 的子集，测试可构造） */

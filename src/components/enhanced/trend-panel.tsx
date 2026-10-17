@@ -1,15 +1,16 @@
 'use client';
 
-// ---------- 趋势跟踪面板（Universal Trend Engine 集成展示） ----------
-// 区分：观察中（idle）/ 候选趋势（candidate）/ 已确认趋势（confirmed）
-//       上行（up）/ 下行（down）/ 无明确方向（flat）
+// ---------- 趋势跟踪面板（Universal Trend Engine + 生命周期 v2 展示） ----------
+// 相位：观察中 / 候选↑↓ / 确认↑↓ / 结束待确认 / 已结束 / 数据不可用（Task 54 生命周期）
+// 波动特征：ATR% / 已实现波动率状态 / 方向效率 ER / 15m 高周期过滤 / 入池通道
 // 冲突展示：趋势方向与原异动方向相反时明确标红，不静默覆盖任何一方。
-// 趋势评分为启发式证据分，不构成交易建议；本面板不提供自动交易。
+// 趋势评分为启发式证据分，不构成交易建议；自动模拟交易见独立页面（/trend-trading）。
 
 import { fmtAgo, fmtPrice } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import { useTrendWatch } from '@/hooks/use-enhanced';
 import type { TrendWatchRow } from '@/lib/market/trend-watch/types';
+import type { TrendPhaseV2 } from '@/lib/market/trend-watch/signal';
 import {
   ArrowDownRight,
   ArrowUpRight,
@@ -18,46 +19,37 @@ import {
   TrendingUp,
 } from 'lucide-react';
 
-const PHASE_LABEL: Record<TrendWatchRow['phase'], string> = {
-  idle: '观察中',
-  candidate: '候选趋势',
-  confirmed: '已确认趋势',
+const PHASE_LABEL: Record<TrendPhaseV2, string> = {
+  OBSERVING: '观察中',
+  CANDIDATE_UP: '候选上涨',
+  CANDIDATE_DOWN: '候选下跌',
+  CONFIRMED_UP: '确认上涨',
+  CONFIRMED_DOWN: '确认下跌',
+  END_PENDING: '结束待确认',
+  ENDED: '已结束',
+  DATA_UNAVAILABLE: '数据不可用',
 };
 
+function phaseClass(p: TrendPhaseV2): string {
+  if (p === 'CONFIRMED_UP') return 'bg-up/20 text-up';
+  if (p === 'CONFIRMED_DOWN') return 'bg-down/20 text-down';
+  if (p === 'CANDIDATE_UP') return 'bg-up/10 text-up/80';
+  if (p === 'CANDIDATE_DOWN') return 'bg-down/10 text-down/80';
+  if (p === 'END_PENDING' || p === 'DATA_UNAVAILABLE') return 'bg-gold/15 text-gold';
+  return 'bg-secondary text-muted-foreground';
+}
+
 function PhaseBadge({ row }: { row: TrendWatchRow }) {
-  const { phase, direction } = row;
-  if (phase === 'confirmed') {
-    const up = direction === 'up';
-    return (
-      <span
-        className={cn(
-          'rounded px-1.5 py-0.5 text-[10px] font-bold',
-          up ? 'bg-up/20 text-up' : direction === 'down' ? 'bg-down/20 text-down' : 'bg-secondary text-muted-foreground',
-        )}
-      >
-        {PHASE_LABEL[phase]}
-      </span>
-    );
-  }
-  if (phase === 'candidate') {
-    return (
-      <span className="rounded bg-gold/15 px-1.5 py-0.5 text-[10px] font-bold text-gold">
-        {PHASE_LABEL[phase]}
-      </span>
-    );
-  }
   return (
-    <span className="rounded bg-secondary px-1.5 py-0.5 text-[10px] font-semibold text-muted-foreground">
-      {PHASE_LABEL[phase]}
+    <span className={cn('rounded px-1.5 py-0.5 text-[10px] font-bold', phaseClass(row.phaseV2))}>
+      {PHASE_LABEL[row.phaseV2]}
     </span>
   );
 }
 
-function DirIcon({ d }: { d: TrendWatchRow['direction'] }) {
-  if (d === 'up')
-    return <ArrowUpRight className="h-4 w-4 shrink-0 text-up" aria-label="上行" />;
-  if (d === 'down')
-    return <ArrowDownRight className="h-4 w-4 shrink-0 text-down" aria-label="下行" />;
+function DirIcon({ d }: { d: string }) {
+  if (d === 'up') return <ArrowUpRight className="h-4 w-4 shrink-0 text-up" aria-label="上行" />;
+  if (d === 'down') return <ArrowDownRight className="h-4 w-4 shrink-0 text-down" aria-label="下行" />;
   return <Minus className="h-4 w-4 shrink-0 text-muted-foreground" aria-label="无明确方向" />;
 }
 
@@ -88,13 +80,17 @@ function TrendCard({
   row: TrendWatchRow;
   onSelectSymbol: (symbol: string) => void;
 }) {
+  const vol = row.vol;
+  const htf = row.htf15m;
   return (
     <div
       className={cn(
         'rounded-lg border bg-card p-2.5',
-        row.phase === 'confirmed'
+        row.phaseV2 === 'CONFIRMED_UP' || row.phaseV2 === 'CONFIRMED_DOWN'
           ? 'border-gold/50 shadow-[0_0_10px_-4px] shadow-gold/30'
-          : 'border-border/60',
+          : row.phaseV2 === 'END_PENDING'
+            ? 'border-gold/30'
+            : 'border-border/60',
       )}
     >
       {/* 头行：相位 + 标的 + 方向 + 价格 */}
@@ -114,21 +110,75 @@ function TrendCard({
         </span>
       </div>
 
-      {/* 评分 + 连续确认 */}
+      {/* 评分 + 确认计数 + 结束证据 */}
       <div className="mt-1.5 flex items-center gap-2">
         <ScoreBar score={row.score} />
-        <span className="text-[10px] tabular-nums text-muted-foreground">
-          确认 {row.consecutiveObservations}/3
-        </span>
+        {row.phaseV2 === 'CANDIDATE_UP' || row.phaseV2 === 'CANDIDATE_DOWN' ? (
+          <span className="text-[10px] tabular-nums text-muted-foreground">
+            确认 {row.consecutiveObservations}/3
+          </span>
+        ) : null}
+        {row.phaseV2 === 'END_PENDING' && (
+          <span className="text-[10px] font-semibold text-gold">
+            结束证据 {row.endEvidenceBars}/3
+          </span>
+        )}
         <span className="ml-auto text-[10px] tabular-nums text-muted-foreground" title="入池时间">
           {fmtAgo(row.addedAt)}入池
         </span>
       </div>
 
-      {/* 评估依据（UTE reason） */}
+      {/* 评估依据 */}
       {row.reason && (
         <div className="mt-1 truncate text-[10px] text-muted-foreground/90" title={row.reason}>
           依据：{row.reason}
+        </div>
+      )}
+
+      {/* 波动特征 + 高周期过滤（Task 54） */}
+      {vol && (
+        <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-muted-foreground">
+          <span title="ATR 占价比（波动幅度）">ATR {vol.atrPct.toFixed(2)}%</span>
+          <span
+            className={cn(
+              'rounded px-1 py-0.5 font-semibold',
+              vol.volRegime === 'EXTREME'
+                ? 'bg-down/15 text-down'
+                : vol.volRegime === 'HIGH'
+                  ? 'bg-gold/15 text-gold'
+                  : 'bg-secondary',
+            )}
+            title={`已实现波动率（日化）${vol.realizedVolPct.toFixed(1)}% · 历史分位 ${vol.volPercentile >= 0 ? (vol.volPercentile * 100).toFixed(0) + '%' : '样本不足'}`}
+          >
+            {vol.volRegime === 'EXTREME' ? '极端波动' : vol.volRegime === 'HIGH' ? '高波动' : '正常波动'}
+          </span>
+          <span title="方向效率（|净位移|/Σ|位移|，高=单边 低=震荡）">ER {vol.efficiencyRatio.toFixed(2)}</span>
+          {htf && (
+            <span
+              className={cn(
+                'rounded px-1 py-0.5',
+                !htf.valid
+                  ? 'bg-secondary text-muted-foreground/70'
+                  : htf.dir === row.direction
+                    ? 'bg-up/10 text-up/80'
+                    : htf.dir !== 'flat'
+                      ? 'bg-down/10 text-down/80'
+                      : 'bg-secondary',
+              )}
+              title={
+                htf.valid
+                  ? `15m 趋势：${htf.dir}（${htf.bars} 根已收盘）`
+                  : `15m 数据不足（${htf.bars}/16 根）——不作有效过滤，不冒充确认`
+              }
+            >
+              15m {htf.valid ? (htf.dir === 'up' ? '↑' : htf.dir === 'down' ? '↓' : '→') : '数据不足'}
+            </span>
+          )}
+          {row.entryChannel !== 'anomaly' && (
+            <span className="rounded bg-secondary px-1 py-0.5 text-muted-foreground/70" title="入池通道">
+              {row.entryChannel === 'probe' ? '探针' : '恢复'}
+            </span>
+          )}
         </div>
       )}
 
@@ -153,10 +203,10 @@ function TrendCard({
             方向冲突：异动 {row.anomalyDir} vs 趋势 {row.direction === 'up' ? 'up' : 'down'}
           </span>
         )}
-        {row.dataMissing && (
-          <span className="text-gold">数据缺失（行情延迟/K线不足）</span>
+        {row.phaseV2 === 'DATA_UNAVAILABLE' && row.dataUnavailableReason && (
+          <span className="text-gold">{row.dataUnavailableReason}（暂停判断，不误判趋势结束）</span>
         )}
-        {!row.dataMissing && row.stale && (
+        {!row.dataMissing && row.stale && row.phaseV2 !== 'DATA_UNAVAILABLE' && (
           <span className="text-gold" title={`最新收盘 K 线 ${row.lastBarTime ? fmtAgo(row.lastBarTime + 60_000) : '—'}`}>
             K 线过期
           </span>
@@ -187,14 +237,20 @@ export function TrendPanel({ onSelectSymbol }: { onSelectSymbol: (symbol: string
             <span>
               候选 <span className="font-semibold text-foreground">{stats.candidate}</span>
             </span>
+            {stats.endPending > 0 && (
+              <span>
+                结束待确认 <span className="font-semibold text-gold">{stats.endPending}</span>
+              </span>
+            )}
             <span className="hidden lg:inline">K 线 {stats.klineReqs} req</span>
+            <span className="hidden lg:inline">探针 {stats.probeReqs} req</span>
             {stats.restoredFromDb > 0 && (
               <span className="hidden lg:inline text-muted-foreground/70">重启恢复 {stats.restoredFromDb}</span>
             )}
           </span>
         )}
         <span className="text-xs text-muted-foreground">
-          1m 周期 · 约 60s 刷新 · 仅评分配额内候选，不做全市场扫描 · 评分未经回测校准，非交易信号
+          1m 主周期 + 15m 过滤 · 异动+主动探针双通道 · 评分未经回测校准，非交易信号 · 自动模拟盘见独立页面
         </span>
       </div>
 
@@ -210,7 +266,7 @@ export function TrendPanel({ onSelectSymbol }: { onSelectSymbol: (symbol: string
       )}
       {!isLoading && !isError && rows.length === 0 && (
         <div className="rounded-lg border border-border/70 bg-card px-4 py-6 text-center text-xs text-muted-foreground">
-          暂无趋势候选 · 显著异动（P1/P2 等级、证据充分、成交额达标）的合约将自动进入观察池，
+          暂无趋势候选 · 显著异动（P1/P2 等级、证据充分、成交额达标）与主动探针发现的「形成中趋势」将自动进入观察池，
           由 Universal Trend Engine 按 1m K 线独立评估趋势方向与强度
         </div>
       )}

@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import Link from 'next/link';
 import { useEnhancedAnomalies } from '@/hooks/use-enhanced';
 import { usePaperAccount } from '@/hooks/use-scanner';
 import { fmtAgo, fmtAgoShort, fmtHM, fmtPrice, fmtTime } from '@/lib/format';
@@ -17,6 +18,7 @@ import {
   CircleAlert,
   Radar,
   ShieldCheck,
+  TrendingUp,
 } from 'lucide-react';
 import type { EnhancedEventDTO } from '@/lib/market/enhanced/types';
 
@@ -456,6 +458,15 @@ export function EnhancedView() {
   return (
     <>
       <div className="space-y-4 sm:space-y-5">
+        {/* Task 54：趋势自动模拟交易入口（独立页面，不与手动模拟盘混同） */}
+        <div className="flex justify-end">
+          <Link
+            href="/trend-trading"
+            className="inline-flex items-center gap-1.5 rounded border border-gold/50 px-2.5 py-1 text-xs font-semibold text-gold hover:bg-gold/10"
+          >
+            <TrendingUp className="h-3.5 w-3.5" /> 趋势自动模拟交易 →
+          </Link>
+        </div>
         {/* 引擎状态条 */}
         {stats && (
           <StatsBar

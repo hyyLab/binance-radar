@@ -33,6 +33,10 @@ interface RawRow {
   lastScore: number;
   lastBarTime: Date | number | null;
   lastKlineAt: Date | number | null;
+  lifecycleStateJson: string | null;
+  trendCycleId: string | null;
+  lastPhaseV2: string | null;
+  endReason: string | null;
 }
 
 function toMs(v: Date | number | null | undefined): number | null {
@@ -57,7 +61,31 @@ function toRecord(row: RawRow): TrendWatchRecord {
     lastScore: row.lastScore,
     lastBarTime: toMs(row.lastBarTime),
     lastKlineAt: toMs(row.lastKlineAt),
+    lifecycleStateJson: row.lifecycleStateJson ?? '{}',
+    trendCycleId: row.trendCycleId ?? null,
+    lastPhaseV2: (row.lastPhaseV2 as TrendWatchRecord['lastPhaseV2']) ?? 'OBSERVING',
+    endReason: (row.endReason as TrendWatchRecord['endReason']) ?? null,
   };
+}
+
+/** 幂等 schema 迁移：v2 新列（SQLite ADD COLUMN 无损；已存在则跳过）。
+ *  运行中的 dev server 持有旧 PrismaClient 也能执行（纯 raw SQL）；
+ *  表结构与 prisma/schema.prisma 保持同步。 */
+export async function ensureTrendWatchSchema(client: RawClient = db): Promise<void> {
+  const cols = await client.$queryRawUnsafe<{ name: string }[]>(
+    `PRAGMA table_info('TrendWatchSymbol')`,
+  );
+  const names = new Set(cols.map((c) => c.name));
+  if (names.size === 0) return; // 表不存在：由 db push / 首次建表流程负责
+  const alters: [string, string][] = [
+    ['lifecycleStateJson', `ALTER TABLE TrendWatchSymbol ADD COLUMN lifecycleStateJson TEXT NOT NULL DEFAULT '{}'`],
+    ['trendCycleId', `ALTER TABLE TrendWatchSymbol ADD COLUMN trendCycleId TEXT`],
+    ['lastPhaseV2', `ALTER TABLE TrendWatchSymbol ADD COLUMN lastPhaseV2 TEXT NOT NULL DEFAULT 'OBSERVING'`],
+    ['endReason', `ALTER TABLE TrendWatchSymbol ADD COLUMN endReason TEXT`],
+  ];
+  for (const [col, ddl] of alters) {
+    if (!names.has(col)) await client.$executeRawUnsafe(ddl);
+  }
 }
 
 export function createPrismaTrendWatchRepo(client: RawClient = db): TrendWatchRepo {
@@ -66,7 +94,8 @@ export function createPrismaTrendWatchRepo(client: RawClient = db): TrendWatchRe
       const rows = await client.$queryRawUnsafe<RawRow[]>(
         `SELECT symbol, market, interval, status, addedAt, lastAnomalyAt, expiresAt,
                 trendStateJson, lastSignalJson, lastPhase, lastDirection, lastScore,
-                lastBarTime, lastKlineAt
+                lastBarTime, lastKlineAt,
+                lifecycleStateJson, trendCycleId, lastPhaseV2, endReason
          FROM TrendWatchSymbol
          WHERE market = ? AND interval = ? AND status = 'WATCHING'`,
         MARKET,
@@ -82,8 +111,9 @@ export function createPrismaTrendWatchRepo(client: RawClient = db): TrendWatchRe
         `INSERT INTO TrendWatchSymbol
            (id, symbol, market, interval, status, addedAt, lastAnomalyAt, expiresAt,
             trendStateJson, lastSignalJson, lastPhase, lastDirection, lastScore,
-            lastBarTime, lastKlineAt, updatedAt)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            lastBarTime, lastKlineAt, lifecycleStateJson, trendCycleId, lastPhaseV2, endReason,
+            updatedAt)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(symbol, market, interval) DO UPDATE SET
            status = excluded.status,
            addedAt = excluded.addedAt,
@@ -96,6 +126,10 @@ export function createPrismaTrendWatchRepo(client: RawClient = db): TrendWatchRe
            lastScore = excluded.lastScore,
            lastBarTime = excluded.lastBarTime,
            lastKlineAt = excluded.lastKlineAt,
+           lifecycleStateJson = excluded.lifecycleStateJson,
+           trendCycleId = excluded.trendCycleId,
+           lastPhaseV2 = excluded.lastPhaseV2,
+           endReason = excluded.endReason,
            updatedAt = excluded.updatedAt`,
         id,
         rec.symbol,
@@ -112,6 +146,10 @@ export function createPrismaTrendWatchRepo(client: RawClient = db): TrendWatchRe
         rec.lastScore,
         rec.lastBarTime != null ? new Date(rec.lastBarTime) : null,
         rec.lastKlineAt != null ? new Date(rec.lastKlineAt) : null,
+        rec.lifecycleStateJson ?? '{}',
+        rec.trendCycleId ?? null,
+        rec.lastPhaseV2 ?? 'OBSERVING',
+        rec.endReason ?? null,
         new Date(),
       );
     },

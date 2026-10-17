@@ -1,18 +1,23 @@
-// ---------- 趋势跟踪服务（Universal Trend Engine 集成） ----------
-// 职责：候选交易对管理、1m K 线按需刷新、UTE 趋势评估调度、趋势状态持久化。
-// 分工（用户定版）：Radar 负责行情采集与异动检测（不改）；UTE 负责趋势评估、方向判断、
-// 评分与状态确认（vendor 包，不复制/改写其算法）；本服务只做数据整形、门控与生命周期管理。
+// ---------- 趋势跟踪服务（Universal Trend Engine 集成 · Task 54 v2） ----------
+// 职责：候选交易对管理（异动事件 + 主动探针双通道）、1m K 线按需刷新（480 根，
+// 聚合 5m/15m）、UTE 趋势评估调度、波动率特征计算、趋势生命周期（END_PENDING/
+// ENDED/DATA_UNAVAILABLE）管理、统一信号（UnifiedTrendSignal）输出与持久化。
+//
+// 分工纪律（Task 53 定版 + Task 54 扩展）：Radar 负责行情采集与异动检测（不改）；
+// UTE 负责趋势方向判断、评分与确认（vendor 包，不复制/改写其算法）；本服务只做
+// 数据整形、门控、候选选择与生命周期管理——方向结论唯一来自 UTE。
 //
 // 生命周期：绑定 EnhancedEngine——engine.boot() 时 ensureStarted()（幂等，从 DB 恢复
-// 候选池与确认历史），engine.stop() 时停表。单例由 engine 单例保证，不重复启动定时器。
+// 候选池、UTE 确认历史与生命周期状态），engine.stop() 时停表。单例由 engine 单例保证。
 //
-// 请求预算：仅对入池候选（≤20 个）拉 1m K 线，每标的 ≥60s 一次，并发 ≤3，
-// inflight 去重防同标的重复请求；不扫描全市场。
+// 请求预算：池内 ≤20 标的 × 1 req/60s（480 根 = 币安权重 2）+ 主动探针
+// ≤PROBE_PER_REBUILD req/30s；并发 ≤3，inflight 去重；不扫描全市场。
 //
 // ⚠️ 趋势评分为启发式证据分（UTE score 0-100），未经历史回放校准；
-//    趋势确认不等于买卖指令，第一版不做自动交易。
+//    趋势确认不等于买卖指令（是否交易由 AutoPaperTrader 规则层决定，纯模拟）。
 
 import {
+  assessTrend,
   scanAnomalyCandidates,
   toClosedBars,
   type TrendConfig,
@@ -21,6 +26,15 @@ import {
   type WatchOhlcvSeries,
 } from 'universal-trend-engine';
 import { TREND_WATCH, trendEngineConfig } from './config';
+import { ensureTrendWatchSchema } from './repo';
+import {
+  assessHtf,
+  computeVolatilityFeatures,
+  type HtfAssessment,
+  type VolatilityFeatures,
+} from './indicators';
+import { createLifecycleState, stepLifecycle, type LifecycleState } from './lifecycle';
+import type { UnifiedTrendSignal } from './signal';
 import type {
   EnhancedEventLike,
   TrendCandle,
@@ -65,6 +79,33 @@ function toCtx(ev: EnhancedEventLike): AnomalyCtx {
   };
 }
 
+/** 防御性清洗：只留有限数值行，升序（三所适配器已归一化，此处兜底） */
+function cleanCandles(candles: TrendCandle[]): TrendCandle[] {
+  return candles
+    .filter(
+      (c) =>
+        Number.isFinite(c.t) && c.t > 0 &&
+        Number.isFinite(c.o) && c.o > 0 &&
+        Number.isFinite(c.h) && c.h > 0 &&
+        Number.isFinite(c.l) && c.l > 0 &&
+        Number.isFinite(c.c) && c.c > 0 &&
+        Number.isFinite(c.qv) && c.qv >= 0,
+    )
+    .sort((a, b) => a.t - b.t);
+}
+
+function seriesOf(symbol: string, clean: TrendCandle[]): WatchOhlcvSeries {
+  return {
+    symbol,
+    barMs: clean.map((c) => c.t),
+    opens: clean.map((c) => c.o),
+    highs: clean.map((c) => c.h),
+    lows: clean.map((c) => c.l),
+    closes: clean.map((c) => c.c),
+    vols: clean.map((c) => c.qv), // 计价成交额（USDT）作为量
+  };
+}
+
 export class TrendWatchService {
   private readonly deps: TrendWatchDeps;
   private readonly trendCfg: Partial<TrendConfig> = trendEngineConfig();
@@ -83,9 +124,18 @@ export class TrendWatchService {
   private lastSignals = new Map<string, TrendSignal>();
   private anomalyCtx = new Map<string, AnomalyCtx>();
   private inflight = new Set<string>();
+  /** Task 54：生命周期状态与统一信号（面板/自动交易共同消费） */
+  private lifecycles = new Map<string, LifecycleState>();
+  private v2Signals = new Map<string, UnifiedTrendSignal>();
+
+  // —— Task 54：主动探针（仅当 deps.probe=true 时启用，测试注入默认关闭） ——
+  private probeQueue: string[] = [];
+  private probeQueueBuiltAt = 0;
+  private probeInflight = new Set<string>();
 
   // —— 计数 ——
   klineReqs = 0;
+  probeReqs = 0;
   dbWrites = 0;
   dbErrors = 0;
   lastScanAt = 0;
@@ -97,7 +147,7 @@ export class TrendWatchService {
 
   // ============ 生命周期 ============
 
-  /** 幂等启动：从 DB 恢复候选池与 UTE 确认历史，再启动扫描定时器 */
+  /** 幂等启动：从 DB 恢复候选池、UTE 确认历史与生命周期状态，再启动扫描定时器 */
   async ensureStarted(): Promise<void> {
     if (this.started) return;
     if (this.starting) {
@@ -114,7 +164,14 @@ export class TrendWatchService {
   }
 
   private async boot(): Promise<void> {
-    // 1) 恢复候选池与确认历史（重启后 confirmed/candidate 相位与观察计数不丢）
+    // 0) 幂等 schema 迁移：v2 新列（SQLite ADD COLUMN 无损；运行中服务免 prisma generate）
+    try {
+      await ensureTrendWatchSchema();
+    } catch (e) {
+      this.dbErrors++;
+      console.warn('[trend-watch] schema 迁移失败：', e instanceof Error ? e.message : e);
+    }
+    // 1) 恢复候选池、确认历史与生命周期状态（重启后 confirmed/candidate/END_PENDING 不丢）
     try {
       const records = await this.deps.repo.loadActive();
       for (const rec of records) {
@@ -130,6 +187,7 @@ export class TrendWatchService {
           lastBarTime: rec.lastBarTime,
           dataMissing: false,
           confirmedLeftAt: null,
+          entryChannel: 'restored',
         });
         // 恢复 UTE 状态（含 lastObservationKey——同根 K 线去重在重启后仍然生效）
         try {
@@ -137,6 +195,15 @@ export class TrendWatchService {
           if (st && typeof st.symbol === 'string') this.states.set(rec.symbol, st);
         } catch {
           // JSON 损坏：该标的从 idle 重新确认（不阻断其他标的恢复）
+        }
+        // 恢复生命周期状态（END_PENDING 证据计数/周期 id；损坏则从 OBSERVING 重建）
+        try {
+          const lc = JSON.parse(rec.lifecycleStateJson || '{}') as LifecycleState;
+          if (lc && lc.symbol === rec.symbol && typeof lc.phase === 'string') {
+            this.lifecycles.set(rec.symbol, lc);
+          }
+        } catch {
+          this.lifecycles.set(rec.symbol, createLifecycleState(rec.symbol));
         }
       }
       this.restoredFromDb = records.length;
@@ -244,6 +311,7 @@ export class TrendWatchService {
             lastBarTime: null,
             dataMissing: false,
             confirmedLeftAt: null,
+            entryChannel: 'anomaly',
           });
           poolChanged = true;
           void this.persistUpsert(sym, now);
@@ -289,12 +357,8 @@ export class TrendWatchService {
       }
 
       if (retire) {
-        this.pool.delete(sym);
-        this.anomalyCtx.delete(sym);
-        this.lastSignals.delete(sym);
-        this.states.delete(sym); // 重新入池则从零重新确认
+        this.evictSymbol(sym);
         poolChanged = true;
-        void this.persistRetire(sym);
       }
     }
 
@@ -309,16 +373,109 @@ export class TrendWatchService {
       };
       const ordered = [...this.pool.keys()].sort((a, b) => retainRank(b) - retainRank(a));
       for (const sym of ordered.slice(TREND_WATCH.MAX_TREND_SYMBOLS)) {
-        this.pool.delete(sym);
-        this.anomalyCtx.delete(sym);
-        this.lastSignals.delete(sym);
-        this.states.delete(sym);
+        this.evictSymbol(sym);
         poolChanged = true;
-        void this.persistRetire(sym);
       }
     }
 
     if (poolChanged) this.lastRebuildAt = now; // 有变化时不必立即再重建（防抖）
+
+    // 5) Task 54：主动探针通道（不依赖异动事件的候选发现；预算可配）
+    this.maybeProbe(now, [...tickers.values()]);
+  }
+
+  /** 统一退池：清空全部内存态并标记 DB RETIRED（重新入池则从零重新确认） */
+  private evictSymbol(sym: string): void {
+    this.pool.delete(sym);
+    this.anomalyCtx.delete(sym);
+    this.lastSignals.delete(sym);
+    this.states.delete(sym);
+    this.lifecycles.delete(sym);
+    this.v2Signals.delete(sym);
+    void this.persistRetire(sym);
+  }
+
+  // ============ 主动探针通道（Task 54 §2.1：兼顾「正在形成趋势」） ============
+  // 从可交易合约宇宙按成交额轮换探测未入池标的：用「形成中趋势」特征组合
+  // （ER/一致性/量比/区间扩张达标 + 窗口收益未走完）判准入池；只做候选选择，
+  // 方向结论仍由入池后的 UTE 正式评估给出。
+
+  private maybeProbe(now: number, tickers: TrendTickerSnap[]): void {
+    if (!this.deps.probe) return; // 测试注入默认关闭；生产（engine）开启
+    if (this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) return;
+    if (this.probeInflight.size > 0) return; // 上轮探针未完成不叠加（请求预算护栏）
+    if (
+      now - this.probeQueueBuiltAt >= TREND_WATCH.REBUILD_MS * 2 ||
+      this.probeQueue.length === 0
+    ) {
+      this.probeQueue = tickers
+        .filter(
+          (t) =>
+            t.price > 0 &&
+            t.quoteVolume24h >= TREND_WATCH.PROBE_QV_MIN &&
+            !this.pool.has(t.symbol),
+        )
+        .sort((a, b) => b.quoteVolume24h - a.quoteVolume24h)
+        .map((t) => t.symbol);
+      this.probeQueueBuiltAt = now;
+    }
+    let budget = TREND_WATCH.PROBE_PER_REBUILD;
+    while (
+      budget > 0 &&
+      this.probeQueue.length > 0 &&
+      this.pool.size + this.probeInflight.size < TREND_WATCH.MAX_TREND_SYMBOLS
+    ) {
+      const sym = this.probeQueue.shift()!;
+      if (this.pool.has(sym) || this.inflight.has(sym) || this.probeInflight.has(sym)) continue;
+      budget--;
+      this.probeInflight.add(sym);
+      void this.probeSymbol(sym).finally(() => this.probeInflight.delete(sym));
+    }
+  }
+
+  /** 探测单标的：480 根 1m → 已收盘 → 特征「形成中趋势」判准 → 入池（不动方向状态） */
+  private async probeSymbol(symbol: string): Promise<void> {
+    try {
+      const now = Date.now();
+      const ticker = this.deps.getTickers().find((t) => t.symbol === symbol);
+      if (!ticker || !(ticker.price > 0) || now - ticker.updatedAt > TREND_WATCH.MAX_TICK_AGE_MS) return;
+      if (this.pool.has(symbol) || this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) return;
+      this.probeReqs++;
+      const candles = await this.deps.fetchKlines(symbol, TREND_WATCH.KLINE_BARS_V2);
+      const clean = cleanCandles(candles);
+      const closed = toClosedBars(seriesOf(symbol, clean), INTERVAL_MS, Date.now());
+      if (closed.length < TREND_WATCH.MIN_CLOSED_BARS) return; // 数据量不足：不冒充有效特征
+      const assessment = assessTrend(closed, { now: Date.now() }, this.trendCfg);
+      const f = assessment.features;
+      const vol = computeVolatilityFeatures(closed);
+      if (!f || f.barsUsed < TREND_WATCH.MIN_CLOSED_BARS) return;
+      const forming =
+        assessment.direction !== 'flat' &&
+        f.directionalConsistency >= TREND_WATCH.PROBE_CONSISTENCY_MIN &&
+        vol.efficiencyRatio >= TREND_WATCH.PROBE_ER_MIN &&
+        f.volumeRatio >= TREND_WATCH.PROBE_VOLUME_RATIO_MIN &&
+        f.rangeExpansion >= TREND_WATCH.PROBE_RANGE_EXPANSION_MIN &&
+        Math.abs(f.returnPct) <= TREND_WATCH.PROBE_RETURN_MAX_PCT;
+      if (!forming) return;
+      if (this.pool.has(symbol) || this.pool.size >= TREND_WATCH.MAX_TREND_SYMBOLS) return;
+      const now2 = Date.now();
+      this.pool.set(symbol, {
+        symbol,
+        addedAt: now2,
+        lastAnomalyAt: now2,
+        expiresAt: now2 + TREND_WATCH.CANDIDATE_TTL_MS,
+        lastEntryScore: 0,
+        lastWeakAt: 0,
+        lastKlineAt: 0,
+        lastBarTime: null,
+        dataMissing: false,
+        confirmedLeftAt: null,
+        entryChannel: 'probe',
+      });
+      void this.persistUpsert(symbol, now2);
+    } catch {
+      // 探针失败静默：下轮重建会重新入队
+    }
   }
 
   // ============ K 线刷新与 UTE 评估 ============
@@ -340,6 +497,49 @@ export class TrendWatchService {
     }
   }
 
+  /** 数据不可用：标记 DATA_UNAVAILABLE（不伪装趋势结束；恢复后按正常规则继续） */
+  private markDataUnavailable(symbol: string, reason: string, now: number): void {
+    const entry = this.pool.get(symbol);
+    if (!entry) return;
+    entry.dataMissing = true;
+    const lc = this.lifecycles.get(symbol) ?? createLifecycleState(symbol);
+    const prevPhaseV2 = lc.phase;
+    const res = stepLifecycle(lc, {
+      utePhase: 'idle',
+      uteDirection: 'flat',
+      uteCandidateDirection: 'flat',
+      directionalConsistency: 0,
+      returnPct: 0,
+      barTime: null,
+      uteChangedAt: null,
+      uteConfirmCount: 0,
+      uteScore: 0,
+      strength: 0,
+      features: null,
+      dataOk: false,
+      now,
+    });
+    this.lifecycles.set(symbol, res.state); // 写回（同 refreshSymbol 纪律）
+    const prevV2 = this.v2Signals.get(symbol);
+    this.v2Signals.set(
+      symbol,
+      this.buildSignalV2({
+        symbol,
+        entry,
+        lc: res.state,
+        ute: this.lastSignals.get(symbol) ?? null,
+        vol: prevV2?.features ?? null,
+        htf5m: prevV2?.htf5m ?? null,
+        htf15m: prevV2?.htf15m ?? null,
+        dataOk: false,
+        dataReason: reason,
+        reason: res.reason,
+        now,
+      }),
+    );
+    if (prevPhaseV2 !== res.state.phase) void this.persistUpsert(symbol, now);
+  }
+
   /** 单标的刷新 + 评估（inflight 去重：同一标的绝不并发重复请求） */
   private async refreshSymbol(symbol: string): Promise<void> {
     if (this.inflight.has(symbol)) return;
@@ -354,40 +554,26 @@ export class TrendWatchService {
       // ① 行情有效性门控：最新行情有效才参与趋势判断（无效时不浪费 K 线请求）
       const ticker = this.deps.getTickers().find((t) => t.symbol === symbol);
       if (!ticker || !(ticker.price > 0) || now - ticker.updatedAt > TREND_WATCH.MAX_TICK_AGE_MS) {
-        entry.dataMissing = true;
+        this.markDataUnavailable(symbol, '行情缺失或过期（>10s）', now);
         return;
       }
       // ② 拉真实合约 K 线（归属源分片 + 多源兜底 + 令牌桶限速由 collector 统一处理）
       // 请求发出即计数（含失败），与 collector.klineReqs 口径一致
       this.klineReqs++;
-      const candles = await this.deps.fetchKlines(symbol, TREND_WATCH.KLINE_BARS);
+      const candles = await this.deps.fetchKlines(symbol, TREND_WATCH.KLINE_BARS_V2);
       entry.lastKlineAt = Date.now();
-      // ③ 防御性清洗：只留有限数值行，升序（三所适配器已归一化，此处兜底）
-      const clean = candles
-        .filter(
-          (c) =>
-            Number.isFinite(c.t) && c.t > 0 &&
-            Number.isFinite(c.o) && c.o > 0 &&
-            Number.isFinite(c.h) && c.h > 0 &&
-            Number.isFinite(c.l) && c.l > 0 &&
-            Number.isFinite(c.c) && c.c > 0 &&
-            Number.isFinite(c.qv) && c.qv >= 0,
-        )
-        .sort((a, b) => a.t - b.t);
-      const series: WatchOhlcvSeries = {
-        symbol,
-        barMs: clean.map((c) => c.t),
-        opens: clean.map((c) => c.o),
-        highs: clean.map((c) => c.h),
-        lows: clean.map((c) => c.l),
-        closes: clean.map((c) => c.c),
-        vols: clean.map((c) => c.qv), // 计价成交额（USDT）作为量
-      };
+      // ③ 防御性清洗
+      const clean = cleanCandles(candles);
+      const series = seriesOf(symbol, clean);
       // ④ UTE toClosedBars：剔除未收盘 K 线与非法 OHLCV（绝不从 close 估造 high/low）
       const now2 = Date.now();
       const closed = toClosedBars(series, INTERVAL_MS, now2);
       if (closed.length < TREND_WATCH.MIN_CLOSED_BARS) {
-        entry.dataMissing = true;
+        this.markDataUnavailable(
+          symbol,
+          `已收盘 K 线不足（${closed.length}/${TREND_WATCH.MIN_CLOSED_BARS}）`,
+          now2,
+        );
         return;
       }
       entry.dataMissing = false;
@@ -406,27 +592,158 @@ export class TrendWatchService {
       const prev = this.lastSignals.get(symbol);
       this.states.set(symbol, signal);
       this.lastSignals.set(symbol, signal);
-      // ⑥ 相位迁移记账（confirmed 回落 idle 时启动宽限）
+      // ⑥ Task 54：波动率特征 + 高周期过滤 + 生命周期推进（方向唯一来源仍是 UTE）
+      const features = computeVolatilityFeatures(closed);
+      const htfCfg = { lookbackBars: TREND_WATCH.lookbackBars, minMovePct: TREND_WATCH.minMovePct };
+      const htf5m = assessHtf(closed, 5, now2, htfCfg, (bars, opts) => assessTrend(bars, opts, this.trendCfg));
+      const htf15m = assessHtf(closed, 15, now2, htfCfg, (bars, opts) => assessTrend(bars, opts, this.trendCfg));
+      const lastBarTime = signal.assessment.features?.latestBarTime ?? null;
+      const staleBar =
+        lastBarTime != null && now2 - (lastBarTime + INTERVAL_MS) > TREND_WATCH.KLINE_STALE_MS;
+      const uteEligible = signal.assessment.eligible && signal.assessment.features != null;
+      const dataOk = !staleBar && uteEligible;
+      const lc = this.lifecycles.get(symbol) ?? createLifecycleState(symbol);
+      const strength = Math.max(
+        0,
+        Math.min(
+          1,
+          Math.abs(signal.assessment.features?.returnPct ?? 0) /
+            (TREND_WATCH.minMovePct * 3),
+        ),
+      );
+      const res = stepLifecycle(lc, {
+        utePhase: signal.phase,
+        uteDirection: signal.direction,
+        uteCandidateDirection: signal.candidateDirection,
+        directionalConsistency: signal.assessment.features?.directionalConsistency ?? 0,
+        returnPct: signal.assessment.features?.returnPct ?? 0,
+        barTime: lastBarTime,
+        uteChangedAt: signal.changedAt,
+        uteConfirmCount: signal.consecutiveObservations,
+        uteScore: signal.lastScore,
+        strength,
+        features: uteEligible ? features : null,
+        dataOk,
+        now: now2,
+      });
+      // ⚠️ 状态机产出为新对象：必须写回 map，否则生命周期永不推进（回放发现的生产 bug）
+      this.lifecycles.set(symbol, res.state);
+      const prevPhaseV2 = lc.phase;
+      // ⑦ 相位迁移记账（confirmed 回落 idle 时启动宽限）
       const prevPhase = prev?.phase ?? 'idle';
       if (prevPhase === 'confirmed' && signal.phase !== 'confirmed') {
         entry.confirmedLeftAt = now2;
       }
       if (signal.phase === 'confirmed') entry.confirmedLeftAt = null;
-      entry.lastBarTime = signal.assessment.features?.latestBarTime ?? entry.lastBarTime;
-      // ⑦ 持久化：仅新 K 线 / 相位变化 / 方向变化时写库（不每轮扫描无条件写）
+      entry.lastBarTime = lastBarTime ?? entry.lastBarTime;
+      // ⑧ 统一信号（面板/自动交易/回放共同消费的唯一信封）
+      this.v2Signals.set(
+        symbol,
+        this.buildSignalV2({
+          symbol,
+          entry,
+          lc: res.state,
+          ute: signal,
+          vol: features,
+          htf5m,
+          htf15m,
+          dataOk,
+          dataReason: dataOk
+            ? null
+            : staleBar
+              ? '最新收盘 K 线过期（>3min 未更新）'
+              : 'UTE 评估不可用（K 线不足/过期）',
+          reason: res.reason,
+          now: now2,
+        }),
+      );
+      // ⑨ 持久化：仅新 K 线 / 状态变化 / 方向变化时写库（不每轮扫描无条件写）
       const isNewBar =
-        signal.assessment.features?.latestBarTime != null &&
-        signal.assessment.features!.latestBarTime !== prev?.assessment.features?.latestBarTime;
-      const phaseChanged = signal.phase !== prevPhase;
+        lastBarTime != null &&
+        lastBarTime !== prev?.assessment.features?.latestBarTime;
+      const phaseChanged = signal.phase !== prevPhase || prevPhaseV2 !== res.state.phase;
       const dirChanged = signal.direction !== (prev?.direction ?? 'flat');
       if (isNewBar || phaseChanged || dirChanged) {
         void this.persistUpsert(symbol, now2);
       }
     } catch {
-      entry.dataMissing = true; // 拉取失败/数据异常：标记缺失，下轮重试
+      this.markDataUnavailable(symbol, 'K 线拉取失败/数据异常', Date.now());
     } finally {
       this.inflight.delete(symbol);
     }
+  }
+
+  // ============ 统一信号构建（Task 54 §2.4） ============
+
+  private buildSignalV2(input: {
+    symbol: string;
+    entry: TrendPoolEntry;
+    lc: LifecycleState;
+    ute: TrendSignal | null;
+    vol: VolatilityFeatures | null;
+    htf5m: HtfAssessment | null;
+    htf15m: HtfAssessment | null;
+    dataOk: boolean;
+    dataReason: string | null;
+    reason: string;
+    now: number;
+  }): UnifiedTrendSignal {
+    const { symbol, entry, lc, ute, vol, htf5m, htf15m, dataOk, dataReason, now } = input;
+    const ctx = this.anomalyCtx.get(symbol);
+    const dir = ute?.direction ?? 'flat';
+    const cycleDir = lc.cycleDir;
+    const htfAgree =
+      cycleDir !== 'flat' && htf15m?.valid ? htf15m.dir === cycleDir : null;
+    const uteReason = ute?.assessment.reason ?? '';
+    const conflict =
+      (dir !== 'flat' || cycleDir !== 'flat') &&
+      ctx?.dir != null &&
+      ((cycleDir !== 'flat' ? cycleDir : dir) === 'up') !== (ctx.dir === 'UP');
+    const trendDir = cycleDir !== 'flat' ? cycleDir : dir;
+    return {
+      symbol,
+      market: MARKET,
+      interval: INTERVAL,
+      phase: lc.phase,
+      direction: trendDir,
+      trendCycleId: lc.cycleId,
+      trendStartedAt: lc.cycleStartedAt,
+      endPendingSince: lc.endPendingSince,
+      endEvidenceBars: lc.endEvidenceBars,
+      endedAt: lc.endedAt,
+      endReason: lc.endReason,
+      score: ute?.lastScore ?? 0,
+      strength: ute
+        ? Math.max(
+            0,
+            Math.min(1, Math.abs(ute.assessment.features?.returnPct ?? 0) / (TREND_WATCH.minMovePct * 3)),
+          )
+        : 0,
+      confirmCount: ute?.consecutiveObservations ?? 0,
+      features:
+        vol ?? {
+          atr: 0, atrPct: 0, realizedVolPct: 0, volPercentile: -1, volRegime: 'NORMAL',
+          efficiencyRatio: 0, upperWickPct: 0, lowerWickPct: 0, breakout: 'none',
+          falseBreakout: false, barsUsed: 0,
+        },
+      htf5m: htf5m ?? { dir: 'flat', efficiencyRatio: 0, returnPct: 0, valid: false, bars: 0 },
+      htf15m: htf15m ?? { dir: 'flat', efficiencyRatio: 0, returnPct: 0, valid: false, bars: 0 },
+      htfAgree,
+      lastBarTime: entry.lastBarTime,
+      lastKlineAt: entry.lastKlineAt,
+      dataFresh: dataOk && !entry.dataMissing,
+      dataUnavailableReason: dataOk && !entry.dataMissing ? null : dataReason ?? '数据不可用',
+      anomaly: {
+        dir: ctx?.dir ?? null,
+        level: ctx?.level ?? null,
+        priority: ctx?.priority ?? null,
+        active: ctx?.active ?? false,
+        lastAt: entry.lastAnomalyAt,
+      },
+      conflict,
+      reason: uteReason ? `${input.reason}；UTE：${uteReason}` : input.reason,
+      changedAt: now,
+    };
   }
 
   // ============ 持久化 ============
@@ -435,6 +752,7 @@ export class TrendWatchService {
     const entry = this.pool.get(symbol);
     const st = this.states.get(symbol);
     const signal = this.lastSignals.get(symbol);
+    const lc = this.lifecycles.get(symbol);
     return {
       symbol,
       market: MARKET,
@@ -450,6 +768,10 @@ export class TrendWatchService {
       lastScore: st?.lastScore ?? 0,
       lastBarTime: entry?.lastBarTime ?? null,
       lastKlineAt: entry?.lastKlineAt ? entry.lastKlineAt : null,
+      lifecycleStateJson: JSON.stringify(lc ?? createLifecycleState(symbol)),
+      trendCycleId: lc?.cycleId ?? null,
+      lastPhaseV2: lc?.phase ?? 'OBSERVING',
+      endReason: lc?.endReason ?? null,
     };
   }
 
@@ -475,30 +797,67 @@ export class TrendWatchService {
 
   // ============ 对外查询 ============
 
+  /** 统一趋势信号（Task 54：AutoPaperTrader 消费入口——不再另行计算趋势） */
+  latestSignals(): UnifiedTrendSignal[] {
+    return [...this.v2Signals.values()];
+  }
+
+  signalOf(symbol: string): UnifiedTrendSignal | null {
+    return this.v2Signals.get(symbol) ?? null;
+  }
+
   snapshot(now: number): TrendWatchSnapshot {
     const tickers = new Map<string, TrendTickerSnap>(
       this.deps.getTickers().map((t) => [t.symbol, t]),
     );
-    const phaseW = (p: string) => (p === 'confirmed' ? 0 : p === 'candidate' ? 1 : 2);
+    const phaseW = (p: string) =>
+      p === 'CONFIRMED_UP' || p === 'CONFIRMED_DOWN'
+        ? 0
+        : p === 'END_PENDING'
+          ? 1
+          : p === 'CANDIDATE_UP' || p === 'CANDIDATE_DOWN'
+            ? 2
+            : p === 'DATA_UNAVAILABLE'
+              ? 3
+              : 4;
     const rows: TrendWatchRow[] = [];
     for (const [sym, entry] of this.pool) {
       const st = this.states.get(sym);
       const signal = this.lastSignals.get(sym);
+      const v2 = this.v2Signals.get(sym);
       const ctx = this.anomalyCtx.get(sym);
       const ticker = tickers.get(sym);
       const lastBar = entry.lastBarTime;
       const phase = st?.phase ?? 'idle';
       const direction = st?.direction ?? 'flat';
+      const score = st?.lastScore ?? 0;
+      const trendDir = v2?.direction ?? direction;
       const conflict =
-        direction !== 'flat' &&
-        ctx?.dir != null &&
-        (direction === 'up') !== (ctx.dir === 'UP');
+        v2?.conflict ??
+        (direction !== 'flat' &&
+          ctx?.dir != null &&
+          (direction === 'up') !== (ctx.dir === 'UP'));
       rows.push({
         symbol: sym,
         base: baseOf(sym),
         phase,
         direction,
-        score: st?.lastScore ?? 0,
+        phaseV2: v2?.phase ?? 'OBSERVING',
+        trendCycleId: v2?.trendCycleId ?? null,
+        trendStartedAt: v2?.trendStartedAt ?? null,
+        endPendingSince: v2?.endPendingSince ?? null,
+        endEvidenceBars: v2?.endEvidenceBars ?? 0,
+        endedAt: v2?.endedAt ?? null,
+        endReason: v2?.endReason ?? null,
+        strength: v2?.strength ?? 0,
+        vol: v2?.features ?? null,
+        htf5m: v2?.htf5m ?? null,
+        htf15m: v2?.htf15m ?? null,
+        htfAgree: v2?.htfAgree ?? null,
+        dataFresh: v2?.dataFresh ?? false,
+        dataUnavailableReason: v2?.dataUnavailableReason ?? null,
+        entryChannel: entry.entryChannel,
+        score,
         reason: signal?.assessment.reason ?? '',
         features: signal?.assessment.features
           ? {
@@ -532,7 +891,7 @@ export class TrendWatchService {
     }
     rows.sort(
       (a, b) =>
-        phaseW(a.phase) - phaseW(b.phase) ||
+        phaseW(a.phaseV2) - phaseW(b.phaseV2) ||
         b.score - a.score ||
         a.symbol.localeCompare(b.symbol),
     );
@@ -542,6 +901,9 @@ export class TrendWatchService {
       confirmed: rows.filter((r) => r.phase === 'confirmed').length,
       candidate: rows.filter((r) => r.phase === 'candidate').length,
       watching: rows.filter((r) => r.phase === 'idle').length,
+      endPending: rows.filter((r) => r.phaseV2 === 'END_PENDING').length,
+      dataUnavailable: rows.filter((r) => r.phaseV2 === 'DATA_UNAVAILABLE').length,
+      probeReqs: this.probeReqs,
       klineReqs: this.klineReqs,
       dbWrites: this.dbWrites,
       dbErrors: this.dbErrors,

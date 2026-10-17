@@ -83,6 +83,12 @@ export interface EnhancedStats {
     klineReqs: number;
     dbErrors: number;
   };
+  /** 趋势自动模拟交易摘要（Task 54，服务未启动时缺省） */
+  autoTrader?: {
+    on: boolean;
+    opens: number;
+    closes: number;
+  };
 }
 
 export type Priority = 'P1' | 'P2' | 'P3';

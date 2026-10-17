@@ -79,6 +79,37 @@ export const TREND_WATCH = {
   confirmObservations: 3,
   /** 最新 bar 最大年龄（UTE 内置过期判定） */
   maxBarAgeMs: 5 * 60_000,
+
+  // ===== Task 54：1m 主拉取长度（聚合 5m/15m 用） =====
+  // 480 根 = 8h：15m 聚合得 32 根 ≥ UTE minBars 16（数据量充足，不伪造高周期确认）；
+  // 币安权重 <500 根仍为 2/req，池内请求预算不变（≤20 req/min）
+  KLINE_BARS_V2: 480,
+
+  // ===== Task 54：趋势结束判定（END_PENDING → ENDED，全部待回放校准） =====
+  /** 结束确认根数：连续 N 根「不同已收盘 K 线」都有结束证据才判 ENDED（防插针/短暂回撤） */
+  END_CONFIRM_BARS: 3,
+  /** 深回撤证据阈值：|窗口收益| 低于 minMovePct × 该倍数才算「方向衰减」证据（浅回撤容忍带） */
+  END_IDLE_TOL_MUL: 2.5,
+  /** 结构失效：ER 低于该值视为震荡（indicators.erFloor 同源） */
+  END_ER_FLOOR: 0.25,
+  /** 结构失效：方向一致性低于该值视为失稳 */
+  END_CONSISTENCY_FLOOR: 0.35,
+
+  // ===== Task 54：主动探针通道（不依赖异动事件的候选发现，预算可配） =====
+  /** 每轮池重建最多探测多少个「未在池」标的（每 30s 一轮 → 默认 8 req/min 额外预算） */
+  PROBE_PER_REBUILD: 4,
+  /** 探针标的流动性下限（24h 成交额，USDT） */
+  PROBE_QV_MIN: 5_000_000,
+  /** 探针「形成中趋势」入池特征门槛：ER 下限 */
+  PROBE_ER_MIN: 0.35,
+  /** 探针：方向一致性下限 */
+  PROBE_CONSISTENCY_MIN: 0.6,
+  /** 探针：量比下限（近 3 根均量 / 前 10 根基线均量） */
+  PROBE_VOLUME_RATIO_MIN: 1.3,
+  /** 探针：区间扩张下限 */
+  PROBE_RANGE_EXPANSION_MIN: 1.2,
+  /** 探针：窗口收益上限 %——|收益| 超过该值视为「已走完」的大行情，不再作为「形成中」候选 */
+  PROBE_RETURN_MAX_PCT: 4,
 } as const;
 
 /** 传给 UTE 的 TrendConfig 覆盖（其余项沿用 UTE 默认：minBars 16 / recentVolumeBars 3 /

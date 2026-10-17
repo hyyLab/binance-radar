@@ -1,0 +1,168 @@
+'use client';
+
+// ---------- 趋势自动模拟交易 · 数据 hooks（Task 54 §5） ----------
+// 总览 5s 轮询（持仓/账户/模式）；历史 20s 轮询（筛选条件变化即刷新）。
+// 控制操作用 mutation + 手动失效缓存，按钮态由服务端 mode 驱动。
+
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+
+export interface TrendPositionRow {
+  positionId: string;
+  symbol: string;
+  base: string;
+  side: 'LONG' | 'SHORT';
+  leverage: number;
+  margin: number;
+  qty: number;
+  entryPrice: number;
+  markPrice: number;
+  liqPrice: number;
+  notional: number;
+  openedAt: string;
+  holdMinutes: number;
+  unrealizedGross: number;
+  estCloseFee: number;
+  netEst: number;
+  trend: {
+    phase: string;
+    direction: string;
+    score: number;
+    dataFresh: boolean;
+    dataUnavailableReason: string | null;
+    endEvidenceBars: number;
+    endPendingSince: number | null;
+    trendCycleId: string | null;
+    conflict: boolean;
+    reason: string;
+    volRegime: string;
+    htfAgree: boolean | null;
+  } | null;
+  trendCycleId: string | null;
+  scoreAtOpen: number | null;
+  waitingEndConfirm: boolean;
+}
+
+export interface TrendOverview {
+  ok: boolean;
+  ts: number;
+  mode: 'RUNNING' | 'PAUSED' | 'STOPPED';
+  service: {
+    on: boolean;
+    startedAt: number;
+    lastTickAt: number;
+    lastError: string | null;
+    trendSignalCount: number;
+    trendLastScanAt: number;
+  };
+  config: {
+    accountName: string;
+    initialCapital: number;
+    marginRatio: number;
+    leverage: number;
+    maxPositions: number;
+    slippageBps: number;
+  };
+  account: {
+    balance: number;
+    marginUsed: number;
+    unrealizedPnl: number;
+    equity: number;
+    initialCapital: number;
+    totalDeposited: number;
+    peakEquity: number;
+    currentDrawdownPct: number;
+  };
+  stats: {
+    realizedNetWithSlip: number;
+    feePaid: number;
+    winRate: number;
+    closedCount: number;
+    liquidatedCount: number;
+    openCount: number;
+    tradeCount: number;
+    roiPct: number;
+  };
+  positions: TrendPositionRow[];
+  recentSkips: { t: number; symbol: string; reason: string; cycleId?: string }[];
+  recentDecisions: {
+    id: string;
+    symbol: string;
+    action: string;
+    cycleId: string;
+    positionId: string | null;
+    detail: string;
+    createdAt: number;
+  }[];
+}
+
+export interface TrendTradeRow {
+  positionId: string;
+  symbol: string;
+  base: string;
+  side: 'LONG' | 'SHORT';
+  openedAt: string;
+  closedAt: string;
+  holdMinutes: number | null;
+  entryPrice: number;
+  exitPrice: number | null;
+  margin: number;
+  leverage: number;
+  notionalOpen: number;
+  grossPnl: number | null;
+  openFee: number;
+  closeFee: number;
+  slippageEst: number;
+  netPnl: number | null;
+  netPnlWithSlip: number | null;
+  trendCycleId: string;
+  trendPhaseAtOpen: string;
+  scoreAtOpen: number;
+  exitReason: string | null;
+  exitSignal: { endReason?: string; reason?: string } | null;
+  signalAtOpen: { reason?: string; features?: { volRegime?: string; atrPct?: number; efficiencyRatio?: number } } | null;
+}
+
+export function useTrendTrading() {
+  return useQuery({
+    queryKey: ['trend-trading'],
+    queryFn: async (): Promise<TrendOverview> => {
+      const res = await fetch('/api/trend-trading', { cache: 'no-store' });
+      return (await res.json()) as TrendOverview;
+    },
+    refetchInterval: 5000,
+    staleTime: 3000,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useTrendTradeHistory(symbol: string, sort: string, order: string) {
+  return useQuery({
+    queryKey: ['trend-trading-history', symbol, sort, order],
+    queryFn: async (): Promise<{ ok: boolean; trades: TrendTradeRow[] }> => {
+      const params = new URLSearchParams({ symbol, sort, order, limit: '200' });
+      const res = await fetch(`/api/trend-trading/trades?${params}`, { cache: 'no-store' });
+      return (await res.json()) as { ok: boolean; trades: TrendTradeRow[] };
+    },
+    refetchInterval: 20_000,
+    staleTime: 10_000,
+    placeholderData: (prev) => prev,
+  });
+}
+
+export function useTrendTradeControl() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: async (input: { action: string; positionId?: string }) => {
+      const res = await fetch('/api/trend-trading/control', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(input),
+      });
+      return (await res.json()) as { ok: boolean; message?: string; error?: string; mode?: string; note?: string };
+    },
+    onSuccess: () => {
+      void qc.invalidateQueries({ queryKey: ['trend-trading'] });
+      void qc.invalidateQueries({ queryKey: ['trend-trading-history'] });
+    },
+  });
+}

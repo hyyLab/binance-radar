@@ -114,9 +114,69 @@ model TrendWatchSymbol {
   // —— K 线状态 ——
   lastBarTime    DateTime? // 最近已参与评估的已收盘 1m K 线开盘时间
   lastKlineAt    DateTime? // 最近一次 K 线刷新时间
+  // —— Task 54 v2 生命周期（结束判定/趋势周期） ——
+  lifecycleStateJson String   @default("{}") // 生命周期状态机完整 JSON（END_PENDING 证据计数等）
+  trendCycleId   String? // 当前趋势周期标识（symbol:方向:确认时刻）
+  lastPhaseV2    String   @default("OBSERVING") // OBSERVING | CANDIDATE_* | CONFIRMED_* | END_PENDING | ENDED | DATA_UNAVAILABLE
+  endReason      String? // ENDED 时的结束原因
   updatedAt      DateTime @updatedAt
 
   @@unique([symbol, market, interval])
   @@index([status])
   @@index([lastPhase])
+}
+
+// ---------- 趋势自动模拟交易（Task 54，账户 trend-auto-v1） ----------
+// 资金账户复用 PaperAccount（name = 'trend-auto-v1'，与手动 default 完全隔离）；
+// 持仓复用 PaperPosition（accountId 指向自动账户）；下表保存趋势关联与幂等决策。
+
+// 自动交易运行配置/状态（单行，name 固定 'trend-auto-v1'）
+model TrendAutoConfig {
+  id             String   @id @default(cuid())
+  name           String   @unique // 固定 "trend-auto-v1"
+  mode           String   @default("RUNNING") // RUNNING | PAUSED | STOPPED
+  initialCapital Float // 初始资金（重置时回填；界面明确展示）
+  marginRatio    Float    @default(0.2) // 开仓目标保证金 = 开仓时账户权益 × 该比例
+  leverage       Float    @default(20) // 固定杠杆
+  maxPositions   Int      @default(4) // 最大同时持仓数
+  slippageBps    Float    @default(2) // 滑点估算（基点，成交记录展示 + 净盈亏保守口径）
+  peakEquity     Float    @default(0) // 历史峰值权益（当前回撤计算基准；每次巡检更新）
+  updatedAt      DateTime @updatedAt
+}
+
+// 自动持仓的趋势关联元数据（positionId = PaperPosition.id，一一对应）
+model TrendTradeMeta {
+  positionId       String    @id
+  trendCycleId     String // 开仓时的趋势周期（幂等：同周期不重复开仓）
+  symbol           String
+  side             String // LONG | SHORT
+  trendPhaseAtOpen String // 开仓时相位（CONFIRMED_UP/DOWN）
+  scoreAtOpen      Float     @default(0) // 开仓时 UTE 趋势评分
+  featuresAtOpen   String    @default("{}") // 开仓时特征快照 JSON（波动率/ER/HTF/异动上下文）
+  signalAtOpen     String    @default("{}") // 开仓时完整统一信号 JSON（决策还原用）
+  slippageEst      Float     @default(0) // 开仓滑点估算（USDT）
+  status           String    @default("OPEN") // OPEN | CLOSED
+  exitReason       String? // TREND_ENDED | REVERSE_CONFIRMED | LIQUIDATED | MANUAL
+  exitSignalJson   String? // 平仓时最后有效趋势信号 JSON
+  netPnlWithSlip   Float? // 含滑点估算的净盈亏（页面统计主口径，更保守）
+  openDecisionAt   DateTime?
+  closedAt         DateTime?
+  updatedAt        DateTime  @updatedAt
+
+  @@index([trendCycleId])
+  @@index([status])
+}
+
+// 幂等决策记录（同一趋势周期同一动作只允许一次；id = 决策键，唯一约束兜底）
+model TrendAutoDecision {
+  id         String   @id // `{cycleId}:OPEN` / `{cycleId}:CLOSE` 等
+  symbol     String
+  action     String // OPEN | CLOSE | REVERSE_CLOSE
+  cycleId    String
+  positionId String?
+  detail     String   @default("{}") // 决策上下文（相位/评分/原因）
+  createdAt  DateTime @default(now())
+
+  @@index([cycleId])
+  @@index([createdAt(sort: Desc)])
 }
