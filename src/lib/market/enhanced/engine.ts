@@ -66,9 +66,10 @@ export class EnhancedEngine {
       repo: prismaTrendWatchRepo,
       probe: true,
     });
-    // 自动模拟交易：消费同一份统一信号（不另算趋势）；标记价走合约多源供价
+    // 普通趋势算法消费统一趋势信号；事件驱动算法直接消费本引擎的活跃 MAJOR P1 异动事件。
     this.autoTrader = new AutoPaperTrader({
       getSignals: () => this.trendWatch.latestSignals(),
+      getEvents: (now) => this.events(now),
       markPrice: (symbol) =>
         activeFuturesCollector().getTickers().find((t) => t.symbol === symbol)?.price ?? 0,
     });
@@ -496,6 +497,12 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ============
+// v20（Task 68）：新增 major-p1-breakout-v1 重大异动事件算法。2s 直接扫描 MAJOR P1 活跃事件，
+//   不依赖 TrendWatch 20 币池/UTE 确认，不等待下一根 K 线；确认突破顺向，假突破确认后反向；
+//   标的价格硬止损 1.8%，顺向价格运动 2.0% 后启用移动止盈、峰值回撤 1.0%；未扩张 10 分钟退出。
+//   新增结构失效缓冲与多次采样确认；加速、待确认突破、假突破反向仓位使用折扣保证金；无固定分钟冷却，
+//   同事件每次重新入场需有平仓后的新事件证据（最多 8 轮）。共享模拟成交、费用、强平和仓位安全规则。
+//   改行为必 bump key。
 // v19（Task 67）：仓位划分按配置舱位数——用户复盘「选两舱但 1 仓占 95 成保证金」判定
 //   Task 65 动态槽位（95%÷(当前持仓数+1)，首仓永远吃满、后舱无仓可开）不对。
 //   effectiveMarginRatio(cap, maxPositions) = min(cap, 95%÷配置舱位数)：1 舱单仓满配 95%、
@@ -589,6 +596,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v17?: EnhancedEngine; // v17（Task 65）：每仓保证金动态槽位配额（单仓满配）
   __binanceRadarEnhanced_v18?: EnhancedEngine; // v18（Task 66）：两算法复盘定版（顺势化 + 方向选择确认制 + 三层离场）
   __binanceRadarEnhanced_v19?: EnhancedEngine; // v19（Task 67）：仓位划分按配置舱位数（1 舱满配 95%、N 舱各 95%/N）
+  __binanceRadarEnhanced_v20?: EnhancedEngine; // v20（Task 68）：MAJOR P1 事件驱动算法
 };
 
 function pickLegacyEngine(
@@ -611,9 +619,11 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v16?: EnhancedEngine;
     __binanceRadarEnhanced_v17?: EnhancedEngine;
     __binanceRadarEnhanced_v18?: EnhancedEngine;
+    __binanceRadarEnhanced_v19?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v19 ??
     g.__binanceRadarEnhanced_v18 ??
     g.__binanceRadarEnhanced_v17 ??
     g.__binanceRadarEnhanced_v16 ??
@@ -662,20 +672,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v19;
+  const existing = g.__binanceRadarEnhanced_v20;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v19 = fresh;
+  g.__binanceRadarEnhanced_v20 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v19 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v20 ?? g.__binanceRadarEnhanced_v19 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v19 = fresh;
+  g.__binanceRadarEnhanced_v20 = fresh;
   return fresh;
 }
