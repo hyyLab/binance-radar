@@ -10,7 +10,8 @@ src/lib/market/trend-trade/strategy/
 ├── types.ts             # TrendStrategy 接口（你要 implements 的契约）
 ├── registry.ts          # 注册表（新算法在这里登记一行，UI 下拉自动出现）
 ├── short-swing.ts       # 短周期套利（默认算法，最完整的参考实现）
-└── universal-trend.ts   # 通用趋势引擎（最短骨架，复制它起步最快）
+├── universal-trend.ts   # 通用趋势引擎（最短骨架，复制它起步最快）
+└── major-p1-breakout.ts # 重大异动突破（事件驱动：直接 MAJOR P1，不依赖趋势池）
 ```
 
 ## 1. 写算法文件（复制 universal-trend.ts → 你的算法.ts）
@@ -44,6 +45,7 @@ import { MyAlgoStrategy, type MyAlgoParams } from './my-algo';
 const STRATEGY_FACTORIES = {
   'short-swing-v1': ...,
   'universal-trend-v1': ...,
+  'major-p1-breakout-v1': ...,
   'my-algo-v1': (p) => new MyAlgoStrategy(p as MyAlgoParams | undefined),  // ← 加这行
 };
 ```
@@ -85,8 +87,10 @@ const STRATEGY_FACTORIES = {
 
 运行中的 auto-trader 是旧模块图的实例，必须让它退役重建。`src/lib/market/enhanced/engine.ts`：
 
-- 全局键 `__binanceRadarEnhanced_v16` → `v17`（类型声明 + getEngine 存取 + 遗留交接链，共 4 处）
-- 头部版本注释链加一行 v17 说明
+- 当前 main 的全局键为 `__binanceRadarEnhanced_v19`；本次新增算法行为后 bump 到 `v20`（类型声明、get/reset 存取及 v19 遗留交接链均要更新）
+- 头部版本注释链加一行 v20 说明
+
+事件驱动策略是特殊入口：普通算法消费 `UnifiedTrendSignal`；`major-p1-breakout-v1` 通过 `evaluateAnomalyEntry(event, ctx)` 和 `AutoTraderDeps.getEvents` 直接消费活动异动事件，绕过趋势池、同币固定冷却与下一根 K 线二次确认；执行仍复用 AutoPaperTrader 的模拟资金和成交层。
 
 保存后热重载自动生效。**验证：**
 
