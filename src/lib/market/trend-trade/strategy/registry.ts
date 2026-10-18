@@ -10,6 +10,7 @@
 // │ universal-trend-v1  │ 通用趋势引擎│ 最开始的 UTE 长周期跟随：确认+方向选择证据才入场、确认在就拿满周期、走弱不离场
 // │ major-p1-breakout-v1│ 重大异动突破│ MAJOR P1 事件驱动；平台突破优先，加速型缩小风险预算
 // │ strong-trend-v1     │ 强趋势顺随  │ Task 81：universal-trend 同内核，入场评分下限 0→70（131 笔反向样本正向镜像回测定版）
+// │ adaptive-ute-v2     │ 自适应 UTE │ 原始五因子 + 波动结构 + 高周期，按证据分流顺势/反转
 // ────────────────────────────────────────────────────────────────
 // 默认算法保持 short-swing-v1（Task 62 用户定版：UTE 先上架可选，控制台暂用
 // 其代码默认参数；切换在 UI 算法下拉进行，切换前自动平仓清场由 control API 负责）。
@@ -27,10 +28,9 @@ const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => T
   // Task 82：联合 UTE 原始五因子 + 波动结构 + 5m/15m；允许有多项反转证据时逆着 UTE 入场。
   'adaptive-ute-v2': (p) => new AdaptiveUteV2Strategy(p as AdaptiveUteV2Params | undefined),
   'major-p1-breakout-v1': (p) => new MajorP1BreakoutStrategy(p as MajorP1BreakoutParams | undefined),
-  // Task 81 数据定版：与 universal-trend-v1 唯一差异 = ENTRY_MIN_SCORE 0→70（只做五因子近乎全亮的强确认）。
-  // 回测依据（131 笔反向样本的正向镜像）：score≥70 子集 20 笔 +57.57U / PF 3.37（全量 131 笔 +27.53 / PF 1.17），
-  // 时间三分 -1.3/+12.4/+46.5（免疫前段亏损潮）；score≥70 内止损档位无敏感性 → 离场三层原样继承。
-  // ⚠️ 样本为 4 小时单 regime，阈值存在过拟合风险（用户知情接受），跨 regime 后复校。
+  // Task 81 历史实验版：与 universal-trend-v1 同内核，入场评分下限 0→70。
+  // 早期短时段镜像统计曾较好，但后来扩展的夜间时段样本使整体结果明显反转，说明固定 score 阈值存在 regime 敏感性。
+  // 保留为对照算法，不把旧样本收益/PF 当作当前性能承诺；新算法改为联合量能、结构与高周期证据决策。
   'strong-trend-v1': (p) =>
     new UniversalTrendStrategy(
       { ENTRY_MIN_SCORE: 70, ...(p as UniversalTrendParams | undefined) },
@@ -38,11 +38,9 @@ const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => T
         id: 'strong-trend-v1',
         name: '强趋势顺随引擎',
         description:
-          '强趋势顺随（Task 81 数据定版）：通用趋势引擎同一内核，唯一差异 = 入场评分下限 0→70' +
-          '——只做五因子证据近乎全亮的强确认。回测依据（131 笔反向样本正向镜像）：score≥70 子集 20 笔 ' +
-          '+57.57U、PF 3.37（全量 +27.53、PF 1.17），时间三分 -1.3/+12.4/+46.5（免疫前段亏损潮）；' +
-          '离场继承三层（硬止损 1.5% 价格、移动止盈 30/20、持有到 ENDED）。样本为 4 小时单 regime，' +
-          '阈值存在过拟合风险，跨 regime 后需复校',
+          '强趋势顺随（历史实验版）：通用趋势引擎同一内核，入场评分下限为 70。早期短时段镜像表现较好，' +
+          '但扩展到后续时段后表现反转，固定分数线对行情 regime 敏感。保留作对照，不能据此认定高分趋势总是更优；' +
+          '离场继承三层（硬止损 1.5% 价格、移动止盈 30/20、持有到 ENDED）。',
       },
     ),
 };
