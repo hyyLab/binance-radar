@@ -137,12 +137,9 @@ interface SymbolState {
 }
 
 export class UniversalTrendStrategy implements TrendStrategy {
-  readonly id = 'universal-trend-v1';
-  readonly name = '通用趋势引擎';
-  readonly description =
-    'Universal Trend Engine 长周期趋势跟随（Task 68 定版）：1m 确认 + 震荡后方向选择证据' +
-    '（区间突破同向或 ER 单边延续）才入场，不做预判性单；确认在就拿满整个周期（走弱不离场，' +
-    '等 ENDED/反向），硬止损 1.5% 价格、移动止盈（峰值浮盈 30% 后回撤 20% 落袋）';
+  readonly id: string;
+  readonly name: string;
+  readonly description: string;
 
   /** 可调参数（构造器覆盖；生产默认值 = UTE 原味） */
   readonly params: typeof UNIVERSAL_TREND;
@@ -151,8 +148,23 @@ export class UniversalTrendStrategy implements TrendStrategy {
   /** 状态变化回调（AutoPaperTrader 注入：持久化到 TrendStrategyState） */
   private onStateChange: ((strategyId: string, symbol: string, json: string) => void) | null = null;
 
-  constructor(params?: UniversalTrendParams) {
+  /**
+   * @param params 参数覆盖（控制台热装配）
+   * @param identity 身份覆盖（Task 81：同一内核注册多算法实例用——如 strong-trend-v1
+   *   仅 ENTRY_MIN_SCORE 0→70；不传 = 原通用趋势引擎，完全向后兼容）
+   */
+  constructor(
+    params?: UniversalTrendParams,
+    identity?: { id?: string; name?: string; description?: string },
+  ) {
     this.params = withDefaults(params);
+    this.id = identity?.id ?? 'universal-trend-v1';
+    this.name = identity?.name ?? '通用趋势引擎';
+    this.description =
+      identity?.description ??
+      'Universal Trend Engine 长周期趋势跟随（Task 68 定版）：1m 确认 + 震荡后方向选择证据' +
+        '（区间突破同向或 ER 单边延续）才入场，不做预判性单；确认在就拿满整个周期（走弱不离场，' +
+        '等 ENDED/反向），硬止损 1.5% 价格、移动止盈（峰值浮盈 30% 后回撤 20% 落袋）';
   }
 
   bindPersistence(fn: (strategyId: string, symbol: string, json: string) => void): void {

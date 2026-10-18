@@ -833,3 +833,20 @@ Stage Summary:
 - 交付：报告资金口径对齐总览页——余额 → 账户权益（含构成拆解 + 数据字典口径说明 + 逐仓标记价/浮盈亏列）
 - 留痕：equity 为导出时刻快照（标记价实时波动，头部与 §9 同一时刻自洽）；ASTERSHORT 孤儿仓已不在持仓列表（引擎已处理），现持仓 XMR/AVA 均为反向单
 - 遗留：无
+---
+Task ID: 81
+Agent: main
+Task: 基于反向样本回测开发正向新算法 strong-trend-v1(强趋势顺随引擎)并推送远端
+
+Work Log:
+- 数据源:用户提供的 130 笔反向模式分析报告 + DB 导出(scripts/task81_export_sample.py → scripts/data/reverse-sample.json,131 笔含报告后新平 1 笔;正向镜像 pnl=-netPnlWithSlip,LIQUIDATED 2 笔按报告 §8 口径=+margin,对账一致 131 笔 +27.68 vs 报告 130 笔窗口 +25.95)
+- 回测(scripts/task81_backtest.py,事件研究口径:过滤器只改入场集合不改路径;止损改写用模型侧 mae 截断近似):①正向世界原策略 +27.53/PF1.17,结构=STOP_LOSS 19 笔 -109.61(最大失血)vs TRAIL_TAKE 19 笔 +93.87(最大利润),TREND_ENDED 88 笔 +8.19 打平;②评分门槛单调改善,≥70 → 20 笔 +57.57/PF3.37(≥65 +54.34/34 笔,≥72 +61.33/18 笔,70 为收益×样本平衡点);③htfGate=OPPOSED 43 笔 -23.62(砍掉 → +51.15),但 score≥70 内部 OPPOSED 4 笔为正 → 不设 HTF 禁令;④时间三分关键证据:全量前 1/3 -40.8(亏损潮)vs score≥70 组 -1.3/+12.4/+46.5——过滤器价值=免疫前段亏损而非增益后段;⑤score≥70 内止损档位无敏感性(delta -0.06~+5.46)→ 过滤器与止损是替代品,止损保持 1.5% 不动(Task 68 容忍带论证仍成立);⑥观察未实施:vol=HIGH 14 笔 -11.40 负向、方向不对称 model SHORT +34.18/LONG -6.65(regime 特异)
+- 实现(scripts/task81_strategy_patch.py):UniversalTrendStrategy 构造器增加 identity 覆盖(id/name/description 可参数化,默认完全向后兼容);registry 注册 strong-trend-v1 = 同一内核 + ENTRY_MIN_SCORE 0→70(工厂默认 70,控制台可覆盖),描述内嵌回测依据与过拟合警示
+- 测试:tests/trend-trade/strategy-strong-trend.test.ts 5 例(S1 注册身份/默认分门槛/S2 score 69 拒 70 放行含 ER 延续路径/S3 控制台覆盖/S4 离场三层同源硬止损+TRAIL/S5 原策略向后兼容回归);修复测试 meta helper 缺 ...p 展开导致的 1 例失败
+- 验证:tsc 改动文件零报错、eslint 0 问题、bun test 117/117、API strategies 已含 strong-trend-v1(热重载生效),当前运行策略仍 universal-trend-v1+reverseMode=1 不受影响
+
+Stage Summary:
+- 交付:新算法 strong-trend-v1(强趋势顺随引擎)= 通用趋势引擎同内核,唯一差异入场评分下限 0→70「只做五因子近乎全亮的强确认」;回测样本内 +57.57U/20 笔/PF 3.37(全量 +27.53/131 笔/PF 1.17)
+- 设计哲学:最小改动单一旋钮;不学 ALL 集合的 -20% 止损补丁(那是对烂入场的补救,强确认入场本身把深亏单挡在门外);TRAIL 30/20 是正向世界已验证的利润引擎(+93.87)原样继承
+- 边界声明:131 笔/4 小时/单 regime,阈值 70 为样本内拟合(用户知情接受过拟合);报告强平 2 笔的正向估值按 §8 口径(+margin);跨 regime 后需复校,复校数据源=未来报告的 byScore 分桶
+- 遗留:无(切换上线由用户在控制台操作:选 strong-trend-v1 + 关 reverseMode)
