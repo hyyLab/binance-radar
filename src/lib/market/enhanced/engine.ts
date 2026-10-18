@@ -620,6 +620,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v23?: EnhancedEngine; // v23（Task 73）：SOURCE_LABEL 文案 binance 化
   __binanceRadarEnhanced_v24?: EnhancedEngine; // v24（Task 73 续）：同步采集器 v6 重建
   __binanceRadarEnhanced_v25?: EnhancedEngine; // v25（Task 75）：反向跟随（executeOpen 执行侧翻转）
+  __binanceRadarEnhanced_v26?: EnhancedEngine; // v26（Task 76）：重置清场屏障 + 跳过面板清空 + 换仓数作废待入场
 };
 
 function pickLegacyEngine(
@@ -649,9 +650,11 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v23?: EnhancedEngine;
     __binanceRadarEnhanced_v24?: EnhancedEngine;
     __binanceRadarEnhanced_v25?: EnhancedEngine;
+    __binanceRadarEnhanced_v26?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v26 ??
     g.__binanceRadarEnhanced_v25 ??
     g.__binanceRadarEnhanced_v24 ??
     g.__binanceRadarEnhanced_v23 ??
@@ -707,20 +710,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v25;
+  const existing = g.__binanceRadarEnhanced_v26;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v25 = fresh;
+  g.__binanceRadarEnhanced_v26 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v25 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v26 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v25 = fresh;
+  g.__binanceRadarEnhanced_v26 = fresh;
   return fresh;
 }

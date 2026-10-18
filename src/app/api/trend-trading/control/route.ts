@@ -18,9 +18,9 @@ export const dynamic = 'force-dynamic';
  * - closeAll ：按标记价市价平掉全部自动持仓（mode 不变——全平 ≠ 暂停）
  * - close    ：平掉单笔持仓（body.positionId）
  * - deposit  ：给机器人账户充值（Task 55：增加可用余额与 ROI 本金基数，不计入盈亏）
- * - setMaxPositions：设置持仓数量/最大同时持仓数（Task 55：可选；更换时自动平仓
- *   原有持仓。Task 56 sizing：每仓保证金 = 开仓时账户权益 × 20%，与持仓数量解耦，
- *   持仓数量仅约束同时持仓上限）
+ * - setMaxPositions：设置持仓数量/最大同时持仓数（Task 55：可选；更换时清场——自动平仓
+ *   原有持仓 + 作废待入场 + 清空跳过面板（Task 76）。Task 56 sizing：每仓保证金 =
+ *   开仓时账户权益 × 20%，与持仓数量解耦，持仓数量仅约束同时持仓上限）
  * - reset    ：重置机器人账户（Task 55：按标记价平掉全部持仓并清空持仓/流水/趋势关联
  *   与决策审计，资金回到初始 100 USDT、ROI 本金基准归零；运行模式与持仓数量保持不变）
  * - setStrategy：切换交易算法（Task 57：先自动平仓清场——不同算法持仓管理规则不同，
@@ -89,6 +89,9 @@ export async function POST(req: Request) {
       }
       // Task 55：可选持仓数量（最大同时持仓数）——更换时自动平仓原有持仓（用户定版：
       // 旧仓按旧口径开出，换数量即清场，新仓按新数量均分开仓）。同值不动作。
+      // Task 76：清场三件套——平仓之外同步作废全部待入场（否则旧周期待入场继续占容量槽，
+      // 新信号被「已达最大持仓数」误拒、甚至冷却=0 时旧周期直接重开）并清空跳过面板
+      // （平仓前残留的「已达最大持仓数」旧记录不跨清场显示）。
       case 'setMaxPositions': {
         const value = Number(body.value);
         if (
@@ -116,6 +119,8 @@ export async function POST(req: Request) {
         }
         // 先自动平仓原有持仓（先平后开：被平仓的旧趋势周期不会立即重开，新仓只来自新确认周期）
         const closed = await engine.autoTrader.closeAllManual();
+        const canceled = await engine.autoTrader.cancelActivePendings('切换持仓数量清场：待入场作废');
+        engine.autoTrader.clearSkipHistory();
         await trendTradeRepo.updateMaxPositions(TREND_TRADE.ACCOUNT_NAME, value);
         // Task 67：展示新舱位数下的实际单仓比例（min(设定比例, 95%÷配置舱位数)）
         const setRatio = current?.marginRatio ?? TREND_TRADE.MARGIN_RATIO;
@@ -125,7 +130,7 @@ export async function POST(req: Request) {
           maxPositions: value,
           closed: closed.closed,
           skipped: closed.skipped,
-          note: `持仓数量已设为 ${value}；已自动平仓 ${closed.closed} 笔原持仓${
+          note: `持仓数量已设为 ${value}；已自动平仓 ${closed.closed} 笔原持仓、作废 ${canceled} 条待入场${
             closed.skipped > 0 ? `（${closed.skipped} 笔暂时未能平仓，将在下轮巡检重试）` : ''
           }。每仓保证金 = 开仓时权益 × min(设定比例 ${(setRatio * 100).toFixed(0)}%， 95%÷${value}舱) = ${effPct}%权益（按舱位数划分：1 舱满配 95%、N 舱各 95%/N，先开仓不挤占后舱，Task 67）；余额不足仍跳过并记录`,
         });

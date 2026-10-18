@@ -693,3 +693,22 @@ Stage Summary:
 - 反向跟随开关已在参数控制台「执行模式（基础设施）」分组，默认关；开启后对全部算法生效、平仓仍跟随模型（模型止损=我们止盈、模型止盈=我们止损），盈亏与模型镜像
 - 两个用户反馈样式问题（控制台位置、弹层白底）已回归修复；参数按钮复位
 - 注意：反向模式下镜像仓强平风险真实存在（模型大赢单 = 镜像仓可能强平，亏损封顶为保证金）
+
+---
+Task ID: deploy-9 (Task 76)
+Agent: main
+Task: 重置/清场链路修复——「已达最大持仓数」幽灵记录 + 重置 tick 屏障 + 换仓数作废待入场
+
+Work Log:
+- 现场取证还原时间线：DB（db/custom.db，注意账户名是 trend-auto-v1 非 trend-auto）显示 04:42 前数据全被 wipe、04:43/04:45 两次 MP1 开仓、余额从 100 重算——重置按钮本身清仓逻辑是好的；用户看到的「已达最大持仓数 2」是平仓前残留的内存跳过记录（this.skips 进程内存列表，resetAccount 从不清空），跨清场显示造成「仓位没被清掉」误判
+- 顺带发现两个真实隐患并一并修复：①resetAccount 与 1s 事件循环有竞争窗口（清库后、重置完成前事件循环按旧权益快照再开仓→重置后凭空多持仓）；②setMaxPositions 清场不作废 ACTIVE 待入场（旧 pending 继续占容量槽→新信号被「已达最大持仓数」误拒；冷却=0 时旧周期直接重开，违背代码注释「旧周期不立即重开」承诺；setStrategyId 此前已作废待入场但不清跳过面板）
+- auto-trader.ts：新增 acquireTickBarrier（等在飞 tick/事件轮结束≤8s 后同步置 ticking+eventTicking 双闸，刷新 tickStartedAt 防 60s 僵死旁路，返回释放函数）包住 resetAccount 全程；新增 cancelActivePendings(reason)（作废+决策审计行，返回条数）与 clearSkipHistory()（skips+eventSkips）；setStrategyId 收敛复用 cancelActivePendings 并清跳过面板
+- control/route.ts setMaxPositions：清场三件套（closeAllManual + cancelActivePendings('切换持仓数量清场：待入场作废') + clearSkipHistory），note 带作废条数；文档注释同步
+- engine 单例 v25→v26（行为变更换血）；scripts/task76_reset_slate_patch.py（锚定替换，修复脚本两处漏写的调用收尾括号后跑通）
+- 验证：tsc/eslint 改动文件零报错；API overview ok（maxPositions=4/openCount=1 STRK 健在）；同值 setMaxPositions 走 no-op 分支正常；未跑破坏性 reset（用户账户有真实模拟持仓）
+- 提交推送 origin/main
+
+Stage Summary:
+- 重置按钮清仓逻辑经查无恙（DB 证据），用户所见「已达最大持仓数 2」为跳过面板幽灵记录——清场类操作（重置/换持仓数/切算法）现在都会同步清空跳过面板
+- 重置全程持 tick 屏障，杜绝重置期间事件循环凭空开仓；换持仓数量现在会作废旧待入场（容量槽即刻释放）
+- 经验：查库先核对 TREND_TRADE.ACCOUNT_NAME='trend-auto-v1'；「最近跳过」是内存态，清场语义必须包含清它

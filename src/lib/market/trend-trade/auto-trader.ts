@@ -266,9 +266,9 @@ export class AutoPaperTrader {
     const current = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
     if (current?.strategyId !== strategyId) {
       // Pending confirmations belong to the old strategy and must not block event-driven entries.
-      for (const pending of await this.repo.loadActivePendings()) {
-        await this.repo.markPendingCanceled(pending.cycleId, '策略切换：旧算法待入场作废');
-      }
+      // Task 76：作废动作收敛到 cancelActivePendings（补决策审计行）；旧算法的跳过面板同步清空
+      await this.cancelActivePendings('策略切换：旧算法待入场作废');
+      this.clearSkipHistory();
     }
     await this.repo.updateStrategyId(TREND_TRADE.ACCOUNT_NAME, strategyId);
     await this.applyStrategy(strategyId);
@@ -1478,6 +1478,49 @@ export class AutoPaperTrader {
 
   // ============ 控制操作（任务 §5.3：开启/暂停/恢复/全部平仓语义分离） ============
 
+  /**
+   * Task 76 清场屏障：等在飞 tick/事件轮结束（最多 8s）后拦住两条循环，返回释放函数。
+   * 重置期间 tick()/tickMajorEventEntries() 全部停摆——否则事件循环按旧权益快照在
+   * 「清库之后、重置完成之前」的窗口里再开仓，出现重置后凭空多出的持仓。
+   * tickStartedAt 同步刷新：防 tick() 的 60s 僵死旁路在屏障期间放行新 tick。
+   */
+  private async acquireTickBarrier(maxWaitMs = 8_000): Promise<() => void> {
+    const deadline = Date.now() + maxWaitMs;
+    while ((this.ticking || this.eventTicking) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    this.ticking = true;
+    this.eventTicking = true;
+    this.tickStartedAt = Date.now();
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      this.ticking = false;
+      this.eventTicking = false;
+    };
+  }
+
+  /** Task 76 清场配套：作废全部 ACTIVE 待入场（换持仓数量/切算法后旧周期不立即重开）。返回作废条数 */
+  async cancelActivePendings(reason: string): Promise<number> {
+    const pendings = await this.repo.loadActivePendings();
+    for (const p of pendings) {
+      await this.repo.markPendingCanceled(p.cycleId, reason);
+      logDecision(`待入场作废 roundKey=${p.cycleId} symbol=${p.symbol} reason=${reason}`);
+    }
+    return pendings.length;
+  }
+
+  /**
+   * Task 76：清空内存跳过面板（skips + eventSkips）。「最近跳过」是进程内存列表，
+   * 重置/清场类操作不清它——平仓前残留的「已达最大持仓数 N」等旧记录在操作后仍然可见，
+   * 用户会误判为「仓位没被清掉」（幽灵记录；DB 决策审计不受影响，照常留痕）。
+   */
+  clearSkipHistory(): void {
+    this.skips = [];
+    this.eventSkips.clear();
+  }
+
   async pause(): Promise<void> {
     await this.repo.updateMode(TREND_TRADE.ACCOUNT_NAME, 'PAUSED');
   }
@@ -1528,29 +1571,39 @@ export class AutoPaperTrader {
    * ④ 余额 = initialCapital（100）、totalDeposited = 0（ROI 本金基准 = initialCapital +
    *    totalDeposited，回到 100）、权益峰值归零；
    * ⑤ 运行模式与持仓数量等配置保持不变。手动盘 default 账户完全不受影响。
+   * ⑥ Task 76：全程持清场屏障（等在飞 tick/事件轮结束并拦住新 tick）——事件循环按旧
+   *    权益快照在清库后开仓的竞争窗口归零，重置后不会凭空多出持仓；
+   * ⑦ Task 76：内存跳过面板同步清空——平仓前「已达最大持仓数」等旧记录不得残留
+   *    （用户据幽灵记录误判「重置没清掉持仓」的根因）。
    */
   async resetAccount(): Promise<{ closed: number }> {
-    const r = await this.closeAllManual();
-    const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
-    if (acc) {
-      await db.paperPosition.deleteMany({ where: { accountId: acc.id } });
-      await db.paperTrade.deleteMany({ where: { accountId: acc.id } });
+    const release = await this.acquireTickBarrier();
+    try {
+      const r = await this.closeAllManual();
+      const acc = await db.paperAccount.findUnique({ where: { name: TREND_TRADE.ACCOUNT_NAME } });
+      if (acc) {
+        await db.paperPosition.deleteMany({ where: { accountId: acc.id } });
+        await db.paperTrade.deleteMany({ where: { accountId: acc.id } });
+      }
+      await db.$executeRawUnsafe(`DELETE FROM TrendTradeMeta`);
+      await db.$executeRawUnsafe(`DELETE FROM TrendAutoDecision`);
+      await db.$executeRawUnsafe(`DELETE FROM TrendPendingEntry`);
+      await db.$executeRawUnsafe(`DELETE FROM TrendStrategyState`); // Task 57：轮次状态一并归零
+      this.strategy.importState({}); // 内存策略状态同步清空（重置后同周期按首次开仓处理）
+      this.clearSkipHistory(); // Task 76：跳过面板同步清空（幽灵记录不跨清场残留）
+      const cfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
+      const capital = cfg?.initialCapital ?? TREND_TRADE.INITIAL_CAPITAL;
+      if (acc) {
+        await db.paperAccount.update({
+          where: { id: acc.id },
+          data: { balance: capital, totalDeposited: 0 },
+        });
+      }
+      await this.repo.resetPeakEquity(TREND_TRADE.ACCOUNT_NAME);
+      return { closed: r.closed };
+    } finally {
+      release();
     }
-    await db.$executeRawUnsafe(`DELETE FROM TrendTradeMeta`);
-    await db.$executeRawUnsafe(`DELETE FROM TrendAutoDecision`);
-    await db.$executeRawUnsafe(`DELETE FROM TrendPendingEntry`);
-    await db.$executeRawUnsafe(`DELETE FROM TrendStrategyState`); // Task 57：轮次状态一并归零
-    this.strategy.importState({}); // 内存策略状态同步清空（重置后同周期按首次开仓处理）
-    const cfg = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
-    const capital = cfg?.initialCapital ?? TREND_TRADE.INITIAL_CAPITAL;
-    if (acc) {
-      await db.paperAccount.update({
-        where: { id: acc.id },
-        data: { balance: capital, totalDeposited: 0 },
-      });
-    }
-    await this.repo.resetPeakEquity(TREND_TRADE.ACCOUNT_NAME);
-    return { closed: r.closed };
   }
 
   mode(): Promise<TrendAutoMode | null> {
