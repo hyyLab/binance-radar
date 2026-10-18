@@ -306,11 +306,6 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
     return { exit: false, reason: null, detail: '' };
   }
 
-  /** Fade entry deliberately opposes the source UTE cycle; do not close it on that same cycle's ENDED. */
-  shouldCloseOnTrendEnded(meta: TrendTradeMetaRow, signal: UnifiedTrendSignal): boolean {
-    return !(isFadePosition(meta) && signal.trendCycleId === meta.trendCycleId);
-  }
-
   /** Hold a fade position while the original UTE cycle is still the only confirmed direction. */
   shouldCloseOnConfirmedReverse(meta: TrendTradeMetaRow, signal: UnifiedTrendSignal): boolean {
     if (isFadePosition(meta) && (!signal.trendCycleId || signal.trendCycleId === meta.trendCycleId)) {
