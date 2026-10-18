@@ -1028,8 +1028,15 @@ export class AutoPaperTrader {
         lastClose,
       );
       const verdict = this.strategy.evaluateEntry(signal, ctx);
-      if (!verdict.want) {
+      if (!verdict.want || !verdict.side) {
         await cancel(`复核未过门槛：${verdict.reason}`);
+        continue;
+      }
+      // 自适应策略可在等待的下一根 K 线上从「反转」切换为「顺势」；不允许沿用旧方向、套用新模式。
+      if (verdict.side !== p.side) {
+        await cancel(
+          `二次确认时策略方向已变化（pending=${p.side}，current=${verdict.side}，mode=${verdict.modeTag}），等待新机会`,
+        );
         continue;
       }
       // ⑥-⑩ 开仓（共享 executeOpen：容量/同币防御/资金测算/幂等抢占/开仓/审计全同构——
