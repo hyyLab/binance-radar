@@ -363,7 +363,7 @@ function StatsBar(props: {
               : '';
             // Task 70：白名单降级提示（币安 exchangeInfo 不可得，Bybit∩Gate 交集代管）
             const degradedHint = s.instrumentsDegraded
-              ? '品种池降级：Bybit∩Gate 交集代管，币安解封后自动恢复真白名单'
+              ? '品种池降级：Bybit∩Gate 交集代管，binance解封后自动恢复真白名单'
               : '';
             const state = s.ok
               ? '供价中'
@@ -403,7 +403,7 @@ function StatsBar(props: {
       <span className="tabular-nums">活跃事件 {props.active}</span>
       <span className="tabular-nums">引擎出站 {props.outbound} req（独立计数）</span>
       <span className="hidden lg:inline">
-        品种=币安 U 本位永续 · 币安监控 Top125 其余两所平分 · 单源供价 · 滚动 24h 基线 · 自适应阈值
+        品种=binance U 本位永续 · binance监控 Top125 其余两所平分 · 单源供价 · 滚动 24h 基线 · 自适应阈值
       </span>
     </div>
   );

@@ -297,7 +297,7 @@ export function PaperPanel({
             </CardTitle>
             <span className="rounded-full bg-gold/15 px-2 py-0.5 text-[11px] font-semibold text-gold">
               本金 {acc ? (acc.initialCapital + acc.totalDeposited).toLocaleString('en-US') : '10'} USDT
-              {acc && acc.totalDeposited > 0 ? '（含充值）' : ''} · 最高 20× · 币安 USDT-M 开/平双边 Taker 0.05%
+              {acc && acc.totalDeposited > 0 ? '（含充值）' : ''} · 最高 20× · binance USDT-M 开/平双边 Taker 0.05%
             </span>
             <div className="ml-auto flex items-center gap-2">
               <button
@@ -329,7 +329,7 @@ export function PaperPanel({
                   <AlertDialogHeader>
                     <AlertDialogTitle>确认重置模拟账户？</AlertDialogTitle>
                     <AlertDialogDescription>
-                      将清空所有持仓与交易流水，资金恢复至 10 USDT（币安 USDT-M 合约规则）。此操作不可撤销。
+                      将清空所有持仓与交易流水，资金恢复至 10 USDT（binance USDT-M 合约规则）。此操作不可撤销。
                     </AlertDialogDescription>
                   </AlertDialogHeader>
                   <AlertDialogFooter>

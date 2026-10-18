@@ -500,6 +500,12 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ==========
+// v24（Task 73 续）：与采集器 v6 同步 bump——boot() 经 activeFuturesCollector() 动态解析
+//   新采集器并 ensureStarted()，保证 SOURCE_LABEL 文案生效的同时行情定时器不断供。
+//   改行为必 bump key。
+// v23（Task 73）：页面文案「币安」→「binance」——SOURCE_LABEL['binance'] 值改为
+//   'binanceU本位'（源健康面板/交易弹窗展示），采集器 DTO label 随单例重建生效。
+//   改行为必 bump key。
 // v22（Task 72）：事件入场拒绝透明化——major-p1 事件路径每个有信息量的拒绝分支返回带原因的
 //   StrategyMajorEventRejection（P1 过期/流动性不足/轮次上限/假突破未回收/再入场条件不满足等），
 //   autoTrader 事件循环捕获后以「策略不入场：原因」写进「最近跳过」（60s/事件/原因 节流，
@@ -611,6 +617,8 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v20?: EnhancedEngine; // v20（Task 68）：UTE 长周期化 + short-swing 再入场解禁
   __binanceRadarEnhanced_v21?: EnhancedEngine; // v21（Task 69）：MAJOR P1 event-driven breakout
   __binanceRadarEnhanced_v22?: EnhancedEngine; // v22（Task 72）：事件拒绝原因进「最近跳过」
+  __binanceRadarEnhanced_v23?: EnhancedEngine; // v23（Task 73）：SOURCE_LABEL 文案 binance 化
+  __binanceRadarEnhanced_v24?: EnhancedEngine; // v24（Task 73 续）：同步采集器 v6 重建
 };
 
 function pickLegacyEngine(
@@ -637,9 +645,13 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v20?: EnhancedEngine;
     __binanceRadarEnhanced_v21?: EnhancedEngine;
     __binanceRadarEnhanced_v22?: EnhancedEngine;
+    __binanceRadarEnhanced_v23?: EnhancedEngine;
+    __binanceRadarEnhanced_v24?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v24 ??
+    g.__binanceRadarEnhanced_v23 ??
     g.__binanceRadarEnhanced_v22 ??
     g.__binanceRadarEnhanced_v21 ??
     g.__binanceRadarEnhanced_v20 ??
@@ -692,20 +704,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v22;
+  const existing = g.__binanceRadarEnhanced_v24;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v22 = fresh;
+  g.__binanceRadarEnhanced_v24 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v22 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v24 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v22 = fresh;
+  g.__binanceRadarEnhanced_v24 = fresh;
   return fresh;
 }

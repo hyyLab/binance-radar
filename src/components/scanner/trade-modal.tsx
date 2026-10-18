@@ -21,7 +21,7 @@ const LEV_PRESETS = [5, 10, 20];
 const MARGIN_PRESETS = [0.1, 0.25, 0.5, 1];
 
 const SOURCE_LABEL: Record<string, string> = {
-  binance: '币安U本位',
+  binance: 'binanceU本位',
   bybit: 'Bybit',
   gate: 'Gate',
 };
@@ -115,7 +115,7 @@ export function TradeModal({
       <DialogContent className="max-h-[92vh] w-[min(480px,95vw)] overflow-y-auto custom-scroll">
         <DialogTitle className="text-lg font-bold">模拟建仓 · 市价单</DialogTitle>
         <DialogDescription className="text-xs">
-          以最新成交价即时成交 · 初始资金 10 USDT · 最高 20× 杠杆 · 币安 USDT-M 合约规则
+          以最新成交价即时成交 · 初始资金 10 USDT · 最高 20× 杠杆 · binance USDT-M 合约规则
           {market === 'futures' && ticker?.source ? ` · 行情源 ${SOURCE_LABEL[ticker.source] ?? ticker.source}` : ''}
         </DialogDescription>
 
@@ -325,7 +325,7 @@ export function TradeModal({
               : `一键卖出做空 ${symbol.replace(/USDT$/, '')}`}
         </button>
         <p className="text-center text-[11px] text-muted-foreground">
-          模拟盘 · 无真实资金 · 开/平仓双边均收 Taker 0.05%（币安 USDT-M）
+          模拟盘 · 无真实资金 · 开/平仓双边均收 Taker 0.05%（binance USDT-M）
           {PAPER_MAX_MARGIN_RATIO < 1 && (
             <>
               {' '}

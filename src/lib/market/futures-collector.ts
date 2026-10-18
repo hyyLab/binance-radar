@@ -748,12 +748,15 @@ export class FuturesCollector {
 // 币安末位」+ klineReqs 计数 + isSharded 门控。v1/v2 已退役。
 // v5（Task 70）：币安封禁期白名单降级——Bybit∩Gate 交集代管品种池（白名单空则
 // 分片/聚合全停、全站无数据），解封后真 exchangeInfo 到货自动覆盖回真白名单。
+// v6（Task 73）：SOURCE_LABEL['binance'] 文案 '币安U本位'→'binanceU本位'（页面展示），
+// 状态交接重建（清单/价格史/统计/分片/封禁状态全继承）。
 const g = globalThis as typeof globalThis & {
   __binanceRadarFutures_v1?: FuturesCollector; // v1：全量币安供价（Task 50，已退役）
   __binanceRadarFutures_v2?: FuturesCollector; // v2：分片首版（K 线兜底仍偏币安，已退役）
   __binanceRadarFutures_v3?: FuturesCollector; // v3：兜底重排（418 短挂起旧纪律，已退役）
   __binanceRadarFutures_v4?: FuturesCollector; // v4：封禁硬截止（Task 60，已退役）
   __binanceRadarFutures_v5?: FuturesCollector;
+  __binanceRadarFutures_v6?: FuturesCollector; // v6（Task 73）：label 文案 binance 化
   __binanceRadarFuturesActive?: FuturesCollector;
 };
 
@@ -770,16 +773,17 @@ function clearFuturesTimers(c: unknown): void {
 }
 
 export const futuresCollector: FuturesCollector = (() => {
-  const existing = g.__binanceRadarFutures_v5;
+  const existing = g.__binanceRadarFutures_v6;
   if (existing) {
     g.__binanceRadarFuturesActive = existing; // 每次图评估都刷新稳定别名
     return existing;
   }
   const legacy =
-    g.__binanceRadarFutures_v4 ?? g.__binanceRadarFutures_v3 ?? g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
+    g.__binanceRadarFutures_v5 ?? g.__binanceRadarFutures_v4 ?? g.__binanceRadarFutures_v3
+      ?? g.__binanceRadarFutures_v2 ?? g.__binanceRadarFutures_v1;
   if (legacy) clearFuturesTimers(legacy); // 遗留实例停表
   const fresh = new FuturesCollector(legacy); // 状态交接（清单/价格史/统计/分片/封禁状态）
-  g.__binanceRadarFutures_v5 = fresh;
+  g.__binanceRadarFutures_v6 = fresh;
   g.__binanceRadarFuturesActive = fresh;
   return fresh;
 })();

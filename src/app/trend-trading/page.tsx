@@ -17,7 +17,7 @@ export default function TrendTradingPage() {
             <Radar className="h-5 w-5 text-gold" />
           </div>
           <div className="min-w-0">
-            <h1 className="truncate text-base font-bold leading-tight sm:text-lg">币安热点雷达 · 趋势交易</h1>
+            <h1 className="truncate text-base font-bold leading-tight sm:text-lg">binance热点雷达 · 趋势交易</h1>
             <p className="text-xs text-muted-foreground">高波动趋势识别 · 自动模拟盘（独立账户）· 纯模拟</p>
           </div>
           <Link

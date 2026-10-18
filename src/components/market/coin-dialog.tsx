@@ -133,8 +133,8 @@ export function CoinDialog({
           {last
             ? `K 线时间轴为 UTC+8 · 最新收盘 ${fmtPrice(last.c)}`
             : market === 'futures'
-              ? '合约 K 线（多源聚合，币安优先 · 服务端代理，缓存 20 秒）'
-              : '币安现货 K 线（服务端代理，缓存 20 秒）'}
+              ? '合约 K 线（多源聚合，binance优先 · 服务端代理，缓存 20 秒）'
+              : 'binance现货 K 线（服务端代理，缓存 20 秒）'}
         </DialogDescription>
 
         <div className="flex flex-wrap gap-1" role="tablist" aria-label="K 线周期">

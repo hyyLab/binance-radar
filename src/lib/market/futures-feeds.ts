@@ -21,7 +21,7 @@ export const FUTURES_SOURCE_PRIORITY: readonly FuturesSourceName[] = [
 ];
 
 export const SOURCE_LABEL: Record<FuturesSourceName, string> = {
-  binance: '币安U本位',
+  binance: 'binanceU本位',
   bybit: 'Bybit',
   gate: 'Gate',
 };
