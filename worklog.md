@@ -819,3 +819,17 @@ Stage Summary:
 - 交付：一键导出 LLM 向分析报告。真实样本（16 笔全反向）验证信息密度达标：§5 扫描直接暴露「反向单普遍先深亏后大赚」（APRUSDT mae -125% → 终局 +94%；-10% 档会截断 8 笔盈利单），任何止损档位在本样本均降低净利——结论可被 AI 直接引用做算法决策
 - 留痕：MAE 口径 mae≤0（占保证金 %）；强平是执行侧事件 → §8 反事实对强平单不精确（报告已显式声明）；报告端点与 trades 路由同口径，future 字段演进只需改 report.ts 一处
 - 遗留：无（用户可定期导出投喂 AI，追踪反向跟随策略演化）
+---
+Task ID: 80-b
+Agent: main
+Task: 用户反馈「导出的余额有点问题，应该导出账户权益」——报告资金口径修复（balance → equity）
+
+Work Log:
+- 定性：报告 account 只透传 PaperAccount.balance（已实现余额），而引擎开仓时保证金已从余额扣除、当前持仓有未实现盈亏——balance 无法反映真实账户状况；总览页 /api/trend-trading 的权威口径为 equity = balance + marginUsed + unrealized（unrealized = Σ(mark-entry)×qty×sign，mark 走引擎多源供价、缺失兜底 entryPrice）
+- 修复（scripts/task80b_equity_patch.py，9 处锚定替换，全落 report.ts）：①account 类型扩展为全量口径 {balance, marginUsed, unrealizedPnl, equity, totalDeposited}；②buildTrendReportData 独立按 PaperPosition status=OPEN 全量查仓算权益（不依赖 meta 存在性，与总览绝对同口径），getEnhancedEngine().autoTrader.markPriceOf 取标记价（惰性单例无启动副作用）；③头部资金行改为「权益(equity)=余额+占用保证金+未实现盈亏」构成拆解（AI 可自验）；④§0 数据字典补 equity 口径行（说明为何加回 marginUsed、unrealized 为毛值未扣平仓费）；⑤§9 持仓快照表新增 mark_price / unrealized_pnl_USDT 两列（逐仓与头部 equity 自洽可交叉验证）；⑥§1 系统上下文 JSON 透传自动带上全量字段
+- 验证：tsc 改动文件零报错；bun test 112/112；端点 md 200 头部生效（权益 122.99 = 余额 54.65 + 保证金 75.03 + 未实现 -6.69）；?format=json 的 account 与总览页 account 逐位一致（unrealizedPnl -5.943980874035314 双方相同，同源证明）；§9 两笔持仓（XMR SHORT/AVA LONG 均反向）新列齐全
+
+Stage Summary:
+- 交付：报告资金口径对齐总览页——余额 → 账户权益（含构成拆解 + 数据字典口径说明 + 逐仓标记价/浮盈亏列）
+- 留痕：equity 为导出时刻快照（标记价实时波动，头部与 §9 同一时刻自洽）；ASTERSHORT 孤儿仓已不在持仓列表（引擎已处理），现持仓 XMR/AVA 均为反向单
+- 遗留：无

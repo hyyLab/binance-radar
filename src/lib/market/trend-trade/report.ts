@@ -4,6 +4,7 @@
 // 全量流水附录、指标精确到小数。统计纯函数在 report-stats.ts（bun test 覆盖）。
 
 import { db } from '@/lib/db';
+import { getEnhancedEngine } from '@/lib/market/enhanced/engine';
 import { trendTradeRepo, type TrendTradeMetaRow } from '@/lib/market/trend-trade/repo';
 import { TREND_TRADE } from '@/lib/market/trend-trade/config';
 import { DEFAULT_STRATEGY_ID, listStrategies } from '@/lib/market/trend-trade/strategy/registry';
@@ -46,11 +47,25 @@ export interface OpenPositionRow {
   mae: number | null;
   mfe: number | null;
   scoreAtOpen: number;
+  /** 导出时刻标记价（供价源缺失时以 entryPrice 兜底，与总览页同口径） */
+  markPrice: number;
+  /** 导出时刻未实现盈亏毛值 USDT（未扣平仓费/滑点；=(mark-entry)×qty×sign） */
+  unrealizedPnl: number;
 }
 
 export interface TrendReportData {
   generatedAtMs: number;
-  account: { name: string; balance: number | null; totalDeposited: number | null } | null;
+  account: {
+    name: string;
+    balance: number;
+    /** 当前 OPEN 持仓占用保证金合计（开仓时已从余额扣除） */
+    marginUsed: number;
+    /** 当前 OPEN 持仓未实现盈亏合计（毛值，按标记价） */
+    unrealizedPnl: number;
+    /** 账户权益 = balance + marginUsed + unrealizedPnl（与总览页同口径） */
+    equity: number;
+    totalDeposited: number;
+  } | null;
   /** 当前算法环境（TrendAutoConfig + 策略名；strategyParamsJson 原文透传） */
   config: Record<string, unknown> | null;
   sample: {
@@ -153,6 +168,23 @@ export async function buildTrendReportData(): Promise<TrendReportData> {
   }
   trades.sort((a, b) => a.closedAtMs - b.closedAtMs);
 
+  // —— 权益口径：与总览 /api/trend-trading 完全一致（equity = balance + marginUsed + unrealized）。
+  // 按 PaperPosition status=OPEN 全量算（不依赖 meta 存在）；标记价走引擎多源供价，缺失兜底 entryPrice。
+  const engine = getEnhancedEngine();
+  const openAll = account
+    ? await db.paperPosition.findMany({ where: { accountId: account.id, status: 'OPEN' } })
+    : [];
+  let marginUsed = 0;
+  let unrealized = 0;
+  const markByPosition = new Map<string, { mark: number; upnl: number }>();
+  for (const p of openAll) {
+    const mark = engine.autoTrader.markPriceOf(p.symbol) || p.entryPrice;
+    const upnl = (mark - p.entryPrice) * p.qty * (p.side === 'LONG' ? 1 : -1);
+    marginUsed += p.margin;
+    unrealized += upnl;
+    markByPosition.set(p.id, { mark, upnl });
+  }
+
   // —— 当前持仓快照（meta OPEN 且 PaperPosition 仍 OPEN；LIQUIDATED 待 reconcile 的不入列） ——
   const openPositions: OpenPositionRow[] = [];
   for (const m of openMetas) {
@@ -173,6 +205,8 @@ export async function buildTrendReportData(): Promise<TrendReportData> {
       mae: m.mae ?? null,
       mfe: m.mfe ?? null,
       scoreAtOpen: m.scoreAtOpen,
+      markPrice: markByPosition.get(pos.id)?.mark ?? pos.entryPrice,
+      unrealizedPnl: markByPosition.get(pos.id)?.upnl ?? 0,
     });
   }
 
@@ -212,7 +246,16 @@ export async function buildTrendReportData(): Promise<TrendReportData> {
 
   return {
     generatedAtMs: Date.now(),
-    account: account ? { name: account.name, balance: account.balance, totalDeposited: account.totalDeposited } : null,
+    account: account
+      ? {
+          name: account.name,
+          balance: account.balance,
+          marginUsed,
+          unrealizedPnl: unrealized,
+          equity: account.balance + marginUsed + unrealized,
+          totalDeposited: account.totalDeposited,
+        }
+      : null,
     config: configOut,
     sample: {
       totalClosed: trades.length,
@@ -310,7 +353,7 @@ export function renderReportMarkdown(d: TrendReportData): string {
   L.push('');
   L.push(
     `- generated_at(+08:00): ${fmt8(d.generatedAtMs, true)}`,
-    `- 账户: ${d.account?.name ?? '—'} | 余额: ${num(d.account?.balance)} USDT | 累计充值: ${num(d.account?.totalDeposited)} USDT`,
+    `- 账户: ${d.account?.name ?? '—'} | 权益(equity): ${num(d.account?.equity)} USDT = 余额 ${num(d.account?.balance)} + 占用保证金 ${num(d.account?.marginUsed)} + 未实现盈亏 ${num(d.account?.unrealizedPnl)} | 累计充值: ${num(d.account?.totalDeposited)} USDT`,
     `- 当前策略: ${String(d.config?.strategyId ?? '—')}（${String(d.config?.strategyName ?? '—')}）| reverseMode: ${String(d.config?.reverseMode ?? '—')}（1=反向跟随开启，0=正常跟随）`,
     `- 样本: 已平仓 ${sample.totalClosed} 笔（反向 ${sample.reversedCount} / 正向 ${sample.forwardCount}），时间跨度 ${fmt8(sample.firstClosedAtMs)} ~ ${fmt8(sample.lastClosedAtMs)}（+08:00）`,
   );
@@ -330,6 +373,7 @@ export function renderReportMarkdown(d: TrendReportData): string {
   L.push('| profit_factor | 利润因子 | gross_win / abs(gross_loss)；无亏损单 = inf |');
   L.push('| expectancy | 每笔期望值 | netPnl / trades（USDT） |');
   L.push('| max_drawdown | 最大回撤 | USDT；按平仓时间升序累计净盈亏的最大峰谷差 |');
+  L.push('| equity | 账户权益 | balance + margin_used + unrealized_pnl；开仓时保证金已从余额扣除，权益须加回占用保证金（与总览页同口径）；unrealized 为毛值未扣平仓费 |');
   L.push('| LIQUIDATED | 强平 | pnl = -margin（全额损失）；强平是执行侧事件，非模型决策 |');
   L.push('| exit_reason 枚举 | TREND_ENDED=趋势确认结束 / REVERSE_CONFIRMED=反向确认 / LIQUIDATED=强平 / MANUAL=人工 / 其余为策略层个性离场 |');
   L.push('');
@@ -446,11 +490,11 @@ export function renderReportMarkdown(d: TrendReportData): string {
   if (d.openPositions.length === 0) {
     L.push('无持仓。');
   } else {
-    L.push('| symbol | exec | sig | reversed | lev | margin_USDT | hold_min_so_far | entry | liq_dist_% | mae_so_far_% | mfe_so_far_% | score |');
-    L.push('|---|---|---|---|---|---|---|---|---|---|---|---|');
+    L.push('| symbol | exec | sig | reversed | lev | margin_USDT | mark_price | unrealized_pnl_USDT | hold_min_so_far | entry | liq_dist_% | mae_so_far_% | mfe_so_far_% | score |');
+    L.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
     for (const p of d.openPositions) {
       L.push(
-        `| ${p.symbol} | ${p.execSide} | ${p.signalSide} | ${p.reversed ? 'Y' : 'N'} | ${p.leverage} | ${p.margin.toFixed(2)} | ${p.holdMinutesSoFar} | ${p.entryPrice} | ${num(p.adverseMovePctToLiq, 2)} | ${num(p.mae, 1)} | ${num(p.mfe, 1)} | ${p.scoreAtOpen} |`,
+        `| ${p.symbol} | ${p.execSide} | ${p.signalSide} | ${p.reversed ? 'Y' : 'N'} | ${p.leverage} | ${p.margin.toFixed(2)} | ${p.markPrice} | ${money(p.unrealizedPnl)} | ${p.holdMinutesSoFar} | ${p.entryPrice} | ${num(p.adverseMovePctToLiq, 2)} | ${num(p.mae, 1)} | ${num(p.mfe, 1)} | ${p.scoreAtOpen} |`,
       );
     }
   }
