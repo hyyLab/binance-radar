@@ -29,7 +29,7 @@ strategy/
 
 ## adaptive-ute-v2（测试版）
 
-不修改 UTE 方向或评分公式。原始 UTE 五因子会透传到 `UnifiedTrendSignal.uteEvidence`，并与 ER、影线、假突破、波动状态及 5m/15m 背景共同决定顺势或反转入场。反转模式必须有成熟度和至少两项反转线索；不会单纯因为 score ≥70 就逆势，也没有按时钟划分“夜间交易”禁区。规则、初始阈值和明日观察指标见 [`docs/adaptive-ute-v2-test-plan.md`](../../../docs/adaptive-ute-v2-test-plan.md)。
+不修改 UTE 方向或评分公式。原始 UTE 五因子会透传到 `UnifiedTrendSignal.uteEvidence`，并与 ER、影线、假突破、波动状态及 5m/15m 背景共同决定顺势或反转入场。反转模式必须有成熟度和至少两项反转线索；不会单纯因为 score ≥70 就逆势，也没有按时钟划分“夜间交易”禁区。规则、初始阈值和明日观察指标见 [`docs/adaptive-ute-v2-test-plan.md`](../../../../../docs/adaptive-ute-v2-test-plan.md)。
 
 ## 新增算法三步
 
