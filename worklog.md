@@ -801,3 +801,21 @@ Stage Summary:
 - 交付：历史列表事件驱动失效——closedCount 同源计数监听，自动平仓与手动平仓的历史可见延迟对齐（≤5s vs 原最差 20s+）
 - 留痕：方向无关（多空同一机制）；强平/重置清场等全部非按钮路径顺带覆盖
 - 遗留：无
+---
+Task ID: 80
+Agent: main
+Task: 历史交易一键导出「AI 分析报告」（受众 LLM 的算法优化材料）
+
+Work Log:
+- 设计定版（用户）：报告不为人类可读优化、为 LLM 可读优化——结构固定、口径显式、全量流水附录；形态=历史交易标题行一键导出（Markdown 附件下载）
+- 新增 report-stats.ts（纯函数，无 DB 依赖）：computeGroupStats（胜率/利润因子/期望/盈亏比/最大回撤/最长连亏/强平率/持仓时长）、applyStopLossWhatIf + sweepStopLoss（基于 MAE 路径近似的止损扫描：mae≤-S 一律在 -S% 截断，含先亏后赚单，mae 缺失计 uncovered）、liquidationProfile（强平 vs 其他单中位数画像）、counterfactualModelWorld（反向单取 -pnl 的模型世界反事实）、分桶/分组
+- 新增 report.ts：buildTrendReportData（closed/open metas × PaperPosition 归一化，口径与 trades 路由一致：meta.side=信号侧、pos.side=执行侧、reversed=二者不一致、netPnlWithSlip 主口径、LIQUIDATED 优先）+ renderReportMarkdown（§0 数据字典 / §1 系统上下文 / §2 样本 / §3 全部vs反向vs正向三列 / §4 强平专项 / §5 what-if 扫描 / §6 时长分层 / §7 六维透视 / §8 反事实 / §9 持仓快照 / §10 全量流水≤500 / §11 数据质量）
+- 新增 /api/trend-trading/report：默认 Markdown 附件（filename trend-report-YYMMDD-HHmm.md，UTC+8 口径），?format=json 结构化输出
+- UI（scripts/task80_report_button_patch.py 四处锚定替换）：lucide FileDown 图标 + reportBusy 状态 + fetch→blob 下载 + 历史交易标题行「导出AI报告」金色按钮（toast 成功/失败反馈）
+- 测试 tests/trend-trade/report-stats.test.ts 12 例（口径验算/回撤连亏/分桶边界/what-if 逐档精确值/反事实镜像）；修正初版 2 处断言错误：payoffRatio=|20/-20|=1.00 非 2.00；what-if 扫描本就不单调——过紧止损截断「先亏后赚」盈利单反而降净利，改为逐档精确断言
+- 验证：tsc 输出中改动文件零报错（全量输出含无关历史遗留报错，与基线一致）、eslint 0 问题、bun test 112/112、report 端点 md 200（11.4KB）/json 200、/trend-trading 页面 200
+
+Stage Summary:
+- 交付：一键导出 LLM 向分析报告。真实样本（16 笔全反向）验证信息密度达标：§5 扫描直接暴露「反向单普遍先深亏后大赚」（APRUSDT mae -125% → 终局 +94%；-10% 档会截断 8 笔盈利单），任何止损档位在本样本均降低净利——结论可被 AI 直接引用做算法决策
+- 留痕：MAE 口径 mae≤0（占保证金 %）；强平是执行侧事件 → §8 反事实对强平单不精确（报告已显式声明）；报告端点与 trades 路由同口径，future 字段演进只需改 report.ts 一处
+- 遗留：无（用户可定期导出投喂 AI，追踪反向跟随策略演化）

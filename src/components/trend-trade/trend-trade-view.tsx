@@ -11,6 +11,7 @@
 //            ⑦ 历史交易展示开仓时间 + 平仓时间
 // Task 56：⑧ sizing 改为「开仓时账户权益 × 20%」（与持仓数量解耦）；入场需二次确认
 //          （确认后等一根新收盘 K 线复核）+ 质量门槛（评分/ER/高周期）+ 同币种冷却 5 分钟
+// Task 80：⑨ 历史交易旁一键导出「AI 分析报告」（Markdown 附件，受众 LLM 做算法优化）
 // ⚠️ 纯模拟交易；趋势评分为启发式证据分；趋势确认 ≠ 买卖指令；强平如实统计。
 
 import { useMemo, useState } from 'react';
@@ -18,6 +19,7 @@ import {
   Bot,
   ChevronDown,
   CircleAlert,
+  FileDown,
   History,
   Pause,
   Play,
@@ -387,6 +389,29 @@ export function TrendTradeView() {
   // Task 63：历史明细默认只展示最近 10 条，其余折叠（一键展开/收起，避免列表过长刷屏）
   const [historyExpanded, setHistoryExpanded] = useState(false);
   const history = useTrendTradeHistory(filterSymbol, sort, order);
+  // Task 80：一键导出 AI 分析报告（/api/trend-trading/report → Markdown 附件下载）
+  const [reportBusy, setReportBusy] = useState(false);
+  const handleExportReport = async () => {
+    if (reportBusy) return;
+    setReportBusy(true);
+    try {
+      const res = await fetch('/api/trend-trading/report');
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const blob = await res.blob();
+      const m = (res.headers.get('Content-Disposition') ?? '').match(/filename="?([^";]+)"?/);
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = m?.[1] ?? 'trend-report.md';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast({ title: 'AI 报告已导出', description: 'Markdown 文件已下载，可直接投喂给 AI 分析优化算法' });
+    } catch (e) {
+      toast({ title: '导出失败', description: e instanceof Error ? e.message : '未知错误', variant: 'destructive' });
+    } finally {
+      setReportBusy(false);
+    }
+  };
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<TradeDetail | null>(null);
   // Task 55：充值弹窗 + K 线弹窗（点击持仓卡片 / 历史交易币种）
@@ -773,6 +798,14 @@ export function TrendTradeView() {
                 <option value="desc">降序</option>
                 <option value="asc">升序</option>
               </select>
+              <button
+                onClick={handleExportReport}
+                disabled={reportBusy}
+                title="导出全量历史分析报告（Markdown，供 AI 优化算法）"
+                className="ml-auto flex items-center gap-1 rounded border border-gold/50 bg-gold/10 px-2 py-1 text-[11px] font-semibold text-gold transition-colors hover:bg-gold/20 disabled:opacity-50"
+              >
+                <FileDown className="h-3 w-3" /> {reportBusy ? '生成中…' : '导出AI报告'}
+              </button>
             </div>
             {history.data && history.data.trades.length > 0 && (
               <div className="space-y-0.5">
