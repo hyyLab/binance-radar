@@ -168,17 +168,26 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
     const rangeClimax =
       raw.rangeExpansion >= this.params.REVERSAL_RANGE_EXPANSION ||
       signal.features.volRegime === 'EXTREME' ||
-      (signal.features.volPercentile >= this.params.REVERSAL_EXTREME_VOL_PERCENTILE);
-    const primaryCueCount = [rejectionWick, counterBreakout, failedBreakout, htfOpposed].filter(Boolean).length;
-    const cueCount = [
-      rejectionWick, counterBreakout, failedBreakout, h5Opposed, h15Opposed,
-      dryVolume, erCollapse, rangeClimax,
-    ].filter(Boolean).length;
+      signal.features.volPercentile >= this.params.REVERSAL_EXTREME_VOL_PERCENTILE;
     const mature =
       signal.confirmCount >= this.params.REVERSAL_MIN_CONFIRM_COUNT ||
       (signal.score >= this.params.REVERSAL_MIN_STRONG_SCORE &&
         signal.strength >= this.params.REVERSAL_MIN_STRONG_STRENGTH &&
         consistency >= 0.75);
+    // 用户指出的典型反向盈利来源：UTE 高分顺着加速段入场，但临近末端时量能/效率衰减，
+    // 随后价格反弹/回撤。它不是「高分就反做」：还要求成熟信号与极端扩张共现衰减证据。
+    const lateMoveExhaustion =
+      mature &&
+      signal.score >= this.params.REVERSAL_MIN_STRONG_SCORE - 5 &&
+      rangeClimax &&
+      (dryVolume || erCollapse);
+    const primaryCueCount = [
+      rejectionWick, counterBreakout, failedBreakout, htfOpposed, lateMoveExhaustion,
+    ].filter(Boolean).length;
+    const cueCount = [
+      rejectionWick, counterBreakout, failedBreakout, h5Opposed, h15Opposed,
+      dryVolume, erCollapse, rangeClimax, lateMoveExhaustion,
+    ].filter(Boolean).length;
 
     const cueNames = [
       rejectionWick ? '反转影线' : null,
@@ -189,6 +198,7 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
       dryVolume ? '量能衰减' : null,
       erCollapse ? 'ER走低' : null,
       rangeClimax ? '波动扩张' : null,
+      lateMoveExhaustion ? '成熟高分末端扩张衰减' : null,
     ].filter((x): x is string => x !== null);
 
     const canFade =
