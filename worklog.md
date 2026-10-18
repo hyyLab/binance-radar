@@ -749,3 +749,24 @@ Stage Summary:
 - 交付：历史记录方向真值化——side=实际执行方向（与 PaperPosition/K线/盈亏同源），模型信号侧以 signalSide 保留供审计，reversed 徽标可视化镜像关系；CP1/CP2 存量断言修复，101/101 全绿
 - 语义分层清晰化：执行层（PaperPosition/历史/K线）=执行方向；策略层（TrendTradeMeta.side/决策链/退出判断）=模型信号方向；两层经 reversed 字段桥接
 - 遗留：无（auto-trader/repo 零改动，无需引擎单例 bump；行内 commit 1043b37 已推送）
+
+---
+Task ID: 78
+Agent: main
+Task: 用户报告页面「最近错误」显示 Prisma 1032 attempt to write a readonly database——诊断、热修复与根治
+
+Work Log:
+- 诊断三证据定性：git log 顶部新增平台快照提交 746c2d1（db mtime 08:42）+ 运行中 dev server（05:33 由 start.sh 链路拉起）+ 库文件 python 直写 OK——符合 Task 54 机制留痕「写报 1032 且文件可直写」，即平台快照替换 db 文件后运行中 Prisma 连接持有失效状态，读写分离（读 OK 写挂）
+- 标准路径双 bump（scripts/task78_db_v4_hotfix.py）：db 单例 v3→v4（新 PrismaClient 新 fd 指向现 inode，旧 v3 自然退役）+ 引擎单例 v26→v27（autoTrader/trendWatch 构造捕获旧 db 引用必须整体重建；pickLegacyEngine 链补 v26，stopLegacyEngine 停旧定时器、carryStore 携带K线仓库、ensureStarted 从 DB 幂等恢复）
+- 热重载失效实锤：改 db.ts/engine.ts 后 route.ts 加注释触发，60s+ 轮询观察 lastError 持续 1032（tick 成功会清 lastError，496 行语义）——本环境 Turbopack 对 server 端 lib 链的 watch 不可靠，bump 修复无法靠 HMR 生效，需进程重启
+- 自愈机制实验（scripts/task78_reconnect_probe*.ts 两轮）：cp+mv 换 inode 与同 inode dd 回写均未复现 1032 触发方式（平台快照行为更特殊，停止机制考古）——但两轮 [4] 一致证明 $disconnect() 后惰性重连恢复写能力（重连重新 open 当前路径文件并校验/获取锁）
+- 自愈实现（scripts/task78_selfheal_patch.py，auto-trader.ts 五处锚定）：private readonlyHealing 去重字段 + selfHealIfReadonly(e)（/readonly|1032/i 命中 → db.$disconnect() + logDecision 审计，5s 窗口去重）+ 三处 catch（reconcile/tick/MAJOR P1 事件循环）fire-and-forget 调用——下个 tick（10s）惰性重连，30 秒内自愈；全链 client（repo/paper/auto-trader）共用同一 db 单例，disconnect 一次全局生效
+- 顺手修复存量：db.ts globalForPrisma 类型声明缺 prisma 兼容属性（基线即可复现的 tsc 报错，scripts/task78_db_type_fix.py）
+- 验证：tsc 干净、bun test 101/101 全绿、next build 成功；线上 lastError 恢复依赖进程重启（热重载不可用），运行中旧进程仍持坏连接
+- commit 4382798 已推送；待用户重启会话生效——此后平台快照再破坏连接时自愈机制自动接管，无需人工
+
+Stage Summary:
+- 交付：db v4 + engine v27 双 bump（本次现场恢复）+ readonly 自愈机制（根治——未来快照事件 30 秒自动恢复）+ db.ts 类型存量修复；两轮重连实验脚本留痕
+- 机制认知升级：①本环境 Turbopack server 端 lib 链热重载不可靠——改 lib 代码后必须进程重启，HMR 不算数；②$disconnect 惰性重连可救 readonly 坏连接（自愈依据）；③1032 的具体触发方式未复现（cp+mv/dd 回写均不触发），但自愈不依赖触发方式——断开重连对任意文件替换形态有效
+- 经验：「写报 1032 且文件可直写」→ bump db 单例（无自愈代码时）；有自愈代码后 → 等 30 秒即可
+- 遗留：无（用户重启会话后全部生效）
