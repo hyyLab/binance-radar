@@ -57,7 +57,7 @@ export const ADAPTIVE_UTE_V2 = {
   REVERSAL_STOP_LOSS_PCT: 0.85,
   REVERSAL_TRAIL_ARM_PCT: 18,
   REVERSAL_TRAIL_GIVEBACK_PCT: 9,
-} as const;
+};
 
 export type AdaptiveUteV2Params = Partial<typeof ADAPTIVE_UTE_V2>;
 
@@ -70,12 +70,6 @@ interface SymbolState {
 }
 
 type Side = 'LONG' | 'SHORT';
-type Mode = 'UTE_TREND_CONTINUATION' | 'UTE_REVERSAL_FADE';
-
-function oppositeDir(dir: 'up' | 'down' | 'flat'): 'up' | 'down' | null {
-  return dir === 'up' ? 'down' : dir === 'down' ? 'up' : null;
-}
-
 function sideOf(dir: 'up' | 'down' | 'flat'): Side | null {
   return dir === 'up' ? 'LONG' : dir === 'down' ? 'SHORT' : null;
 }
@@ -158,9 +152,6 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
     const consistency = raw.directionalConsistency;
     const h5Opposed = signal.htf5m.valid && signal.htf5m.dir !== 'flat' && !aligned(dir, signal.htf5m.dir);
     const h15Opposed = signal.htf15m.valid && signal.htf15m.dir !== 'flat' && !aligned(dir, signal.htf15m.dir);
-    const h5Aligned = signal.htf5m.valid && aligned(dir, signal.htf5m.dir);
-    const h15Aligned = signal.htf15m.valid && aligned(dir, signal.htf15m.dir);
-
     // 反转线索不是简单地「UTE 分数高就反做」：
     // 高分代表 UTE 五因子证据强，若没有趋势成熟度和反转结构，不做逆势单。
     const rejectionWick =
