@@ -16,6 +16,7 @@
 
 import { ShortSwingStrategy, type ShortSwingParams } from './short-swing';
 import { UniversalTrendStrategy, type UniversalTrendParams } from './universal-trend';
+import { AdaptiveUteV2Strategy, type AdaptiveUteV2Params } from './adaptive-ute-v2';
 import { MajorP1BreakoutStrategy, type MajorP1BreakoutParams } from './major-p1-breakout';
 import type { StrategyDescriptor, TrendStrategy } from './types';
 
@@ -23,6 +24,8 @@ import type { StrategyDescriptor, TrendStrategy } from './types';
 const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => TrendStrategy> = {
   'short-swing-v1': (p) => new ShortSwingStrategy(p as ShortSwingParams | undefined),
   'universal-trend-v1': (p) => new UniversalTrendStrategy(p as UniversalTrendParams | undefined),
+  // Task 82：联合 UTE 原始五因子 + 波动结构 + 5m/15m；允许有多项反转证据时逆着 UTE 入场。
+  'adaptive-ute-v2': (p) => new AdaptiveUteV2Strategy(p as AdaptiveUteV2Params | undefined),
   'major-p1-breakout-v1': (p) => new MajorP1BreakoutStrategy(p as MajorP1BreakoutParams | undefined),
   // Task 81 数据定版：与 universal-trend-v1 唯一差异 = ENTRY_MIN_SCORE 0→70（只做五因子近乎全亮的强确认）。
   // 回测依据（131 笔反向样本的正向镜像）：score≥70 子集 20 笔 +57.57U / PF 3.37（全量 131 笔 +27.53 / PF 1.17），
