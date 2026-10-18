@@ -8,7 +8,6 @@
 // 所有阈值是明日模拟测试用的起始参数，尚未经过足量回放，不代表已验证的盈利策略。
 
 import type { UnifiedTrendSignal } from '../../trend-watch/signal';
-import type { TrendExitReason } from '../config';
 import type { TrendTradeMetaRow } from '../repo';
 import type {
   StrategyEntryVerdict,
@@ -124,6 +123,7 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
     }
     if (!signal.dataFresh) return reject(`行情/ K 线数据不新鲜：${signal.dataUnavailableReason ?? 'unknown'}`);
     const dir = signal.direction;
+    if (dir !== 'up' && dir !== 'down') return reject('UTE 已确认相位但方向无效，拒绝入场');
     const uteSide = sideOf(dir);
     const raw = signal.uteEvidence;
     if (!uteSide || !raw) return reject('缺少有效 UTE 原始决策因子，拒绝用不完整快照入场');
