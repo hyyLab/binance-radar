@@ -748,16 +748,25 @@ export class AutoPaperTrader {
             );
             continue;
           }
-          const entryBar = this.entryBarTimeOf(meta);
-          if (entryBar != null && signal.lastBarTime != null && signal.lastBarTime <= entryBar) {
+          // 默认算法仍按硬规则在匹配周期 ENDED 时退出；仅明确声明的反转策略可继续管理该仓。
+          const strategyAllowsEnded = this.strategy.shouldCloseOnTrendEnded?.(meta, signal) ?? true;
+          if (!strategyAllowsEnded) {
             logDecision(
-              `离场跳过 证据K线未晚于开仓K线 symbol=${meta.symbol} posCycle=${meta.trendCycleId} ` +
-              `entryBar=${entryBar} signalBar=${signal.lastBarTime} positionId=${meta.positionId}`,
+              `策略保留 UTE 原周期持仓（反转模式等待止损/移动止盈/新反向周期） ` +
+              `strategy=${this.strategy.id} symbol=${meta.symbol} cycle=${meta.trendCycleId}`,
             );
+          } else {
+            const entryBar = this.entryBarTimeOf(meta);
+            if (entryBar != null && signal.lastBarTime != null && signal.lastBarTime <= entryBar) {
+              logDecision(
+                `离场跳过 证据K线未晚于开仓K线 symbol=${meta.symbol} posCycle=${meta.trendCycleId} ` +
+                `entryBar=${entryBar} signalBar=${signal.lastBarTime} positionId=${meta.positionId}`,
+              );
+              continue;
+            }
+            await this.closePosition(meta, 'TREND_ENDED', signal);
             continue;
           }
-          await this.closePosition(meta, 'TREND_ENDED', signal);
-          continue;
         }
 
         if (signal.phase === 'END_PENDING' && signal.trendCycleId === meta.trendCycleId) {
@@ -800,8 +809,10 @@ export class AutoPaperTrader {
         !eventDriven &&
         signal &&
         (signal.phase === 'CONFIRMED_UP' || signal.phase === 'CONFIRMED_DOWN') &&
-        (meta.side === 'LONG' ? signal.direction !== 'up' : signal.direction !== 'down') &&
-        signal.dataFresh
+        signal.dataFresh &&
+        (this.strategy.shouldCloseOnConfirmedReverse
+          ? this.strategy.shouldCloseOnConfirmedReverse(meta, signal)
+          : (meta.side === 'LONG' ? signal.direction !== 'up' : signal.direction !== 'down'))
       ) {
         await this.closePosition(meta, 'REVERSE_CONFIRMED', signal);
       }
@@ -1164,6 +1175,7 @@ export class AutoPaperTrader {
           strength: signal.strength,
           anomaly: signal.anomaly,
           conflict: signal.conflict,
+          uteEvidence: signal.uteEvidence ?? null,
         }),
         signalAtOpen: JSON.stringify(signal),
         slippageEst,
