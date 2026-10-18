@@ -36,6 +36,7 @@ function mk(partial: Partial<ReportTrade>): ReportTrade {
     entryEr: 0.5,
     htfGate: 'ALIGNED',
     htf15mDir: 'up',
+    htf5mRetPct: 1.5,
     entryRound: 1,
     mfe: null,
     mae: null,

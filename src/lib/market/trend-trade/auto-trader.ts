@@ -1697,6 +1697,11 @@ export class AutoPaperTrader {
     return this.strategyDesync;
   }
 
+  /** Task 82：当前实际运行的算法 id（区别于 DB 配置的 strategyId——失配时二者不同） */
+  get runningStrategyId(): string {
+    return this.strategy.id;
+  }
+
   /** 最近跳过记录（审计：为什么没开仓/为什么跳过） */
   recentSkips(limit = 50): SkipRecord[] {
     return this.skips.slice(0, limit);

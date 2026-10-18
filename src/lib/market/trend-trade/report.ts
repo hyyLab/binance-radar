@@ -112,6 +112,17 @@ function strategyIdOf(meta: TrendTradeMetaRow): string {
   }
 }
 
+/** 开仓时 5m 高周期顺向位移 %（featuresAtOpen.htf5m.returnPct）——
+ * Task 83「过度延伸」证据：确认时行情已走出的幅度。缺失（老单/快照损坏）返回 null */
+function htf5mRetPctOf(meta: TrendTradeMetaRow): number | null {
+  try {
+    const v = (JSON.parse(meta.featuresAtOpen) as { htf5m?: { returnPct?: number } }).htf5m?.returnPct;
+    return typeof v === 'number' && Number.isFinite(v) ? v : null;
+  } catch {
+    return null;
+  }
+}
+
 function toMs(v: Date | number | null | undefined): number | null {
   if (v == null) return null;
   return v instanceof Date ? v.getTime() : Number(v);
@@ -141,6 +152,7 @@ function normalizeClosed(meta: TrendTradeMetaRow, pos: NonNullable<Awaited<Retur
     entryEr: meta.entryEr ?? null,
     htfGate: meta.htfGate ?? null,
     htf15mDir: meta.htf15mDir ?? null,
+    htf5mRetPct: htf5mRetPctOf(meta),
     entryRound: meta.entryRound ?? null,
     mfe: meta.mfe ?? null,
     mae: meta.mae ?? null,
@@ -224,6 +236,11 @@ export async function buildTrendReportData(): Promise<TrendReportData> {
         reverseMode: config.reverseMode,
         strategyId: currentStrategyId,
         strategyName: strategyNameById.get(currentStrategyId) ?? currentStrategyId,
+        // Task 82 教训：报告必须能自证「配置的算法 = 实际运行的算法」——本次实测故障中
+        // UI 显示已切换、流水却由旧算法产生，AI 若只看配置标签会把旧算法的单误归因给新算法。
+        // 流水行的 strategyId 永远以开仓快照 featuresAtOpen.strategyId 为准
+        runningStrategyId: engine.autoTrader.runningStrategyId,
+        strategyDesync: engine.autoTrader.runningStrategyId !== currentStrategyId,
         strategyParamsJson: config.strategyParamsJson ?? null,
         initialCapital: config.initialCapital,
         marginRatio: config.marginRatio,
@@ -375,6 +392,7 @@ export function renderReportMarkdown(d: TrendReportData): string {
   L.push('| max_drawdown | 最大回撤 | USDT；按平仓时间升序累计净盈亏的最大峰谷差 |');
   L.push('| equity | 账户权益 | balance + margin_used + unrealized_pnl；开仓时保证金已从余额扣除，权益须加回占用保证金（与总览页同口径）；unrealized 为毛值未扣平仓费 |');
   L.push('| LIQUIDATED | 强平 | pnl = -margin（全额损失）；强平是执行侧事件，非模型决策 |');
+  L.push('| 5m_ret_% | 开仓时刻 5m 高周期顺向位移 | htf5m.returnPct；确认时行情已走出的幅度——「过度延伸」证据：反向机制的盈利来自模型在延伸末端入场随即遭均值回归，|ret| 越大追入风险越高（Task 83） |');
   L.push('| exit_reason 枚举 | TREND_ENDED=趋势确认结束 / REVERSE_CONFIRMED=反向确认 / LIQUIDATED=强平 / MANUAL=人工 / 其余为策略层个性离场 |');
   L.push('');
   L.push('**What-if 止损模拟方法**：设「浮亏达保证金 S% 即平仓」。对 mae != null 且 mae <= -S 的单（含先亏后赚单）在 -S% 截断：pnlNet = -margin × S/100。局限：① mae 为采样极值，可能漏掉瞬时刻度（模拟偏保守）；② 止损成交按精确 -S% 计，未含额外滑点；③ mae 缺失的老单不参与（数量在表中 uncovered 列）。');
@@ -385,6 +403,7 @@ export function renderReportMarkdown(d: TrendReportData): string {
   L.push('```json');
   L.push(JSON.stringify({ account: d.account, config: d.config }, null, 2));
   L.push('```');
+  L.push('- `config.strategyDesync = true` 时：配置的算法与实际运行算法不一致（进程早于算法上线启动），本报告各笔的归属算法一律以流水行 `strategy_id`（开仓快照）为准，不得按配置标签归因');
 
   // —— §2 样本概览 ——
   L.push('');
@@ -502,13 +521,13 @@ export function renderReportMarkdown(d: TrendReportData): string {
   // —— §10 附录A 全量流水 ——
   L.push('');
   L.push(`## 10. 附录A：全量平仓流水（closedAt 升序${d.ledgerTruncated ? `；仅含最近 ${LEDGER_LIMIT} 条，共 ${sample.totalClosed} 条` : ''}）`);
-  L.push('| # | closed_at(+08) | symbol | exec | sig | rev | exit | hold_min | margin | pnl_pct_% | pnl_USDT | cum_pnl_USDT | score | mae_% | mfe_% | round |');
-  L.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
+  L.push('| # | closed_at(+08) | symbol | exec | sig | rev | exit | hold_min | margin | pnl_pct_% | pnl_USDT | cum_pnl_USDT | score | 5m_ret_% | mae_% | mfe_% | round |');
+  L.push('|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|');
   let cum = 0;
   d.ledger.forEach((t, i) => {
     cum += t.pnlNet;
     L.push(
-      `| ${i + 1} | ${fmt8(t.closedAtMs, true)} | ${t.symbol} | ${t.execSide} | ${t.signalSide} | ${t.reversed ? 'R' : 'N'} | ${exitShort(t.exitReason)} | ${t.holdMinutes} | ${t.margin.toFixed(2)} | ${pnlPctOf(t).toFixed(1)} | ${money(t.pnlNet)} | ${money(cum)} | ${t.scoreAtOpen} | ${num(t.mae, 1)} | ${num(t.mfe, 1)} | ${t.entryRound ?? '—'} |`,
+      `| ${i + 1} | ${fmt8(t.closedAtMs, true)} | ${t.symbol} | ${t.execSide} | ${t.signalSide} | ${t.reversed ? 'R' : 'N'} | ${exitShort(t.exitReason)} | ${t.holdMinutes} | ${t.margin.toFixed(2)} | ${pnlPctOf(t).toFixed(1)} | ${money(t.pnlNet)} | ${money(cum)} | ${t.scoreAtOpen} | ${num(t.htf5mRetPct, 2)} | ${num(t.mae, 1)} | ${num(t.mfe, 1)} | ${t.entryRound ?? '—'} |`,
     );
   });
 

@@ -78,6 +78,8 @@ export interface TrendOverview {
     startedAt: number;
     lastTickAt: number;
     lastError: string | null;
+    /** Task 82：实际运行算法 id（与 config.strategyId 不同 = 装配失配） */
+    runningStrategyId: string;
     trendSignalCount: number;
     trendLastScanAt: number;
   };
@@ -109,6 +111,8 @@ export interface TrendOverview {
   };
   stats: {
     realizedNetWithSlip: number;
+    /** Task 83：反向世界对照（同一批交易若镜像执行的理论净利 = -净利） */
+    reverseWorldPnl: number;
     feePaid: number;
     winRate: number;
     closedCount: number;

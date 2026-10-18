@@ -35,6 +35,10 @@ export interface ReportTrade {
   htfGate: string | null;
   /** 开仓时 15m 方向（up / down / flat） */
   htf15mDir: string | null;
+  /** 开仓时 5m 高周期顺向位移 %（htf5m.returnPct；确认时行情已走出的幅度）——
+   * 「过度延伸」证据：Task 83 反向机制观察，模型高分确认常出现在延伸末端，
+   * 随即遭均值回归（反向世界的盈利来源）；|ret| 越大，追入风险越高 */
+  htf5mRetPct: number | null;
   /** 同周期第几轮开仓（1 = 首次） */
   entryRound: number | null;
   /** 持仓期最大有利浮盈（占保证金 %，≥0；按标记价采样，可能低估） */

@@ -850,3 +850,22 @@ Stage Summary:
 - 设计哲学:最小改动单一旋钮;不学 ALL 集合的 -20% 止损补丁(那是对烂入场的补救,强确认入场本身把深亏单挡在门外);TRAIL 30/20 是正向世界已验证的利润引擎(+93.87)原样继承
 - 边界声明:131 笔/4 小时/单 regime,阈值 70 为样本内拟合(用户知情接受过拟合);报告强平 2 笔的正向估值按 §8 口径(+margin);跨 regime 后需复校,复校数据源=未来报告的 byScore 分桶
 - 遗留:无(切换上线由用户在控制台操作:选 strong-trend-v1 + 关 reverseMode)
+---
+Task ID: 82
+Agent: main
+Task: 用户反馈「切换算法后历史交易仍是短周期套利」——排查并修复策略装配失配（切换假生效）+ 反向机制可观测化（Task 83 合并交付）
+
+Work Log:
+- 取证：DB TrendAutoConfig.strategyId=strong-trend-v1（20:07:35 写入成功），但其后 20:09/20:12/20:17 开的三笔仓 featuresAtOpen.strategyId 均为 short-swing-v1（score 61/75/91，61 分连强趋势 70 门槛都过不了）→ 切换假生效实锤；dev.log 中「策略自愈切换 → strong-trend-v1」62 条（10 分钟 62 次，每 tick 重装配死循环）
+- 根因链：dev 进程 13:04 启动（旧注册表常驻引擎单例）→ 20:04 Task 81 registry.ts 落盘（HMR 只惠及新请求的模块图）→ 20:07 control 路由（新图）isKnownStrategy 通过并写库，但老单例 applyStrategy 走老图 createStrategy(未知 id) → registry「绝不抛错」静默兜底 short-swing-v1 → tick 自愈发现实例≠配置重装配 → 又兜底 → 死循环；UI 读 DB 显示「已切换」→ 用户被隐形错配误导
+- 修复（auto-trader.ts 七处）：①applyStrategy 未知 id 拒绝装配（保留实例+置 strategyDesync+只记一次日志）②setStrategyId 装配前置校验（抛错在写库之前——源头拒绝）③tick 自愈仅真正换上才记日志（防刷屏）④desync 时停开新仓/停待入场转换（fail-safe 宁停不错；退出管理+强平照常）⑤成功路径 lastError 改为 desync 感知（总览「最近错误」持续暴露）⑥新增 runningStrategyId/strategyDesyncId getter
+- 可观测化：总览 service.runningStrategyId + stats.reverseWorldPnl（=-净利，反向世界对照常驻 UI）；view 失配红色警告行；Stat 组件支持 title；report §1 config 增 runningStrategyId/strategyDesync（报告自证归属，防 AI 误归因）+ 流失提示
+- 反向机制证据管道（Task 83）：report-stats ReportTrade 增 htf5mRetPct（开仓时 5m 顺向位移=过度延伸证据）；report §10 流水增 5m_ret_% 列 + §0 数据字典行；三笔实盘验证 3.12/-3.24/-2.97%（全部延伸末端入场，与用户 ZEREBRO 观察吻合）
+- 测试：tests/trend-trade/strategy-desync.test.ts 4 例（T-D1 拒绝写库/实例保持、T-D2 boot/自愈 fail-safe 停开仓+错误可见、T-D3 已注册算法正常切换、T-D4 desync 恢复后开仓恢复）；report-stats.test.ts 夹具补 htf5mRetPct
+- 重启：工具 shell 无法启动常驻进程（setsid 被沙箱回收；dev.sh 因 300s 超时打断 HTTP 父进程留下半死树）→ 最终以 (bun run dev &) 孤儿模式重启成功且跨调用存活
+- 验证：tsc 改动文件零报错、eslint 0 问题、bun test 121/121（+4）；总览 config.strategyId === runningStrategyId === strong-trend-v1、lastError null、自愈日志 0 条；report json 的 config.strategyDesync=false、ledger 三笔 5m_ret_% 齐全
+
+Stage Summary:
+- 交付：切换假生效根因修复（未知算法拒绝装配+源头拒绝+失配停机+错误可见）+ 双世界视角常驻（总览反向世界对照）+ 过度延伸证据管道（报告 5m_ret_% 列）
+- 实盘标本：三笔 -8.14 vs 反向世界 +8.14；ZEREBRO#2（score 91 追空，5m 已跌 3.24%，反弹 +1.97% 后 WEAKNESS_EARLY 投降）= 用户所述「反向赚钱机制」的活体样本
+- 遗留：过度延伸护栏（ENTRY_MAX_STRETCH 类）待 strong-trend-v1 实盘样本积累后按数据定阈值（现 n=3 不拟合）；跨 regime 复校 70 门槛（Task 81 遗留）复用同一报告管道

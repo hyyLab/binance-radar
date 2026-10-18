@@ -107,9 +107,9 @@ function pnlClass(v: number | null | undefined): string {
   return v > 0 ? 'text-up' : 'text-down';
 }
 
-function Stat({ label, value, cls }: { label: string; value: string; cls?: string }) {
+function Stat({ label, value, cls, title }: { label: string; value: string; cls?: string; title?: string }) {
   return (
-    <div className="rounded-lg border border-border/60 bg-card px-3 py-2">
+    <div className="rounded-lg border border-border/60 bg-card px-3 py-2" title={title}>
       <div className="text-[10px] text-muted-foreground">{label}</div>
       <div className={cn('mt-0.5 font-mono text-sm font-bold tabular-nums', cls)}>{value}</div>
     </div>
@@ -712,6 +712,12 @@ export function TrendTradeView() {
       <div className="text-[10px] text-muted-foreground/80">
         ⚠️ 纯模拟交易，不接入真实下单。趋势评分为启发式证据分（未经回放校准，非胜率/概率）；趋势确认 ≠ 买卖指令；强平为杠杆模拟执行结果，如实计入统计。
         {data && !data.service.on && <span className="ml-2 text-gold">服务尚未运行（访问本页自动拉起）</span>}
+        {/* Task 82：算法失配可见化——本次实测故障（切换后仍跑旧算法）就是被这种隐形错配误导 */}
+        {data && data.service.runningStrategyId !== data.config.strategyId && (
+          <span className="ml-2 text-down">
+            ⚠️ 算法失配：配置 {data.config.strategyId}，实际运行 {data.service.runningStrategyId}；新开仓已暂停，请重启服务
+          </span>
+        )}
         {data?.service.lastError && <span className="ml-2 text-down">最近错误：{data.service.lastError}</span>}
       </div>
 
@@ -735,6 +741,12 @@ export function TrendTradeView() {
             <Stat label="占用保证金" value={data.account.marginUsed.toFixed(2)} />
             <Stat label="未实现盈亏" value={data.account.unrealizedPnl.toFixed(3)} cls={pnlClass(data.account.unrealizedPnl)} />
             <Stat label="已实现净收益（含滑点）" value={data.stats.realizedNetWithSlip.toFixed(3)} cls={pnlClass(data.stats.realizedNetWithSlip)} />
+            <Stat
+              label="反向世界对照（镜像净利）"
+              value={data.stats.reverseWorldPnl.toFixed(3)}
+              cls={pnlClass(data.stats.reverseWorldPnl)}
+              title="Task 83：同一批交易若反向跟随执行的理论净利 = -净利；模型在强确认/过度延伸处入场、投降处离场的错位，就是反向世界的盈利来源"
+            />
             <Stat label="累计手续费" value={data.stats.feePaid.toFixed(3)} />
             <Stat label="ROI" value={fmtPct(data.stats.roiPct)} cls={pnlClass(data.stats.roiPct)} />
             <Stat label="当前回撤" value={fmtPct(data.account.currentDrawdownPct)} cls={data.account.currentDrawdownPct > 5 ? 'text-down' : 'text-muted-foreground'} />

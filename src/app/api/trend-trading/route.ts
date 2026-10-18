@@ -148,6 +148,8 @@ export async function GET() {
           startedAt: engine.autoTrader.startedAt,
           lastTickAt: engine.autoTrader.lastTick,
           lastError: engine.autoTrader.lastErr,
+          // Task 82：实际运行算法（与 config.strategyId 不同 = 装配失配，UI 显式提示）
+          runningStrategyId: engine.autoTrader.runningStrategyId,
           trendSignalCount: signals.length,
           trendLastScanAt: engine.trendWatch.snapshot(now).stats.lastScanAt,
         },
@@ -178,6 +180,10 @@ export async function GET() {
         },
         stats: {
           realizedNetWithSlip: netWithSlipSum,
+          // Task 83：反向世界对照（同一批交易若镜像执行的理论净利 = -净利）——
+          // 用户定版提醒：反向能赚钱的原因（模型在强确认/过度延伸处入场、在投降处离场）
+          // 必须始终可见，算法演进不得丢失这个双世界视角
+          reverseWorldPnl: -netWithSlipSum,
           feePaid: feeAgg?._sum.fee ?? 0,
           winRate: decided > 0 ? (wins / decided) * 100 : 0,
           closedCount,
