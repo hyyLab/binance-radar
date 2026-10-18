@@ -770,3 +770,19 @@ Stage Summary:
 - 机制认知升级：①本环境 Turbopack server 端 lib 链热重载不可靠——改 lib 代码后必须进程重启，HMR 不算数；②$disconnect 惰性重连可救 readonly 坏连接（自愈依据）；③1032 的具体触发方式未复现（cp+mv/dd 回写均不触发），但自愈不依赖触发方式——断开重连对任意文件替换形态有效
 - 经验：「写报 1032 且文件可直写」→ bump db 单例（无自愈代码时）；有自愈代码后 → 等 30 秒即可
 - 遗留：无（用户重启会话后全部生效）
+---
+Task ID: 78-b
+Agent: main
+Task: 用户报告「还是存在问题 而且无法平仓」——1032 readonly 未消失，排查并原地恢复
+
+Work Log:
+- 定性三证据：①运行中 dev 链路进程为 05:33 启动（Task 78 提交 09:01 才落盘），内存中无自愈代码；②db/custom.db 文件系统级可写（python BEGIN IMMEDIATE 成功）；③全量 /proc fd 扫描铁证——next-server (PID 1939) 持有 5 个 fd 全部指向 db/custom.db (deleted)，快照替换文件后进程持已删除 inode，与 Task 54/70/78 机制完全吻合
+- 约束复测：本会话 Bash 后台进程依旧活不过命令边界（setsid+nohup sleep 9999 被杀）；dev.sh 无守护循环（启动后即退出）；start.sh 里 dev.sh 在后台子壳运行、start.sh 本体已 exec caddy → 杀 dev server 不会带走容器，但也无自动重启
+- 修复路径（新发现）：next 16 dev 对 next.config.ts 变更会自动重启 server——重启由 next 自身监督链完成（bun 1921→bash 1924→node 1925 全程存活，仅 next-server 1939→4880 换血），不依赖 Bash 工具后台进程。给 next.config.ts 加注释行触发
+- 结果：新 next-server fd 指向当前健康 inode（无 deleted 后缀）；重启后 28 秒平仓成功落库（TIAUSDT MANUAL +7.02，side=LONG/signalSide=SHORT/reversed=True 语义自洽）；lastError=None 持续多轮 tick；近 400 行日志 0 次 readonly/1032；库中 1 OPEN（ASTER SHORT）↔ 1 OPEN meta（模型侧 LONG）零幽灵
+- 收尾：next.config.ts 注释留痕 commit 7aab69d 已推送 origin/main
+
+Stage Summary:
+- 交付：原地根治 1032——不重启会话、不动容器，借 next dev 的 config 变更自动重启换血 next-server，加载 Task 78 自愈代码（db v4 + engine v27 + selfHealIfReadonly）；未来平台快照再破坏连接时 30 秒内自动恢复
+- 机制新增留痕：①1032 进程级铁证可用 /proc/*/fd 扫 deleted inode 确认；②无法重启会话时，touch next.config.ts 是本环境唯一不依赖 Bash 后台进程的 server 换血方式；③用户平仓失败属写路径被 1032 挡，连接恢复后重试即成功，无需代码改动
+- 遗留：无（反向跟随开启中，ASTER 镜像仓由引擎正常管理）
