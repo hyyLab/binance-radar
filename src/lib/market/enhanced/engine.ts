@@ -500,6 +500,10 @@ function spikeFixedLabel(d: Detection): string {
 }
 
 // ============ 单例（globalThis 驻留，HMR 不重复启动） ==========
+// v22（Task 72）：事件入场拒绝透明化——major-p1 事件路径每个有信息量的拒绝分支返回带原因的
+//   StrategyMajorEventRejection（P1 过期/流动性不足/轮次上限/假突破未回收/再入场条件不满足等），
+//   autoTrader 事件循环捕获后以「策略不入场：原因」写进「最近跳过」（60s/事件/原因 节流，
+//   防止 1s 事件循环刷屏）。与信号路径 recordSkip 语义对齐。改行为必 bump key。
 // v21（Task 69）：重大异动突破 v1——MAJOR P1 事件独立入口（不依赖趋势池/UTE），
 //   1 秒事件循环、直接模拟入场、平台/加速/假突破分类、结构止损/硬止损/移动止盈，
 //   同一事件按新价格位移允许再次入场；复用公共模拟成交、资金、手续费、滑点、幂等与强平。
@@ -606,6 +610,7 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarEnhanced_v19?: EnhancedEngine; // v19（Task 67）：仓位划分按配置舱位数（1 舱满配 95%、N 舱各 95%/N）
   __binanceRadarEnhanced_v20?: EnhancedEngine; // v20（Task 68）：UTE 长周期化 + short-swing 再入场解禁
   __binanceRadarEnhanced_v21?: EnhancedEngine; // v21（Task 69）：MAJOR P1 event-driven breakout
+  __binanceRadarEnhanced_v22?: EnhancedEngine; // v22（Task 72）：事件拒绝原因进「最近跳过」
 };
 
 function pickLegacyEngine(
@@ -631,9 +636,11 @@ function pickLegacyEngine(
     __binanceRadarEnhanced_v19?: EnhancedEngine;
     __binanceRadarEnhanced_v20?: EnhancedEngine;
     __binanceRadarEnhanced_v21?: EnhancedEngine;
+    __binanceRadarEnhanced_v22?: EnhancedEngine;
   },
 ): EnhancedEngine | undefined {
   return (
+    g.__binanceRadarEnhanced_v22 ??
     g.__binanceRadarEnhanced_v21 ??
     g.__binanceRadarEnhanced_v20 ??
     g.__binanceRadarEnhanced_v19 ??
@@ -685,20 +692,20 @@ function stopLegacyEngine(old: EnhancedEngine | undefined): void {
 
 /** 每次读取都取 globalThis 上的当前实例（支持 ?reset=1 热替换，路由不依赖模块级常量） */
 export function getEnhancedEngine(): EnhancedEngine {
-  const existing = g.__binanceRadarEnhanced_v21;
+  const existing = g.__binanceRadarEnhanced_v22;
   if (existing) return existing;
   const legacy = pickLegacyEngine(g);
   if (legacy) stopLegacyEngine(legacy);
   const fresh = new EnhancedEngine(carryStoreOf(legacy));
-  g.__binanceRadarEnhanced_v21 = fresh;
+  g.__binanceRadarEnhanced_v22 = fresh;
   return fresh;
 }
 
 /** 热重置：停掉旧实例定时器，携带「同市场」K 线仓库创建新实例（应用新代码，不再重复回填） */
 export function resetEnhancedEngine(): EnhancedEngine {
-  const old = g.__binanceRadarEnhanced_v21 ?? pickLegacyEngine(g);
+  const old = g.__binanceRadarEnhanced_v22 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v21 = fresh;
+  g.__binanceRadarEnhanced_v22 = fresh;
   return fresh;
 }

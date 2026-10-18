@@ -61,6 +61,22 @@ export interface StrategyMajorEventEntryVerdict extends StrategyEntryVerdict {
   metadata: Record<string, unknown>;
 }
 
+/**
+ * Task 72：事件入场拒绝结论（want=false）。事件路径的拒绝不再静默——reason 由
+ * AutoPaperTrader 以「策略不入场：原因」写进「最近跳过」面板（与信号路径同语义）。
+ */
+export interface StrategyMajorEventRejection {
+  want: false;
+  side: null;
+  /** 拒绝无模式标签，固定 '-' */
+  modeTag: string;
+  /** 中文拒绝原因（进「最近跳过」面板与审计） */
+  reason: string;
+}
+
+/** 事件入场评估完整结果：通过 = 完整 verdict（带 eventCycleId/metadata）；拒绝 = 仅带原因 */
+export type StrategyMajorEventEntryResult = StrategyMajorEventEntryVerdict | StrategyMajorEventRejection;
+
 /** 持仓上下文（策略离场评估用；来自 PaperPosition 当前快照） */
 export interface StrategyPositionCtx {
   entryPrice: number;
@@ -91,7 +107,7 @@ export interface TrendStrategy {
   /** True when entry is driven by live anomaly events instead of trend-pool signals. */
   readonly eventDriven?: boolean;
   /** Optional event-driven entry path; shared AutoPaperTrader still owns execution and safety. */
-  evaluateMajorEventEntry?(input: StrategyMajorEventEntryInput): StrategyMajorEventEntryVerdict | null;
+  evaluateMajorEventEntry?(input: StrategyMajorEventEntryInput): StrategyMajorEventEntryResult | null;
 
   /**
    * 行情采样：每 tick 对池内/持仓 symbol 调用（mark>0 才会调用）。

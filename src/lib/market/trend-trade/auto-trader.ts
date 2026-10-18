@@ -148,6 +148,8 @@ export class AutoPaperTrader {
 
   /** 跳过记录（内存审计；接口可见最近 50 条） */
   private skips: SkipRecord[] = [];
+  /** Task 72：事件路径拒绝去重（eventId → 最近原因/时刻）；同因 60s 一条，原因变化立即记 */
+  private eventSkips = new Map<string, { reason: string; at: number }>();
   opens = 0;
   closes = 0;
 
@@ -549,7 +551,12 @@ export class AutoPaperTrader {
         const lastClose = await this.repo.lastCloseAt(event.symbol);
         const ctx = this.strategyCtx(now, mark, cfg, eq, openSymbols, lastClose);
         const eventVerdict = evaluateMajorEventEntry({ event, candles, quoteVolume24h, ctx });
-        if (!eventVerdict || !eventVerdict.want || !eventVerdict.side) continue;
+        if (!eventVerdict || !eventVerdict.want || !eventVerdict.side) {
+          // Task 72：事件路径拒绝不再静默——原因进「最近跳过」（与信号路径「策略不入场」同语义；
+          // 事件循环 1s 一跑，同一事件同一原因会反复评估，60s 节流防刷屏）
+          this.recordEventSkip(event, `策略不入场：${eventVerdict?.reason ?? '事件未通过策略门槛'}`);
+          continue;
+        }
 
         const rKey = roundKey(eventVerdict.eventCycleId, strategy.nextRound(event.symbol, eventVerdict.eventCycleId));
         const signal = this.majorEventSignal(event, eventVerdict, candles, now);
@@ -1381,6 +1388,24 @@ export class AutoPaperTrader {
   private pushSkip(symbol: string, reason: string, cycleId?: string): void {
     this.skips.unshift({ t: Date.now(), symbol, reason, cycleId });
     if (this.skips.length > 200) this.skips.length = 200;
+  }
+
+  /**
+   * Task 72：事件路径拒绝记录（带节流去重）。事件循环每 1s 对每个活跃 MAJOR P1 事件重复
+   * 评估：同一事件同一原因 60s 只记一条、原因变化立即记录；memo 超 64 条时清理 10 分钟前
+   * 的旧键防泄漏。cycleId 留空（事件周期键在策略内部，面板展示以原因为主）。
+   */
+  private recordEventSkip(event: { id: string; symbol: string }, reason: string): void {
+    const now = Date.now();
+    if (this.eventSkips.size > 64) {
+      for (const [key, memo] of this.eventSkips) {
+        if (now - memo.at > 600_000) this.eventSkips.delete(key);
+      }
+    }
+    const prev = this.eventSkips.get(event.id);
+    if (prev && prev.reason === reason && now - prev.at < 60_000) return;
+    this.eventSkips.set(event.id, { reason, at: now });
+    this.pushSkip(event.symbol, reason);
   }
 
   /** 内存审计（容量/独立性/冷却/门槛等轻量跳过） */

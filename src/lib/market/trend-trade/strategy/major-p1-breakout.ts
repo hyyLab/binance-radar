@@ -11,7 +11,9 @@ import type { TrendTradeMetaRow } from '../repo';
 import type {
   StrategyEntryVerdict,
   StrategyMajorEventEntryInput,
+  StrategyMajorEventEntryResult,
   StrategyMajorEventEntryVerdict,
+  StrategyMajorEventRejection,
   StrategyMarketCtx,
   StrategyExitVerdict,
   TrendStrategy,
@@ -164,6 +166,11 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     return 'MP1:' + event.id + ':' + (event.p1At ?? event.firstAt);
   }
 
+  /** Task 72：带原因的拒绝（reason 由 AutoPaperTrader 记进「最近跳过」，替代静默 null） */
+  private reject(reason: string): StrategyMajorEventRejection {
+    return { want: false, side: null, modeTag: '-', reason };
+  }
+
   private classify(
     event: EnhancedEventDTO,
     candles: Candle1m[],
@@ -223,7 +230,7 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     return { modeTag: 'MAJOR_MOMENTUM', platformHigh, platformLow, rangePct, driftPct, riskMultiplier: 0.5 };
   }
 
-  evaluateMajorEventEntry(input: StrategyMajorEventEntryInput): StrategyMajorEventEntryVerdict | null {
+  evaluateMajorEventEntry(input: StrategyMajorEventEntryInput): StrategyMajorEventEntryResult | null {
     const { event, candles, quoteVolume24h, ctx } = input;
     if (event.state !== 'ACTIVE' || event.level !== 'MAJOR') return null;
 
@@ -238,13 +245,30 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
     const ageMs = ctx.now - p1At;
 
     // First entry must be fresh; same-event re-entry is governed by new directional price evidence.
-    if (currentP1 && (ageMs < 0 || (ageMs > this.params.MP1_MAX_P1_AGE_MS && !sameCycle))) return null;
-    if (!(ctx.mark > 0) || !Number.isFinite(quoteVolume24h) || quoteVolume24h < this.params.MP1_MIN_QV24H) return null;
-    if (!Number.isFinite(event.quoteVolume1m ?? 0) || (event.quoteVolume1m ?? 0) < this.params.MP1_MIN_QV1M) return null;
-    if (ctx.openSymbols.has(event.symbol)) return null;
+    if (currentP1 && (ageMs < 0 || (ageMs > this.params.MP1_MAX_P1_AGE_MS && !sameCycle))) {
+      return this.reject(ageMs < 0
+        ? `P1 时间异常：年龄 ${ageMs}ms（时钟偏斜）`
+        : `P1 已过期：年龄 ${ageMs}ms 超过新鲜窗口 ${this.params.MP1_MAX_P1_AGE_MS}ms`);
+    }
+    if (!(ctx.mark > 0)) return this.reject('标记价不可用（不开仓）');
+    if (!Number.isFinite(quoteVolume24h) || quoteVolume24h < this.params.MP1_MIN_QV24H) {
+      return this.reject(
+        `24h 成交额不足：${Math.round(quoteVolume24h || 0).toLocaleString('en-US')} USDT`
+        + ` < ${this.params.MP1_MIN_QV24H.toLocaleString('en-US')} USDT`,
+      );
+    }
+    if (!Number.isFinite(event.quoteVolume1m ?? 0) || (event.quoteVolume1m ?? 0) < this.params.MP1_MIN_QV1M) {
+      return this.reject(
+        `1m 成交额不足：${Math.round(event.quoteVolume1m ?? 0).toLocaleString('en-US')} USDT`
+        + ` < ${this.params.MP1_MIN_QV1M.toLocaleString('en-US')} USDT`,
+      );
+    }
+    if (ctx.openSymbols.has(event.symbol)) return this.reject('该币种已有 OPEN 持仓');
 
     const round = this.nextRound(event.symbol, cycleId);
-    if (round > this.params.MP1_MAX_ROUNDS_PER_EVENT) return null;
+    if (round > this.params.MP1_MAX_ROUNDS_PER_EVENT) {
+      return this.reject(`本事件轮次已达上限 ${this.params.MP1_MAX_ROUNDS_PER_EVENT}（round=${round}）`);
+    }
 
     let side: 'LONG' | 'SHORT' = event.dir === 'UP' ? 'LONG' : 'SHORT';
     let modeTag = '';
@@ -258,12 +282,15 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
       const baseline = finiteOrNull(event.breakout.baseline);
       const previousTradeStopped =
         sameCycle && state.round >= 1 && state.lastExitReason === 'STOP_LOSS' && state.lastExitPrice != null;
-      if (!(baseline != null && baseline > 0 && previousTradeStopped)) return null;
+      if (!(baseline != null && baseline > 0 && previousTradeStopped)) {
+        return this.reject('假突破反手未就绪：需有效基准线且上一轮以止损离场');
+      }
       const returnedInside = event.dir === 'UP'
         ? ctx.mark <= baseline * (1 - this.params.MP1_BREAKOUT_FAILURE_BACK_IN_PCT / 100)
         : ctx.mark >= baseline * (1 + this.params.MP1_BREAKOUT_FAILURE_BACK_IN_PCT / 100);
       side = event.dir === 'UP' ? 'SHORT' : 'LONG';
-      if (!returnedInside || state.lastEntrySide === side) return null;
+      if (!returnedInside) return this.reject('假突破未回收：价格未回到突破基准内侧');
+      if (state.lastEntrySide === side) return this.reject('假突破反手方向与上一轮相同');
       modeTag = 'FALSE_BREAKOUT_REVERSAL';
       riskMultiplier = 0.5;
     } else {
@@ -277,18 +304,32 @@ export class MajorP1BreakoutStrategy implements TrendStrategy {
 
       if (event.breakout.status !== 'CONFIRMED' && event.direction.tendency !== 'UNKNOWN') {
         if ((event.dir === 'UP' && event.direction.tendency === 'SHORT') ||
-            (event.dir === 'DOWN' && event.direction.tendency === 'LONG')) return null;
+            (event.dir === 'DOWN' && event.direction.tendency === 'LONG')) {
+          return this.reject(`突破方向与事件短期倾向冲突（dir=${event.dir}，tendency=${event.direction.tendency}）`);
+        }
       }
     }
 
     if (sameCycle && state.round > 0) {
-      if (state.lastExitAt == null || ctx.now - state.lastExitAt < this.params.MP1_REENTRY_MIN_GAP_MS) return null;
+      if (state.lastExitAt == null) return this.reject('同事件再入场缺少上次离场时刻');
+      if (ctx.now - state.lastExitAt < this.params.MP1_REENTRY_MIN_GAP_MS) {
+        return this.reject(
+          `再入场间隔不足：距上次离场 ${ctx.now - state.lastExitAt}ms < ${this.params.MP1_REENTRY_MIN_GAP_MS}ms`,
+        );
+      }
       const confirmedFailureReverse =
         isFalseBreakout && state.lastExitReason === 'STOP_LOSS' &&
         state.lastEntrySide != null && state.lastEntrySide !== side;
       if (!confirmedFailureReverse) {
-        if (state.lastEntrySide !== side || !(state.lastExitPrice != null && state.lastExitPrice > 0)) return null;
-        if (signedPriceMovePct(side, state.lastExitPrice, ctx.mark) < this.params.MP1_REENTRY_MOVE_PCT) return null;
+        if (state.lastEntrySide !== side || !(state.lastExitPrice != null && state.lastExitPrice > 0)) {
+          return this.reject('再入场未就绪：需与上一轮同向且上一轮有有效离场价');
+        }
+        if (signedPriceMovePct(side, state.lastExitPrice, ctx.mark) < this.params.MP1_REENTRY_MOVE_PCT) {
+          return this.reject(
+            `再入场证据不足：自上次离场价顺向再走 ${this.params.MP1_REENTRY_MOVE_PCT}% 才追入`
+            + `（当前 ${signedPriceMovePct(side, state.lastExitPrice, ctx.mark).toFixed(2)}%）`,
+          );
+        }
       }
     }
 
