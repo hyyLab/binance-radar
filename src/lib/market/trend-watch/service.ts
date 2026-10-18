@@ -741,6 +741,8 @@ export class TrendWatchService {
           )
         : 0,
       confirmCount: ute?.consecutiveObservations ?? 0,
+      // 将 UTE 引擎原始五因子完整透传；策略层可读取，但不得重算或覆盖方向/评分。
+      uteEvidence: ute?.assessment.features ?? null,
       features:
         vol ?? {
           atr: 0, atrPct: 0, realizedVolPct: 0, volPercentile: -1, volRegime: 'NORMAL',
