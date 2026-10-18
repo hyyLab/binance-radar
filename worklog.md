@@ -730,3 +730,22 @@ Stage Summary:
 - 代码=3384d09（含 Task 76 全部修复）、活动库=实盘库（114 笔历史+5 持仓+reverseMode 列+零幽灵记录），二者均验证健康
 - 遗留：dev server 常驻需用户重启会话——重启时 prestop 将当前项目状态（新代码+修复库）打包 repo.tar，下次 boot 由 start.sh→dev.sh 自动拉起服务，即恢复完整可用状态
 - 备份留痕：db/custom.db.prepull1018.bak（回滚环境实盘库快照，与现活动库同源）
+
+---
+Task ID: 77
+Agent: main
+Task: 用户报告——反向开关开启后，历史记录里显示的还是正常（信号）方向，要求历史记录方向一并反向（按实际执行方向显示）
+
+Work Log:
+- 现场核对：reverseMode=1（用户已开反向）；库中反向期间开仓的记录 TrendTradeMeta.side=SHORT（模型信号侧）vs PaperPosition.side=LONG（真实执行侧）——历史明细 API 输出 meta.side，故历史显示信号方向、与实际仓位相反
+- 设计确认：Task 75 代码注释明确 meta.side 保持模型侧是刻意设计（evaluateExit/REVERSE_CONFIRMED/再入场/轮次等策略逻辑全按模型语义运转，不可改写）；选择输出层修正而非加列/回填——trades API 本就 join PaperPosition，执行侧随时可得，PaperPosition.side 永远是事实方向，零迁移
+- 修复（scripts/task77_history_exec_side.py 三处锚定补丁）：① trades API 列表 side=pos.side（执行方向）+ 新增 signalSide=m.side（模型信号侧）+ reversed（两者不一致标记）——历史卡片、K线开仓价线颜色/箭头方向/上下标记位置随之自动正确 ② use-trend-trade.ts TrendTradeRow 补 signalSide/reversed 字段与语义注释 ③ 前端历史卡片（移动+桌面两处）方向字旁加「反」徽标（仅 reversed 时显示，title=「反向跟随：模型信号X → 实际执行Y」）
+- 顺手修复存量失败：CP1/CP2（console-params 按算法过滤）基线即 fail——Task 75 给 infra 域加第4参数 reverseMode 后断言未同步（期望 3 项实际 4 项）；scripts/task77_cp_assert_fix.py 更新 INFRA 注入与断言（101/101 全绿）
+- 排查插曲（重要经验）：sed/cat -A 显示总览 route.ts 42 行疑似语法错误（[m 被吞），od -c 字节级核对 + Read 工具 + 三版本 md5 一致——文件完好，是 Bash 工具显示层吞字符异常；显示可疑时必须 od/Read 双重验证，勿信单次管道输出
+- 验证：tsc 改动文件零报错、eslint 干净、bun test 101/101 全绿、next build 成功；单命令 dev server 线上验证（scripts/verify-task77.sh）：trades API 返回反向期间已平仓的 ERA/INJ —— side=LONG（执行）/signalSide=SHORT（信号）/reversed=True，语义自洽（side==signalSide ⇔ !reversed）True；总览持仓卡（ASTER SHORT/TIA LONG）与库逐一对齐；首页 200
+- 决策链还原区不改：detail.decisions 原样展示决策 JSON（Task 75 起已含 reverseMode/modelSide/execSide 完整语义），meta 相位/评分/依据属模型世界语义，保留
+
+Stage Summary:
+- 交付：历史记录方向真值化——side=实际执行方向（与 PaperPosition/K线/盈亏同源），模型信号侧以 signalSide 保留供审计，reversed 徽标可视化镜像关系；CP1/CP2 存量断言修复，101/101 全绿
+- 语义分层清晰化：执行层（PaperPosition/历史/K线）=执行方向；策略层（TrendTradeMeta.side/决策链/退出判断）=模型信号方向；两层经 reversed 字段桥接
+- 遗留：无（auto-trader/repo 零改动，无需引擎单例 bump；行内 commit 1043b37 已推送）
