@@ -6,7 +6,7 @@
 
 ```
 strategy/
-├── types.ts             # TrendStrategy 接口契约（11 个成员；数据结构 StrategyMarketCtx 等）
+├── types.ts             # TrendStrategy 接口契约（含可选生命周期覆盖；数据结构 StrategyMarketCtx 等）
 ├── registry.ts          # 注册表：唯一接入入口 + 已注册算法清单（文件头注释）
 ├── short-swing.ts       # 短周期套利 v1（默认算法）：确认+评分/ER 门槛+5m 背景分级
 │                        #   +脉冲末端不追+首轮新鲜窗+冲高落袋；走弱先走、同周期走强可再入场（≤2 轮）
