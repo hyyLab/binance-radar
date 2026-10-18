@@ -712,3 +712,21 @@ Stage Summary:
 - 重置按钮清仓逻辑经查无恙（DB 证据），用户所见「已达最大持仓数 2」为跳过面板幽灵记录——清场类操作（重置/换持仓数/切算法）现在都会同步清空跳过面板
 - 重置全程持 tick 屏障，杜绝重置期间事件循环凭空开仓；换持仓数量现在会作废旧待入场（容量槽即刻释放）
 - 经验：查库先核对 TREND_TRADE.ACCOUNT_NAME='trend-auto-v1'；「最近跳过」是内存态，清场语义必须包含清它
+
+---
+Task ID: 76-b（环境回滚恢复）
+Agent: main
+Task: 用户报告环境回滚，要求从远端最新推送 3384d09（Task 76 修复）拉取最新版本并恢复运行环境
+
+Work Log:
+- 诊断：容器被回滚到 Task 71 时代快照（本地 HEAD=500b14a+自动检查点 ef12309），远端 origin/main 已含 Task 76 修复提交 3384d09；核对 ef12309 仅为文件权限/db 自动检查点，无有价值改动，弃用
+- 拉取：git fetch + git reset --hard origin/main → HEAD=3384d09（fix(task76): 重置/清场链路——tick 屏障防重置期凭空开仓、跳过面板清空除幽灵记录、换仓数作废待入场）
+- db 抢救与选型：reset --hard 覆盖 db/custom.db（触发 Prisma readonly，Task 54 机制留痕的正确解法是 bump db 单例，本次因服务已被 kill 走换库路径）；换库前备份 db/custom.db.prepull1018.bak。对比两库：仓库版（仅 4 笔平仓、1 OPEN meta↔1 OPEN pos 一致）vs 回滚环境实盘库（114 笔平仓、119 已转换入场、5 OPEN meta↔5 OPEN pos 一一对应、无幽灵无裸仓位）→ 采用实盘库为活动库
+- schema 兼容：实盘库缺 Task 75 新增列 TrendAutoConfig.reverseMode（prisma schema 未声明，repo.ts ensureSchema 走 raw SQL 幂等补列）→ 手动 ALTER TABLE 补列（INTEGER DEFAULT 0）确保启动即兼容；补列后配置行 RUNNING/universal-trend-v1/maxPositions=8/reverseMode=0
+- 环境机制新发现（重要留痕）：本会话经 Bash 工具启动的一切后台进程（setsid+nohup+disown 一律）活不过命令边界（sleep 1234 跨命令存活实验证实），tmux/screen/at/cron 均不可用；常驻服务只能由容器入口 /start.sh → .zscripts/dev.sh 启动（挂在 tini/caddy 进程树下）；另：git reset --hard 覆盖被进程持有的 db 会触发 readonly（同 Task 70 教训，勿在服务运行中覆盖 db 文件）
+- 单命令内全量验证（scripts/verify-after-pull.sh 留痕）：dev server 3s 就绪、GET / 200、GET /api/trend-trading ok=true、strategyId=universal-trend-v1/maxPositions=8、5 个 OPEN 持仓（ERA LONG/EPIC SHORT/AVA SHORT/SUI LONG/WAL LONG）与库完全一致、lastError=null（写路径健康，readonly 根除；mode 在响应顶层、reverseMode 在 consoleParams 内，验证脚本初版取错层级非缺陷）
+
+Stage Summary:
+- 代码=3384d09（含 Task 76 全部修复）、活动库=实盘库（114 笔历史+5 持仓+reverseMode 列+零幽灵记录），二者均验证健康
+- 遗留：dev server 常驻需用户重启会话——重启时 prestop 将当前项目状态（新代码+修复库）打包 repo.tar，下次 boot 由 start.sh→dev.sh 自动拉起服务，即恢复完整可用状态
+- 备份留痕：db/custom.db.prepull1018.bak（回滚环境实盘库快照，与现活动库同源）
