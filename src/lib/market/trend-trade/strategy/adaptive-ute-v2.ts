@@ -34,6 +34,7 @@ export const ADAPTIVE_UTE_V2 = {
   /** 反转模式至少达到的 UTE 连续观察成熟度（极强证据有独立放行条件） */
   REVERSAL_MIN_CONFIRM_COUNT: 4,
   REVERSAL_MIN_STRONG_SCORE: 75,
+  REVERSAL_LATE_EXHAUSTION_MIN_SCORE: 70,
   REVERSAL_MIN_STRONG_STRENGTH: 0.75,
   /** 至少需要两项反转线索，其中至少一项必须是结构 / 影线 / HTF 主证据 */
   REVERSAL_MIN_CUES: 2,
@@ -178,7 +179,7 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
     // 随后价格反弹/回撤。它不是「高分就反做」：还要求成熟信号与极端扩张共现衰减证据。
     const lateMoveExhaustion =
       mature &&
-      signal.score >= this.params.REVERSAL_MIN_STRONG_SCORE - 5 &&
+      signal.score >= this.params.REVERSAL_LATE_EXHAUSTION_MIN_SCORE &&
       rangeClimax &&
       (dryVolume || erCollapse);
     const primaryCueCount = [
@@ -186,7 +187,7 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
     ].filter(Boolean).length;
     const cueCount = [
       rejectionWick, counterBreakout, failedBreakout, h5Opposed, h15Opposed,
-      dryVolume, erCollapse, rangeClimax, lateMoveExhaustion,
+      dryVolume, erCollapse, rangeClimax,
     ].filter(Boolean).length;
 
     const cueNames = [
