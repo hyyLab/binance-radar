@@ -38,7 +38,7 @@ export function ParamsConsole({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="w-[min(680px,96vw)] max-h-[88vh] overflow-y-auto">
+      <DialogContent className="max-h-[92dvh] w-[min(680px,calc(100vw-1rem))] gap-3 overflow-y-auto p-4 sm:w-[min(680px,96vw)] sm:gap-4 sm:p-6 max-sm:bottom-0 max-sm:left-0 max-sm:right-0 max-sm:top-auto max-sm:w-screen max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0">
         <DialogTitle className="flex items-center gap-1.5 text-lg font-bold">
           <SlidersHorizontal className="h-4 w-4 text-gold" /> 自动开仓参数控制台
         </DialogTitle>
@@ -116,13 +116,13 @@ function ParamsForm({
       {/* Task 62：当前算法未注册控制台参数（如通用趋势引擎用代码默认参数）时明确告知，
           避免用户以为参数丢了——此时仅展示基础设施组 */}
       {!params.some((p) => p.scope === 'strategy') && (
-        <div className="rounded-lg border border-border/60 bg-secondary/10 px-2.5 py-2 text-[11px] leading-relaxed text-muted-foreground">
+        <div className="rounded-lg border border-border/60 bg-secondary/10 px-3 py-2.5 text-[11px] leading-relaxed text-muted-foreground sm:px-2.5 sm:py-2">
           当前算法{strategyName ? `「${strategyName}」` : ''}使用内置默认参数，暂无控制台可调项；
           下方为全部算法共享的基础设施参数。
         </div>
       )}
       {groups.map((g) => (
-        <div key={g.group} className="rounded-lg border border-border/60 bg-secondary/10 p-2.5">
+        <div key={g.group} className="rounded-lg border border-border/60 bg-secondary/10 p-3 sm:p-2.5">
           <div className="mb-1.5 text-[11px] font-bold text-foreground/80">{g.group}</div>
           <div className="space-y-2.5">
             {g.items.map((p) => {
@@ -135,7 +135,7 @@ function ParamsForm({
                   (p.max != null && curNum > p.max));
               const differs = p.type === 'number' ? Number(d) !== p.default : d !== p.default;
               return (
-                <div key={p.key} className="flex items-start gap-2.5">
+                <div key={p.key} className="flex flex-col gap-1.5 sm:flex-row sm:items-start sm:gap-2.5">
                   <div className="min-w-0 flex-1">
                     <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold">
                       {p.label}
@@ -162,13 +162,13 @@ function ParamsForm({
                           inputMode="decimal"
                           aria-label={p.label}
                           className={cn(
-                            'h-7 w-[92px] text-right font-mono text-[11px] tabular-nums',
+                            'h-9 w-full flex-1 text-right font-mono text-base tabular-nums sm:h-7 sm:w-[92px] sm:flex-none sm:text-[11px]',
                             invalid && 'border-down',
                           )}
                         />
                         <span className="w-6 text-[10px] text-muted-foreground">{p.unit ?? ''}</span>
                         <button
-                          className="rounded border border-border px-1 py-0.5 text-[10px] text-muted-foreground hover:text-gold disabled:opacity-40"
+                          className="inline-flex h-9 items-center rounded border border-border px-3 text-[11px] text-muted-foreground hover:text-gold disabled:opacity-40 sm:h-auto sm:px-1 sm:py-0.5 sm:text-[10px]"
                           disabled={!p.overridden || busy}
                           onClick={() => setDraft((s) => ({ ...s, [p.key]: String(p.default) }))}
                           title={`恢复默认 ${typeof p.default === 'number' ? p.default : p.default}`}
@@ -195,9 +195,9 @@ function ParamsForm({
         </div>
       ))}
 
-      <div className="flex items-center gap-2">
+      <div className="flex flex-wrap items-center gap-2">
         <button
-          className="rounded border border-border px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:border-down/50 hover:text-down disabled:opacity-40"
+          className="inline-flex h-9 items-center rounded border border-border px-3 text-xs font-semibold text-muted-foreground hover:border-down/50 hover:text-down disabled:opacity-40 sm:h-auto sm:px-2.5 sm:py-1.5 sm:text-[11px]"
           disabled={busy}
           onClick={onReset}
           title="恢复全部参数为代码默认值（二次确认回开、冷却回默认；轮次状态保留）"
@@ -212,7 +212,7 @@ function ParamsForm({
           )}
         </div>
         <button
-          className="rounded-md bg-gold px-4 py-1.5 text-xs font-bold text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          className="h-10 w-full rounded-md bg-gold text-sm font-bold text-background transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40 sm:h-auto sm:w-auto sm:px-4 sm:py-1.5 sm:text-xs"
           disabled={busy || Object.values(draft).some((v) => v === '')}
           onClick={save}
         >

@@ -22,7 +22,7 @@ export default function TrendTradingPage() {
           </div>
           <Link
             href="/"
-            className="ml-auto rounded border border-border px-2.5 py-1 text-xs text-muted-foreground hover:text-foreground"
+            className="ml-auto inline-flex h-9 items-center rounded border border-border px-3 text-xs text-muted-foreground hover:text-foreground sm:h-8"
           >
             ← 返回异动雷达
           </Link>
