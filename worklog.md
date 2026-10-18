@@ -786,3 +786,18 @@ Stage Summary:
 - 交付：原地根治 1032——不重启会话、不动容器，借 next dev 的 config 变更自动重启换血 next-server，加载 Task 78 自愈代码（db v4 + engine v27 + selfHealIfReadonly）；未来平台快照再破坏连接时 30 秒内自动恢复
 - 机制新增留痕：①1032 进程级铁证可用 /proc/*/fd 扫 deleted inode 确认；②无法重启会话时，touch next.config.ts 是本环境唯一不依赖 Bash 后台进程的 server 换血方式；③用户平仓失败属写路径被 1032 挡，连接恢复后重试即成功，无需代码改动
 - 遗留：无（反向跟随开启中，ASTER 镜像仓由引擎正常管理）
+---
+Task ID: 79
+Agent: main
+Task: 用户观察——自动平仓的仓位要等一段时间才进历史记录，手动平仓立刻进；解释原因并优化
+
+Work Log:
+- 定性：后端零差异——closePosition 是手动（closeOne/closeAllManual→MANUAL）与自动（manageExits→TREND_ENDED 等）共用的同一条同步落库路径，meta 状态→CLOSED+closedAt 在同一次调用内写完；差异 100% 在前端——手动平仓走 useTrendTradeControl mutation，onSuccess 立即 invalidateQueries(['trend-trading-history'])；自动平仓不经任何 mutation，历史只能等 useTrendTradeHistory 自身 20s refetchInterval，而持仓列表 5s 就刷掉仓位 → 「仓位已消失、历史迟迟不出现」（平均 ~10s、最差 ~20s）
+- 优化（scripts/task79_history_refresh_patch.py 三处锚定，纯前端）：useTrendTradeHistory 内监听总览 stats.closedCount（route.ts 与历史列表同源计数，历史行集合每变它必变），一变立即 invalidateQueries(['trend-trading-history'])；首次观测不触发（挂载本就拉取）；计数下降（重置清场）同样触发。自动平仓/强平/他处操作的可见延迟 ~20s → ~5s（一次总览轮询内），与手动一致
+- 界限：不改 20s 轮询兜底、不改引擎/后端（无单例 bump、无 next.config 重启需求，客户端 HMR 即时生效）；「END_PENDING 3 根证据确认后才自动平」的开仓前延迟属模型设计，不在此范围
+- 验证：tsc 改动文件零报错、eslint 干净、bun test 101/101、/trend-trading 页面 200 无编译错误
+
+Stage Summary:
+- 交付：历史列表事件驱动失效——closedCount 同源计数监听，自动平仓与手动平仓的历史可见延迟对齐（≤5s vs 原最差 20s+）
+- 留痕：方向无关（多空同一机制）；强平/重置清场等全部非按钮路径顺带覆盖
+- 遗留：无

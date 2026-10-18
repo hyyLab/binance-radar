@@ -2,8 +2,13 @@
 
 // ---------- 趋势自动模拟交易 · 数据 hooks（Task 54 §5） ----------
 // 总览 5s 轮询（持仓/账户/模式）；历史 20s 轮询（筛选条件变化即刷新）。
+// Task 79：自动平仓（趋势结束/反向/策略离场/强平）不经前端 mutation，历史原本
+// 只能等自身 20s 轮询才发现变化——用户看到「仓位已消失、历史迟迟不出现」。
+// 现在监听总览 stats.closedCount（与历史行数同源的计数，5s 轮询内必变），
+// 一变立即失效历史缓存：自动平仓可见延迟 ~20s → ~5s，与手动平仓体验一致。
 // 控制操作用 mutation + 手动失效缓存，按钮态由服务端 mode 驱动。
 
+import { useEffect, useRef } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 
 export interface TrendPositionRow {
@@ -175,6 +180,20 @@ export function useTrendTrading() {
 }
 
 export function useTrendTradeHistory(symbol: string, sort: string, order: string) {
+  const queryClient = useQueryClient();
+  // Task 79：closedCount 变化 ⇒ 历史行集合必变（同源计数）⇒ 立即失效历史缓存。
+  // 首次观测不触发（挂载时查询本就会拉取）；重置清场使计数下降时同样触发。
+  const closedCount = useTrendTrading().data?.stats.closedCount;
+  const lastClosedCountRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (closedCount == null) return;
+    const last = lastClosedCountRef.current;
+    lastClosedCountRef.current = closedCount;
+    if (last !== null && last !== closedCount) {
+      void queryClient.invalidateQueries({ queryKey: ['trend-trading-history'] });
+    }
+  }, [closedCount, queryClient]);
+
   return useQuery({
     queryKey: ['trend-trading-history', symbol, sort, order],
     queryFn: async (): Promise<{ ok: boolean; trades: TrendTradeRow[] }> => {
