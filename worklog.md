@@ -615,3 +615,21 @@ Stage Summary:
 - 根因是显示层硬编码旧文案而非开仓逻辑：开仓数学（舱位均分×形态倍率）全程按设计执行（含重置后 ICNT 6.53U=100×11.875%×0.55）
 - 页面现在如实展示单仓比例与倍率说明；重置后「恢复默认参数」会把舱位数回 8 舱（重置端点语义如此，已向用户说明）
 - 教训：文案随公式演进必须跟数据源联动，禁止硬编码派生数值
+
+---
+Task ID: deploy-5 (Task 72)
+Agent: main
+Task: 排查并修复「新算法（major-p1-breakout-v1）没有最近跳过记录」——事件路径拒绝静默问题
+
+Work Log:
+- 根因定位：旧算法（信号路径）拒绝在 auto-trader.ts:1277 有 recordSkip('策略不入场：…') 兜底 → 进「最近跳过」；新算法走事件路径 tickMajorEventEntries，拒绝在 :552 直接 continue，完全静默不记录
+- 跳过列表为全局（recentSkips(50) 不分策略、UI 不过滤），差异纯粹来自两条路径的记录行为不同；列表在内存（200 条），重启即清空
+- scripts/task72_event_skip_reason_patch.py 锚定补丁 24 处替换：types.ts 新增 StrategyMajorEventRejection/StrategyMajorEventEntryResult；major-p1-breakout.ts 10 个有信息量拒绝分支 return this.reject(中文原因)（P1 过期/24h·1m 成交额不足/轮次上限/假突破未回收/反手同向/倾向冲突/再入场间隔与证据不足），2 个预过滤分支保留 null；auto-trader.ts 事件循环捕获拒绝 → recordEventSkip（eventId memo：同因 60s 一条、原因变化立即记、>64 条清 10min 旧键）→ pushSkip；engine.ts 单例 bump v21→v22
+- 验证：tsc/eslint 改动文件零报错；bun 功能测试 4 用例全过（过期 P1/24h 量/1m 量返回带原因拒绝，非 MAJOR 预过滤仍 null）
+- 热替换实证：文件 mtime 1792294230.2 → 引擎 boot 1792294231.8（1.6s 后 v22 接管），换血后事件循环正常开仓 QUSDT LONG（ACCELERATION, riskMultiplier=0.55），API ok=true/RUNNING/lastError=null
+- 提交 5c54d73 推送 origin/main
+
+Stage Summary:
+- 新算法拒绝原因现已进「最近跳过」面板：下一条 MAJOR P1 事件被拒时 UI 即显示「策略不入场：P1 已过期…」等真实原因
+- 节流设计保证 1s 事件循环不刷屏；预过滤（非 P1/非 MAJOR）仍静默避免噪音
+- 后续候选（未被用户回应前不动）：重置后自动暂停开仓
