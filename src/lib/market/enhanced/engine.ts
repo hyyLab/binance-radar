@@ -736,6 +736,6 @@ export function resetEnhancedEngine(): EnhancedEngine {
   const old = g.__binanceRadarEnhanced_v28 ?? pickLegacyEngine(g);
   stopLegacyEngine(old);
   const fresh = new EnhancedEngine(carryStoreOf(old));
-  g.__binanceRadarEnhanced_v27 = fresh;
+  g.__binanceRadarEnhanced_v28 = fresh;
   return fresh;
 }
