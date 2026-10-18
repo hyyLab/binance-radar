@@ -145,6 +145,8 @@ export class AutoPaperTrader {
   startedAt = 0;
   private lastTickAt = 0;
   private lastError: string | null = null;
+  /** Task 78：readonly 自愈去重（断开→惰性重连窗口期内不重复触发） */
+  private readonlyHealing = false;
 
   /** 跳过记录（内存审计；接口可见最近 50 条） */
   private skips: SkipRecord[] = [];
@@ -428,6 +430,7 @@ export class AutoPaperTrader {
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
       console.warn('[trend-auto] reconcile 失败：', this.lastError);
+      void this.selfHealIfReadonly(e);
     }
   }
 
@@ -497,6 +500,7 @@ export class AutoPaperTrader {
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
       console.warn('[trend-auto] tick 失败：', this.lastError);
+      void this.selfHealIfReadonly(e);
     } finally {
       this.ticking = false;
     }
@@ -590,6 +594,7 @@ export class AutoPaperTrader {
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : String(error);
       console.warn('[trend-auto] MAJOR P1 事件循环失败：', this.lastError);
+      void this.selfHealIfReadonly(error);
     } finally {
       this.eventTicking = false;
     }
@@ -1623,6 +1628,28 @@ export class AutoPaperTrader {
   }
 
   /** 最近一次主循环错误（null = 正常） */
+  /**
+   * Task 78：readonly 自愈——平台快照替换 db 文件（内容/锁状态）会让运行中 Prisma 连接
+   * 永久 1032 readonly（Task 54/70/78 三次现场；文件本身可直写）。实测 $disconnect() 后
+   * 惰性重连可恢复写能力（重连重新 open 当前文件并校验锁，scripts/task78_reconnect_probe*.ts）。
+   * 命中 readonly 错误即断开连接，下个 tick 惰性重连自愈；非 readonly 错误零开销返回。
+   */
+  private async selfHealIfReadonly(e: unknown): Promise<void> {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (!/readonly|1032/i.test(msg)) return;
+    if (this.readonlyHealing) return; // 同一轮 healing 进行中，避免并发重复断开
+    this.readonlyHealing = true;
+    try {
+      await db.$disconnect();
+      logDecision('检测到数据库连接 readonly（平台快照替换文件），已断开等待惰性重连自愈（下个 tick 生效）');
+    } catch {
+      /* disconnect 失败忽略——下个 tick 重试 */
+    } finally {
+      // 给惰性重连留出窗口后复位；期间新错误也不会重复断开（连接已在重连路径上）
+      setTimeout(() => (this.readonlyHealing = false), 5_000).unref?.();
+    }
+  }
+
   get lastErr(): string | null {
     return this.lastError;
   }
