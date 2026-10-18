@@ -52,7 +52,7 @@ import {
   type TrendTradeMetaRow,
   type TrendTradeRepo,
 } from './repo';
-import { createStrategy, DEFAULT_STRATEGY_ID } from './strategy/registry';
+import { createStrategy, DEFAULT_STRATEGY_ID, isKnownStrategy } from './strategy/registry';
 import type { StrategyEntryVerdict, StrategyMajorEventEntryVerdict, StrategyMarketCtx, TrendStrategy } from './strategy/types';
 import { parseStrategyParamsMap, sanitizeRuntimeParamsLenient } from './console-params';
 
@@ -135,6 +135,12 @@ export class AutoPaperTrader {
   private strategy: TrendStrategy;
   /** 外部固定注入的策略（测试/定制用）：boot/tick 不按 DB 配置覆盖 */
   private readonly fixedStrategy: boolean;
+  /** Task 82：配置算法无法装配时的失配标记（值 = 装配失败的 strategyId；null = 无失配）。
+   * 场景：进程早于算法上线启动（旧注册表不认识新 id）→ createStrategy 会静默兜底默认算法，
+   * 形成「DB 配置 A、实际运行 B」的隐形错配（UI 读 DB 显示已切换、交易却按旧算法执行）。
+   * 此标记驱动 fail-safe：保留当前实例、暂停新开仓、lastError 持续暴露，直至服务重启
+   * 装配新注册表后自愈。 */
+  private strategyDesync: string | null = null;
 
   private started = false;
   private starting: Promise<void> | null = null;
@@ -234,6 +240,20 @@ export class AutoPaperTrader {
    * 参数解析失败（脏数据）回退代码默认，绝不阻断交易循环。
    */
   private async applyStrategy(strategyId: string): Promise<void> {
+    // Task 82 fail-safe：未知算法拒绝装配（绝不静默兜底）。兜底会制造「配置 A 实际 B」的
+    // 隐形错配——UI 读 DB 显示 A、交易却按 B 执行，比停开新仓危险得多。保留当前实例 +
+    // 置失配标记：新开仓暂停、错误持续可见，等进程重启后新注册表生效（boot 按 DB 配置装配）。
+    if (!isKnownStrategy(strategyId)) {
+      if (this.strategyDesync !== strategyId) {
+        this.strategyDesync = strategyId;
+        logDecision(
+          `拒绝装配未知算法 ${strategyId}（本进程注册表没有该 id，服务可能早于算法上线启动）；` +
+            `保留当前实例 ${this.strategy.id}，新开仓已暂停，请重启服务使新算法生效`,
+        );
+      }
+      return;
+    }
+    this.strategyDesync = null;
     let params: Record<string, unknown> | undefined;
     try {
       const cfgNow = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
@@ -265,6 +285,16 @@ export class AutoPaperTrader {
    * 持仓清场由调用方（control API）先执行——不同算法持仓管理规则不同，不混管。
    */
   async setStrategyId(strategyId: string): Promise<void> {
+    // Task 82：切换前先确认本进程真能装配该算法——否则 DB 写入成功、实例装配静默兜底，
+    // 用户看到「已切换」实际仍在跑旧算法（strong-trend-v1 上线当晚的实测故障：control 路由
+    // 的 isKnownStrategy 用的是路由自己的模块图，HMR 后是新的，验不了本单例的旧注册表；
+    // 必须在实例这边——与装配同一模块图——再验一次）。
+    if (!isKnownStrategy(strategyId)) {
+      throw new Error(
+        `算法 ${strategyId} 未在当前进程注册（服务可能早于该算法上线启动），已拒绝切换。` +
+          `请重启服务后重试；重启后 boot 会按 DB 配置自动装配该算法`,
+      );
+    }
     const current = await this.repo.loadConfig(TREND_TRADE.ACCOUNT_NAME);
     if (current?.strategyId !== strategyId) {
       // Pending confirmations belong to the old strategy and must not block event-driven entries.
@@ -464,10 +494,12 @@ export class AutoPaperTrader {
       // ② 持仓结果采集（§七：MFE/MAE 按当前可用标记价增量更新——任何模式都执行）
       await this.updateOpenStats();
 
-      // ②b 策略自愈：DB 配置的算法与实例不一致（如 control 已写库但实例切换失败）→ 重新装配
+      // ②b 策略自愈：DB 配置的算法与实例不一致（如 control 已写库但实例切换失败）→ 重新装配。
+      // Task 82：装配失败（未知算法）时 applyStrategy 内部置 desync 且只记一次拒绝日志；
+      // 这里只在「真正换上了」时记自愈日志——避免失配死循环每 tick 刷屏（曾实测 10 分钟 62 条）
       if (!this.fixedStrategy && cfg.strategyId && cfg.strategyId !== this.strategy.id) {
         await this.applyStrategy(cfg.strategyId);
-        logDecision(`策略自愈切换 → ${cfg.strategyId}`);
+        if (this.strategy.id === cfg.strategyId) logDecision(`策略自愈切换 → ${cfg.strategyId}`);
       }
 
       // ③ 退出管理（暂停模式也执行：趋势结束/反向确认/策略离场照常执行）
@@ -491,12 +523,18 @@ export class AutoPaperTrader {
         await this.repo.updatePeakEquity(TREND_TRADE.ACCOUNT_NAME, eq.equity);
       }
 
-      // ⑤ 开仓（仅 RUNNING 且数据新鲜；暂停/停止只停新开仓与待入场转换）
-      if (cfg.mode === 'RUNNING' && !this.strategy.eventDriven) {
+      // ⑤ 开仓（仅 RUNNING 且数据新鲜；暂停/停止只停新开仓与待入场转换）。
+      // Task 82：算法失配（配置的算法装配不了）时同样停开新仓——fail-safe：宁可不开，
+      // 也不能用错算法交易；退出管理与强平巡检照常（持仓安全优先）。
+      if (cfg.mode === 'RUNNING' && !this.strategy.eventDriven && !this.strategyDesync) {
         await this.managePendings(bySymbol, cfg, eq); // 先转换已到期的待入场（等一根 K 线复核）
         await this.manageEntries(cfg, signals, eq); // 再为策略想开仓的趋势创建待入场记录
       }
-      this.lastError = null;
+      // Task 82：失配时持续把原因暴露到 service.lastError（总览「最近错误」展示），
+      // 而不是成功路径一律清空——用户必须能看到「配置的算法没在真正运行」
+      this.lastError = this.strategyDesync
+        ? `配置算法 ${this.strategyDesync} 未在当前进程注册，新开仓已暂停（实际运行 ${this.strategy.id}）；请重启服务使新算法生效`
+        : null;
     } catch (e) {
       this.lastError = e instanceof Error ? e.message : String(e);
       console.warn('[trend-auto] tick 失败：', this.lastError);
@@ -1652,6 +1690,11 @@ export class AutoPaperTrader {
 
   get lastErr(): string | null {
     return this.lastError;
+  }
+
+  /** Task 82：配置算法装配失配标记（null = 无失配；测试与诊断用） */
+  get strategyDesyncId(): string | null {
+    return this.strategyDesync;
   }
 
   /** 最近跳过记录（审计：为什么没开仓/为什么跳过） */
