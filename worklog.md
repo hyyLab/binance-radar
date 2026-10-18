@@ -657,3 +657,21 @@ Work Log:
 Stage Summary:
 - 页面全部可见文案已 binance 化，算法逻辑与全部代码注释原样保留
 - 双单例 bump 模式（引擎+采集器同保存）已记入经验：改采集器引用的 lib 常量需两键同 bump
+
+---
+Task ID: deploy-7 (Task 74)
+Agent: main
+Task: 趋势自动模拟交易页移动端体验优化——算法/持仓下拉、参数控制台、控制按钮大小
+
+Work Log:
+- 问题定位（390px 视口）：①头部 7 个控制控件挤一行自动换行、按钮仅 ~26px/11px 字号触控目标过小；②原生 select 11px 字号 px-0.5 内边距点击区域极小（<16px 还触发 iOS 聚焦缩放）；③参数控制台 680px 弹窗压到 96vw，参数行左右挤压、「默认」按钮极小；④头部账户摘要 hidden sm:inline 手机端完全不可见；⑤历史明细 8 列网格手机严重挤压
+- scripts/task74_mobile_view_patch.py（锚定分段重排+类名替换）：控制区移动端 grid-cols-4 三行网格（算法/持仓 span2、暂停/平仓/重置 span2，无空洞），按钮 h-9(36px) text-xs，桌面 sm: 单行 flex 不变；算法/持仓下拉改「透明原生 select 覆盖整块 label」——整块可点、可见层显示当前值+ChevronDown、select 层 text-base(16px) 防 iOS 缩放；头部摘要抽 headerInfo 变量双渲染（移动端独立成行）；TradeRow 移动端两行紧凑卡片（方向/币种/价格/盈亏 + 时间/算法/原因，span 布局规避 button 内 div 嵌套），桌面端 8 列表格行不变、表头 hidden sm:grid；筛选控件 h-8/16px；持仓卡 K线/平仓按钮 h-7；充值/确认弹窗宽 calc(100vw-1rem)；page.tsx 返回按钮 h-9
+- scripts/task74_mobile_console_patch.py：参数控制台移动端全宽底部面板（max-sm bottom-0 w-screen rounded-b-none，桌面居中 680px 不变），max-h 92dvh 适配地址栏/键盘；参数行 flex-col 堆叠、输入框全宽 h-9 16px（桌面回 92px/h-7/11px）；「默认/恢复全部默认」h-9；保存按钮移动端 w-full h-10
+- scripts/task74_exit_label_patch.py：EXIT_REASON_LABEL 补齐策略离场显示映射（STOP_LOSS=硬止损/SPIKE_TAKE=冲高落袋/TRAIL_TAKE=移动止盈/WEAKNESS_EARLY=走弱离场，major-p1 与 universal-trend 的 exit reason 此前显示原始英文）
+- 验证：tsc/eslint 改动文件零报错；agent-browser iPhone 14 视口（390px）实测——首屏网格控制区/账户摘要可见/历史卡片化/参数底部面板（含滚动到底部恢复默认+全宽保存）/退出原因中文化全部正常；1440px 桌面端单行控制区+居中弹窗+8 列表格无回归；API ok/RUNNING/持仓健在/lastError=null
+- 提交 ac0fd56 推送 origin/main
+
+Stage Summary:
+- 移动端三痛点（下拉/参数控制台/按钮大小）全修复：整块触控下拉 + 底部面板参数控制台 + 36px 网格按钮；桌面端布局零回归
+- 纯样式层改动零算法触碰，无单例 bump 需求；display 映射补齐让新算法退出原因可读
+- 截图存 scripts/task74_m_*.png / task74_d_*.png（未入库）
