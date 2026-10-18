@@ -675,3 +675,21 @@ Stage Summary:
 - 移动端三痛点（下拉/参数控制台/按钮大小）全修复：整块触控下拉 + 底部面板参数控制台 + 36px 网格按钮；桌面端布局零回归
 - 纯样式层改动零算法触碰，无单例 bump 需求；display 映射补齐让新算法退出原因可读
 - 截图存 scripts/task74_m_*.png / task74_d_*.png（未入库）
+
+---
+Task ID: deploy-8 (Task 75)
+Agent: main
+Task: ①参数控制台/参数按钮位置回归 ②桌面端下拉弹层白底修复 ③新增反向跟随（镜像执行）接口（全算法生效）
+
+Work Log:
+- 样式回归：参数控制台恢复居中弹窗（去 max-sm 底部面板定位，保留堆叠行/大触控内容优化）；参数按钮恢复控制区第一位（DOM 重排：参数从持仓后移回算法前），移动端网格重排为 参数1 算法3 / 持仓2 充值1 / 暂停2 平仓2 / 重置1；覆盖 select 补回 bg-background text-foreground（Chrome/Edge 原生 options 弹层取 select 自身背景色，Task 74 的 bg-transparent 导致弹层回退白色——computed style 复验 rgb(11,14,17)）
+- 反向跟随设计（用户口径：模型开多→开空、模型硬止损→止盈、模型止盈→止损）：infra 布尔参数 reverseMode（控制台新分组「执行模式（基础设施）」，PARAM_DEFS + 严格/宽松校验 + effectiveRuntimeParams 合并 + TrendAutoConfig.reverseMode 列 ensureSchema 幂等补列 + loadConfig/updateRuntimeParams 读写）
+- 执行层：唯一咽喉点 executeOpen 翻转真实执行侧（execSide = reverse ? flip(side) : side），meta.side 保持模型侧——关键依据：evaluateExit 显式接收 meta.side（auto-trader:769）、REVERSE_CONFIRMED 用 meta.side（:788），策略世界零扰动；平仓按 positionId 跟随模型时机 → 盈亏互为镜像；强平按真实仓位如实模拟（:1376 权益本就按真实 side 计算）；信号/待入场转换/事件/直开四路径全走 executeOpen，天然适应全部算法（含未来新增）
+- 审计与 UI：openDetail 加 reverseMode/modelSide/execSide 快照（签名加 side 参数）+ logDecision「反向跟随执行 模型开多 → 实际开空」；setRuntimeParams/resetRuntimeParams 接线（恢复默认回关）；头部红色「反向跟随」徽标（reverseModeOn）
+- engine 单例 v24→v25（行为变更换血）；scripts/task75_style_revert_patch.py + task75_reverse_mode_patch.py（锚定替换，中途修复全角括号笔误与 2 处锚点计数）
+- 验证：tsc/eslint 零报错；API 链路 ON→DB=1→overview True→logDecision→OFF 回 0；computed style 弹层深色确认；双视口截图（桌面徽标+参数复位、移动端居中控台+新分组+网格）；服务健康 3 持仓健在 lastError=null；提交 833e07e 推送 origin/main
+
+Stage Summary:
+- 反向跟随开关已在参数控制台「执行模式（基础设施）」分组，默认关；开启后对全部算法生效、平仓仍跟随模型（模型止损=我们止盈、模型止盈=我们止损），盈亏与模型镜像
+- 两个用户反馈样式问题（控制台位置、弹层白底）已回归修复；参数按钮复位
+- 注意：反向模式下镜像仓强平风险真实存在（模型大赢单 = 镜像仓可能强平，亏损封顶为保证金）
