@@ -245,6 +245,14 @@ function TradeRow({
       <span className="flex items-center gap-1.5 sm:hidden">
         <span className={cn('shrink-0 font-bold', t.side === 'LONG' ? 'text-up' : 'text-down')}>
           {t.side === 'LONG' ? '多' : '空'}
+          {t.reversed && (
+            <span
+              className="ml-0.5 rounded bg-gold/15 px-0.5 text-[9px] font-semibold text-gold"
+              title={`反向跟随：模型信号${t.signalSide === 'LONG' ? '多' : '空'} → 实际执行${t.side === 'LONG' ? '多' : '空'}`}
+            >
+              反
+            </span>
+          )}
         </span>
         <span
           className="cursor-pointer font-mono font-semibold hover:text-gold"
@@ -299,6 +307,14 @@ function TradeRow({
       </span>
       <span className={cn('hidden font-bold sm:block', t.side === 'LONG' ? 'text-up' : 'text-down')}>
         {t.side === 'LONG' ? '多' : '空'}
+        {t.reversed && (
+          <span
+            className="ml-0.5 rounded bg-gold/15 px-0.5 text-[9px] font-semibold text-gold"
+            title={`反向跟随：模型信号${t.signalSide === 'LONG' ? '多' : '空'} → 实际执行${t.side === 'LONG' ? '多' : '空'}`}
+          >
+            反
+          </span>
+        )}
       </span>
       <span className="hidden truncate text-muted-foreground sm:block">
         {fmtPrice(t.entryPrice)} → {t.exitPrice != null ? fmtPrice(t.exitPrice) : '—'}

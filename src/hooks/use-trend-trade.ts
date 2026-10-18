@@ -129,7 +129,12 @@ export interface TrendTradeRow {
   positionId: string;
   symbol: string;
   base: string;
+  /** 实际执行方向（反向跟随开启时 = 模型信号取反；历史/K线/盈亏展示均按此） */
   side: 'LONG' | 'SHORT';
+  /** Task 77：模型信号方向（反向跟随开启时与 side 互为镜像；正常跟随 = side） */
+  signalSide?: 'LONG' | 'SHORT';
+  /** Task 77：是否反向执行（signalSide ≠ side）——历史卡片显示「反」徽标 */
+  reversed?: boolean;
   /** Task 63：开仓时使用的算法（registry id；历史旧行兜底 short-swing-v1） */
   strategyId?: string;
   /** Task 63：算法展示名（短周期套利 / 通用趋势引擎；历史明细「算法」列） */

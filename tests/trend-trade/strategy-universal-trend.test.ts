@@ -409,18 +409,18 @@ describe('通用趋势引擎 v1 · 状态持久化', () => {
 });
 
 describe('console-params 按算法过滤（Task 62 机制）', () => {
-  const INFRA = { waitBarConfirm: null, cooldownMs: null, marginRatio: null };
+  const INFRA = { waitBarConfirm: null, cooldownMs: null, marginRatio: null, reverseMode: 0 }; // Task 75 起第4项 infra：反向跟随
 
-  test('CP1 universal-trend-v1：strategy 域为空（代码默认参数），仅 infra 三项', () => {
+  test('CP1 universal-trend-v1：strategy 域为空（代码默认参数），仅 infra 四项（Task 75 加 reverseMode）', () => {
     const items = effectiveRuntimeParams('universal-trend-v1', null, INFRA);
     expect(items.some((p) => p.scope === 'strategy')).toBe(false);
-    expect(items.map((p) => p.key).sort()).toEqual(['cooldownMs', 'marginRatio', 'waitBarConfirm']);
+    expect(items.map((p) => p.key).sort()).toEqual(['cooldownMs', 'marginRatio', 'reverseMode', 'waitBarConfirm']);
   });
 
-  test('CP2 short-swing-v1：13 策略参数（Task 66 新增 ENTRY_CHASE_PCT/ENTRY_FRESH_MS）+ 3 infra', () => {
+  test('CP2 short-swing-v1：13 策略参数（Task 66 新增 ENTRY_CHASE_PCT/ENTRY_FRESH_MS）+ 4 infra（Task 75 加 reverseMode）', () => {
     const items = effectiveRuntimeParams('short-swing-v1', null, INFRA);
     expect(items.filter((p) => p.scope === 'strategy').length).toBe(13);
-    expect(items.filter((p) => p.scope === 'infra').length).toBe(3);
+    expect(items.filter((p) => p.scope === 'infra').length).toBe(4);
     // 新参数确实出现在 short-swing 控制台且不属于 UTE
     const keys = items.filter((p) => p.scope === 'strategy').map((p) => p.key);
     expect(keys).toContain('ENTRY_CHASE_PCT');

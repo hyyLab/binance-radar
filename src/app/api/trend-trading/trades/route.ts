@@ -90,7 +90,12 @@ export async function GET(req: Request) {
         positionId: m.positionId,
         symbol: m.symbol,
         base: m.symbol.replace(/USDT$/, ''),
-        side: m.side,
+        // Task 77：side = 实际执行方向（PaperPosition 真实成交侧）。反向跟随开启时
+        // meta.side 是模型信号侧（策略世界语义，Task 75 刻意设计），与执行侧互为镜像
+        // ——历史/K线必须按执行方向展示；signalSide 保留模型语义供审计对照。
+        side: pos.side as 'LONG' | 'SHORT',
+        signalSide: m.side as 'LONG' | 'SHORT',
+        reversed: m.side !== pos.side,
         strategyId,
         strategyName: strategyNameById.get(strategyId) ?? strategyId,
         // —— 时间 ——
