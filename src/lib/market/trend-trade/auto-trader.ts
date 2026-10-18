@@ -289,6 +289,7 @@ export class AutoPaperTrader {
     waitBarConfirm?: number;
     cooldownMs?: number;
     marginRatio?: number;
+    reverseMode?: number;
   }): Promise<void> {
     const name = TREND_TRADE.ACCOUNT_NAME;
     const cfg = await this.repo.loadConfig(name);
@@ -298,6 +299,7 @@ export class AutoPaperTrader {
       waitBarConfirm?: number;
       cooldownMs?: number | null;
       marginRatio?: number;
+      reverseMode?: number;
     } = {};
     let strategyChanged = false;
     if (patch.strategyParams !== undefined) {
@@ -309,6 +311,7 @@ export class AutoPaperTrader {
     if (patch.waitBarConfirm !== undefined) dbPatch.waitBarConfirm = patch.waitBarConfirm;
     if (patch.cooldownMs !== undefined) dbPatch.cooldownMs = patch.cooldownMs;
     if (patch.marginRatio !== undefined) dbPatch.marginRatio = patch.marginRatio;
+    if (patch.reverseMode !== undefined) dbPatch.reverseMode = patch.reverseMode;
     if (Object.keys(dbPatch).length === 0) return;
     await this.repo.updateRuntimeParams(name, dbPatch);
     if (strategyChanged && !this.fixedStrategy) {
@@ -318,6 +321,12 @@ export class AutoPaperTrader {
     // marginRatio 为基础设施列：每 tick 重读 cfg，下一 tick 生效（无需重装配）
     if (patch.marginRatio !== undefined) {
       logDecision(`参数控制台：每仓保证金比例已更新为 ${patch.marginRatio}（下一 tick 生效；实际比例 = min(设定值, 95%÷配置舱位数)）`);
+    }
+    // Task 75：反向跟随为基础设施列，每 tick 重读 cfg，下一 tick 生效
+    if (patch.reverseMode !== undefined) {
+      logDecision(
+        `参数控制台：反向跟随已${patch.reverseMode === 1 ? '开启（全部算法开仓方向取反执行；平仓仍跟随模型：模型止损=我们止盈、模型止盈=我们止损）' : '关闭（恢复正常跟随）'}（下一 tick 生效）`,
+      );
     }
   }
 
@@ -336,6 +345,7 @@ export class AutoPaperTrader {
       waitBarConfirm: 1,
       cooldownMs: null,
       marginRatio: TREND_TRADE.MARGIN_RATIO, // 列 NOT NULL，回默认值而非 null
+      reverseMode: 0, // Task 75：反向跟随回关（正常跟随为默认）
     });
     if (!this.fixedStrategy) {
       await this.applyStrategy(strategyId);
@@ -1106,15 +1116,28 @@ export class AutoPaperTrader {
       symbol: signal.symbol,
       action: 'OPEN',
       cycleId: posCycle,
-      detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg, verdict.modeTag, riskMultiplier)),
+      detail: JSON.stringify(this.openDetail(signal, targetMargin, cfg, verdict.modeTag, riskMultiplier, side)),
     });
     if (!claimed) {
       return { outcome: 'skipped', reason: '本趋势周期本轮次已决策过（幂等）' };
     }
     try {
+      // Task 75 反向跟随（infra reverseMode，控制台可调、全算法生效）：仅翻转真实执行方向，
+      // 模型决策世界不变——meta.side 保持模型侧（evaluateExit/REVERSE_CONFIRMED/再入场/轮次
+      // 等策略逻辑全部按模型语义运转），真实持仓为 execSide；平仓按 positionId 执行、时机跟随
+      // 模型 → 模型硬止损=我们止盈离场、模型止盈/趋势结束=我们止损离场，盈亏互为镜像；
+      // 强平按真实仓位由 paper 引擎如实模拟（权益/未实现盈亏本就按真实持仓 side 计算）。
+      const reverse = (cfg.reverseMode ?? 0) === 1;
+      const execSide: 'LONG' | 'SHORT' = reverse ? (side === 'LONG' ? 'SHORT' : 'LONG') : side;
+      if (reverse) {
+        logDecision(
+          `反向跟随执行 模型${side === 'LONG' ? '开多' : '开空'} → 实际${execSide === 'LONG' ? '开多' : '开空'} ` +
+          `symbol=${signal.symbol} rKey=${rKey} margin=${targetMargin}`,
+        );
+      }
       const pos = await this.engine.open({
         symbol: signal.symbol,
-        side,
+        side: execSide,
         leverage: cfg.leverage,
         margin: targetMargin,
       });
@@ -1320,7 +1343,7 @@ export class AutoPaperTrader {
     }
   }
 
-  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow, modeTag: string, riskMultiplier = 1) {
+  private openDetail(signal: UnifiedTrendSignal, margin: number, cfg: TrendAutoConfigRow, modeTag: string, riskMultiplier = 1, side: 'LONG' | 'SHORT' = 'LONG') {
     return {
       strategyId: this.strategy.id,
       modeTag,
@@ -1344,6 +1367,10 @@ export class AutoPaperTrader {
       atrPct: signal.features.atrPct,
       efficiencyRatio: signal.features.efficiencyRatio,
       htfAgree: signal.htfAgree,
+      // Task 75：反向跟随快照（开启时记录模型侧与实际执行侧；平仓仍跟随模型）
+      ...((cfg.reverseMode ?? 0) === 1
+        ? { reverseMode: true, modelSide: side, execSide: side === 'LONG' ? 'SHORT' : 'LONG' }
+        : { reverseMode: false }),
     };
   }
 

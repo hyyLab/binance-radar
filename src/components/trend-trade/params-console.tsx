@@ -38,7 +38,7 @@ export function ParamsConsole({
 }) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[92dvh] w-[min(680px,calc(100vw-1rem))] gap-3 overflow-y-auto p-4 sm:w-[min(680px,96vw)] sm:gap-4 sm:p-6 max-sm:bottom-0 max-sm:left-0 max-sm:right-0 max-sm:top-auto max-sm:w-screen max-sm:max-w-none max-sm:translate-x-0 max-sm:translate-y-0 max-sm:rounded-b-none max-sm:border-x-0 max-sm:border-b-0">
+      <DialogContent className="max-h-[88vh] w-[min(680px,96vw)] gap-3 overflow-y-auto p-4 sm:gap-4 sm:p-6">
         <DialogTitle className="flex items-center gap-1.5 text-lg font-bold">
           <SlidersHorizontal className="h-4 w-4 text-gold" /> 自动开仓参数控制台
         </DialogTitle>

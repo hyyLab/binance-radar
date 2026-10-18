@@ -196,6 +196,7 @@ export async function POST(req: Request) {
           waitBarConfirm: sanitized.waitBarConfirm,
           cooldownMs: sanitized.cooldownMs,
           marginRatio: sanitized.marginRatio,
+          reverseMode: sanitized.reverseMode,
         });
         return NextResponse.json({
           ok: true,

@@ -301,6 +301,13 @@ export const PARAM_DEFS: ParamDef[] = [
     desc: '每仓保证金占比上限。实际生效 = min(本上限, 95% ÷ 配置舱位数)——划分只看「选了几舱」：1 舱单仓满配 95% 开最大仓位，2 舱各 47.5%、3 舱各 31.7%…每舱配额固定（Task 67 用户定版），先开的仓不挤占后舱。保证金 + 手续费超出可用余额时跳过并记录，不变通。',
     effect: '调大 → 单仓更大（舱位配额内生效）；舱位配额本身由「持仓数量」决定（1 舱 95%、2 舱各 47.5%、3 舱各 31.7%…）；调小 → 在舱位配额内进一步压低单仓',
   },
+  // ===== I · 执行模式（基础设施；Task 75 反向跟随） =====
+  {
+    key: 'reverseMode', scope: 'infra', group: '执行模式（基础设施）',
+    label: '反向跟随（镜像执行）', type: 'boolean', default: false,
+    desc: '开启后对全部算法（含将来新增算法）生效：策略每次开仓方向取反执行——模型开多→实际开空、模型开空→实际开多；保证金/杠杆/轮次/审计与正常模式完全一致。平仓时机仍跟随模型：模型硬止损=我们止盈离场、模型止盈/趋势结束/反向确认=我们止损离场，盈亏与模型互为镜像。强平仍按真实仓位由模拟引擎如实执行。',
+    effect: '开 = 与全部模型对着做（验证模型反向价值/镜像视角）；关 = 正常跟随（默认）',
+  },
 ];
 
 /** 键 → 定义索引（校验/合并用） */
@@ -338,7 +345,7 @@ function codeDefault(d: ParamDef): number | boolean {
 export function effectiveRuntimeParams(
   strategyId: string,
   strategyOverrides: Record<string, unknown> | null,
-  infra: { waitBarConfirm?: number | null; cooldownMs?: number | null; marginRatio?: number | null },
+  infra: { waitBarConfirm?: number | null; cooldownMs?: number | null; marginRatio?: number | null; reverseMode?: number | null },
 ): RuntimeParamValue[] {
   // Task 62：strategy 域参数只展示「属于当前算法」的条目（如 universal-trend-v1 暂未
   // 注册 DEFS → strategy 域为空，控制台仅剩 infra 组——代码默认即生效，无调参入口）；
@@ -356,6 +363,8 @@ export function effectiveRuntimeParams(
         if (infra.cooldownMs != null) value = infra.cooldownMs;
       } else if (d.key === 'marginRatio') {
         if (infra.marginRatio != null) value = infra.marginRatio;
+      } else if (d.key === 'reverseMode') {
+        value = infra.reverseMode != null ? infra.reverseMode !== 0 : false;
       }
       const overridden = value !== codeDefault(d);
       return {
@@ -374,8 +383,8 @@ export function effectiveRuntimeParams(
 export function sanitizeRuntimeParamsLenient(
   raw: unknown,
   strategyId: string,
-): { strategyParams: Record<string, unknown>; waitBarConfirm?: number; cooldownMs?: number; marginRatio?: number } {
-  const out: { strategyParams: Record<string, unknown>; waitBarConfirm?: number; cooldownMs?: number; marginRatio?: number } = {
+): { strategyParams: Record<string, unknown>; waitBarConfirm?: number; cooldownMs?: number; marginRatio?: number; reverseMode?: number } {
+  const out: { strategyParams: Record<string, unknown>; waitBarConfirm?: number; cooldownMs?: number; marginRatio?: number; reverseMode?: number } = {
     strategyParams: {},
   };
   if (raw == null || typeof raw !== 'object' || Array.isArray(raw)) return out;
@@ -394,6 +403,7 @@ export function sanitizeRuntimeParamsLenient(
       if (typeof value !== 'boolean') continue;
       if (def.scope === 'strategy' && def.strategyId === strategyId) (out.strategyParams as Record<string, boolean>)[key] = value;
       else if (key === 'waitBarConfirm') out.waitBarConfirm = value ? 1 : 0;
+      else if (key === 'reverseMode') out.reverseMode = value ? 1 : 0;
     }
   }
   return out;
@@ -410,6 +420,8 @@ export interface SanitizedRuntimeParams {
   cooldownMs?: number;
   /** 每仓保证金比例（Task 58；TrendAutoConfig.marginRatio 列，NOT NULL DEFAULT 0.2） */
   marginRatio?: number;
+  /** Task 75：反向跟随开关（1 = 开仓方向取反执行；0 = 正常跟随默认） */
+  reverseMode?: number;
 }
 
 export function sanitizeRuntimeParams(raw: unknown, strategyId: string): SanitizedRuntimeParams {
@@ -441,6 +453,7 @@ export function sanitizeRuntimeParams(raw: unknown, strategyId: string): Sanitiz
       }
       if (def.scope === 'strategy') (out.strategyParams as Record<string, boolean>)[key] = value;
       else if (key === 'waitBarConfirm') out.waitBarConfirm = value ? 1 : 0;
+      else if (key === 'reverseMode') out.reverseMode = value ? 1 : 0;
     }
   }
   return out;

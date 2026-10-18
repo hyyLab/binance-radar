@@ -35,6 +35,8 @@ export interface TrendAutoConfigRow {
   waitBarConfirm?: number;
   /** Task 57-c：同币种平仓后冷却 ms（NULL = 用 TREND_TRADE.COOLDOWN_MS 默认） */
   cooldownMs?: number | null;
+  /** Task 75：反向跟随开关（1 = 全算法开仓方向取反执行；0 = 正常跟随默认） */
+  reverseMode?: number;
 }
 
 export interface TrendTradeMetaRow {
@@ -278,6 +280,10 @@ export async function ensureTrendTradeSchema(client: RawClient = db): Promise<vo
   if (!cfgCols.some((c) => c.name === 'cooldownMs')) {
     await client.$executeRawUnsafe(`ALTER TABLE TrendAutoConfig ADD COLUMN cooldownMs INTEGER`);
   }
+  // Task 75：反向跟随开关（幂等补列）
+  if (!cfgCols.some((c) => c.name === 'reverseMode')) {
+    await client.$executeRawUnsafe(`ALTER TABLE TrendAutoConfig ADD COLUMN reverseMode INTEGER DEFAULT 0`);
+  }
   await client.$executeRawUnsafe(
     `UPDATE TrendAutoConfig SET strategyId = 'short-swing-v1' WHERE strategyId IS NULL`,
   );
@@ -397,7 +403,7 @@ export function createTrendTradeRepo(client: RawClient = db) {
     async loadConfig(name: string): Promise<TrendAutoConfigRow | null> {
       const rows = await client.$queryRawUnsafe<Record<string, unknown>[]>(
         `SELECT name, mode, initialCapital, marginRatio, leverage, maxPositions, slippageBps, peakEquity, strategyId,
-                strategyParamsJson, waitBarConfirm, cooldownMs
+                strategyParamsJson, waitBarConfirm, cooldownMs, reverseMode
          FROM TrendAutoConfig WHERE name = ?`,
         name,
       );
@@ -416,6 +422,7 @@ export function createTrendTradeRepo(client: RawClient = db) {
             strategyParamsJson: (r.strategyParamsJson as string | null) ?? null,
             waitBarConfirm: r.waitBarConfirm == null ? 1 : Number(r.waitBarConfirm),
             cooldownMs: numOrNull(r.cooldownMs),
+            reverseMode: r.reverseMode == null ? 0 : Number(r.reverseMode),
           }
         : null;
     },
@@ -474,7 +481,7 @@ export function createTrendTradeRepo(client: RawClient = db) {
      *  只更新传入的字段；全部白名单列，无拼接注入面。调用方负责热应用。 */
     async updateRuntimeParams(
       name: string,
-      patch: { strategyParamsJson?: string | null; waitBarConfirm?: number; cooldownMs?: number | null; marginRatio?: number },
+      patch: { strategyParamsJson?: string | null; waitBarConfirm?: number; cooldownMs?: number | null; marginRatio?: number; reverseMode?: number },
     ): Promise<void> {
       const sets: string[] = ['updatedAt = ?'];
       const args: (string | number | Date | null)[] = [new Date()];
@@ -493,6 +500,10 @@ export function createTrendTradeRepo(client: RawClient = db) {
       if (patch.marginRatio !== undefined) {
         sets.push('marginRatio = ?');
         args.push(patch.marginRatio);
+      }
+      if (patch.reverseMode !== undefined) {
+        sets.push('reverseMode = ?');
+        args.push(patch.reverseMode);
       }
       args.push(name);
       await client.$executeRawUnsafe(

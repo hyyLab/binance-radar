@@ -396,6 +396,8 @@ export function TrendTradeView() {
   // Task 71：单仓比例显示真值化——min(设定比例, 95%÷舱位数)；重大异动突破另乘形态风险倍率 0.5~1.0
   const effRatioPct = ((data?.config.effMarginRatio ?? 0.2) * 100).toFixed(3).replace(/\.?0+$/, '');
   const isMajorP1 = strategyId === 'major-p1-breakout-v1';
+  // Task 75：反向跟随开关状态（overview params 的 infra 布尔参数）
+  const reverseModeOn = (data?.config.params ?? []).some((p) => p.key === 'reverseMode' && p.value === true);
 
   const depositVal = Number(depositAmount);
   const depositValid = Number.isFinite(depositVal) && depositVal >= MIN_DEPOSIT && depositVal <= MAX_DEPOSIT;
@@ -549,12 +551,32 @@ export function TrendTradeView() {
         <Bot className="h-4 w-4 text-gold" />
         <h1 className="text-sm font-bold sm:text-base">趋势自动模拟交易</h1>
         <ModeBadge mode={mode} />
+        {reverseModeOn && (
+          <span
+            className="rounded bg-down/15 px-2 py-0.5 text-[11px] font-bold text-down"
+            title="反向跟随已开启：所有算法开仓方向取反执行（模型开多→实际开空、开空→实际开多），保证金/轮次/审计不变；平仓时机仍跟随模型——模型硬止损=我们止盈、模型止盈=我们止损（盈亏互为镜像）。可在参数控制台关闭。"
+          >
+            反向跟随
+          </span>
+        )}
         <span className="hidden text-[10px] text-muted-foreground sm:inline">{headerInfo}</span>
         <div className="w-full text-[10px] leading-relaxed text-muted-foreground sm:hidden">{headerInfo}</div>
         <div className="grid w-full grid-cols-4 gap-1.5 sm:ml-auto sm:flex sm:w-auto sm:items-center sm:gap-1.5">
+          {/* Task 57-c：参数控制台——自行调整自动开仓参数（保存即热生效） */}
+          <button
+            className="inline-flex h-9 items-center justify-center gap-1 rounded-md border border-border px-2 text-xs font-semibold text-muted-foreground hover:border-gold/50 hover:text-gold disabled:opacity-40 sm:h-8 sm:text-[11px]"
+            disabled={busy}
+            onClick={() => setParamsOpen(true)}
+            title="自动开仓参数控制台：入场门槛/入场时机/轮次/冲高套利/冷却等，保存后立即生效（附每项含义说明）"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5 sm:h-3 sm:w-3" /> 参数
+            {(data?.config.params ?? []).some((p) => p.overridden) && (
+              <span className="rounded bg-gold/20 px-1 text-[9px] font-bold text-gold">改</span>
+            )}
+          </button>
           {/* Task 57：算法可选——更换即自动平仓原有持仓，新算法接管后续开仓（Task 74：整块触控 + 原生选择器，16px 防 iOS 聚焦缩放） */}
           <label
-            className="relative col-span-2 flex h-9 cursor-pointer items-center justify-between gap-1 rounded-md border border-border bg-background px-2 text-xs sm:col-span-1 sm:h-8 sm:text-[11px]"
+            className="relative col-span-3 flex h-9 cursor-pointer items-center justify-between gap-1 rounded-md border border-border bg-background px-2 text-xs sm:col-span-1 sm:h-8 sm:text-[11px]"
             title={currentStrategy?.description ?? '交易算法（可插拔策略；更换会自动平仓原有持仓）'}
           >
             <span className="min-w-0 truncate">
@@ -567,7 +589,7 @@ export function TrendTradeView() {
               disabled={busy}
               onChange={(e) => changeStrategy(e.target.value)}
               aria-label="交易算法"
-              className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-transparent text-base opacity-0 outline-none"
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-background text-foreground text-base opacity-0 outline-none"
             >
               {strategies.map((s) => (
                 <option key={s.id} value={s.id}>
@@ -591,7 +613,7 @@ export function TrendTradeView() {
               disabled={busy}
               onChange={(e) => changePositions(Number(e.target.value))}
               aria-label="最大同时持仓数"
-              className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-transparent text-base opacity-0 outline-none"
+              className="absolute inset-0 h-full w-full cursor-pointer appearance-none bg-background text-foreground text-base opacity-0 outline-none"
             >
               {POSITION_OPTIONS.map((n) => (
                 <option key={n} value={n}>
@@ -600,18 +622,6 @@ export function TrendTradeView() {
               ))}
             </select>
           </label>
-          {/* Task 57-c：参数控制台——自行调整自动开仓参数（保存即热生效） */}
-          <button
-            className="inline-flex h-9 items-center justify-center gap-1 rounded-md border border-border px-2 text-xs font-semibold text-muted-foreground hover:border-gold/50 hover:text-gold disabled:opacity-40 sm:h-8 sm:text-[11px]"
-            disabled={busy}
-            onClick={() => setParamsOpen(true)}
-            title="自动开仓参数控制台：入场门槛/入场时机/轮次/冲高套利/冷却等，保存后立即生效（附每项含义说明）"
-          >
-            <SlidersHorizontal className="h-3.5 w-3.5 sm:h-3 sm:w-3" /> 参数
-            {(data?.config.params ?? []).some((p) => p.overridden) && (
-              <span className="rounded bg-gold/20 px-1 text-[9px] font-bold text-gold">改</span>
-            )}
-          </button>
           {/* Task 55：机器人充值 */}
           <button
             className="inline-flex h-9 items-center justify-center gap-1 rounded-md border border-gold/50 bg-gold/10 px-2 text-xs font-bold text-gold hover:bg-gold/20 disabled:opacity-40 sm:h-8 sm:text-[11px]"
@@ -649,7 +659,7 @@ export function TrendTradeView() {
           </button>
           {/* Task 55-2：重置机器人账户——清空持仓与历史，资金回到 100 USDT */}
           <button
-            className="col-span-2 inline-flex h-9 items-center justify-center gap-1 rounded-md border border-border px-2 text-xs font-semibold text-muted-foreground hover:border-gold/50 hover:text-gold disabled:opacity-40 sm:h-8 sm:text-[11px]"
+            className="inline-flex h-9 items-center justify-center gap-1 rounded-md border border-border px-2 text-xs font-semibold text-muted-foreground hover:border-gold/50 hover:text-gold disabled:opacity-40 sm:h-8 sm:text-[11px]"
             disabled={busy}
             onClick={() => setConfirm({ type: 'reset' })}
             title="重置机器人账户：清空全部持仓与历史交易，资金重置为 100 USDT（不可撤销）"

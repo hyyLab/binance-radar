@@ -127,6 +127,7 @@ export async function GET() {
       waitBarConfirm: cfg?.waitBarConfirm ?? null,
       cooldownMs: cfg?.cooldownMs ?? null,
       marginRatio: cfg?.marginRatio ?? null,
+      reverseMode: cfg?.reverseMode ?? null,
     });
     // Task 67：当前配置舱位数下的实际单仓保证金比例（控制台/持仓下拉 tooltip 数据源）
     const effMarginRatio = effectiveMarginRatio(
