@@ -633,3 +633,27 @@ Stage Summary:
 - 新算法拒绝原因现已进「最近跳过」面板：下一条 MAJOR P1 事件被拒时 UI 即显示「策略不入场：P1 已过期…」等真实原因
 - 节流设计保证 1s 事件循环不刷屏；预过滤（非 P1/非 MAJOR）仍静默避免噪音
 - 后续候选（未被用户回应前不动）：重置后自动暂停开仓
+
+---
+Task ID: deploy-6 (Task 73)
+Agent: main
+Task: 页面文案「币安」→「binance」（用户要求：算法什么的不要动）
+
+Work Log:
+- 全库 grep「币安」：区分「页面可见字符串」vs「代码注释」，只替换前者，注释/算法零改动
+- scripts/task73_binance_text_patch.py：8 文件 17 处（layout title/description/keywords、
+  两个 H1、数据来源脚注、白名单降级提示、trade-modal 源标签+2 说明、paper-panel 2 处、
+  coin-dialog 2 处、futures-feeds SOURCE_LABEL 值），行级注释跳过规则（// /* * {/* 开头）
+- 陷阱处理：futures-feeds 的 SOURCE_LABEL 被采集器单例引用，HMR 不换血 →
+  scripts/task73_dual_bump_patch.py 双单例同步 bump：futures-collector v5→v6 +
+  engine v23→v24（先试 engine v23 单独 bump 发现 label 仍旧值——采集器是独立
+  globalThis 单例；且只换采集器会导致 v6 无人 ensureStarted 冻结行情，故同保存双 bump，
+  新引擎 boot 经 activeFuturesCollector() 动态解析 v6 并启动）
+- 验证：tsc/eslint 零报错；SSR 首页 HTML title=binance热点雷达、整页零「币安」；
+  anomalies API source labels=[binanceU本位/Bybit/Gate]、响应体零「币安」；
+  trend-trading ok/RUNNING/lastError=null、持仓健在；数据时间戳 <2min 新鲜
+- 提交 2bb30a3 推送 origin/main
+
+Stage Summary:
+- 页面全部可见文案已 binance 化，算法逻辑与全部代码注释原样保留
+- 双单例 bump 模式（引擎+采集器同保存）已记入经验：改采集器引用的 lib 常量需两键同 bump
