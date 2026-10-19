@@ -869,3 +869,24 @@ Stage Summary:
 - 交付：切换假生效根因修复（未知算法拒绝装配+源头拒绝+失配停机+错误可见）+ 双世界视角常驻（总览反向世界对照）+ 过度延伸证据管道（报告 5m_ret_% 列）
 - 实盘标本：三笔 -8.14 vs 反向世界 +8.14；ZEREBRO#2（score 91 追空，5m 已跌 3.24%，反弹 +1.97% 后 WEAKNESS_EARLY 投降）= 用户所述「反向赚钱机制」的活体样本
 - 遗留：过度延伸护栏（ENTRY_MAX_STRETCH 类）待 strong-trend-v1 实盘样本积累后按数据定阈值（现 n=3 不拟合）；跨 regime 复校 70 门槛（Task 81 遗留）复用同一报告管道
+
+---
+Task ID: 83
+Agent: main
+Task: 用户反馈「退池强平/等人工平仓需要优化——3 个挂起交易对长期不进池会挤占新仓开仓」——退池超时自动离场（DELIST_TIMEOUT）
+
+Work Log:
+- 取证：4 笔 OPEN（ETH/TIA/CASHCAT/ICNT，ZEREBRO 已自然平仓）中多对长期无信号——根因：trend-watch evictSymbol 退池即从 v2Signals 删除，manageExits 原语义「信号缺失不误平仓」直接 continue → 仓位只剩强平/人工两条退出路径。两大危害：① 无限期占舱位+保证金挤压新仓（marginRatio 0.95 舱位制下每挂一仓锁 ~12% 权益）；② 退池后策略离场评估（含硬止损）不再运行——20x 杠杆裸奔只有强平兜底
+- 方案（Task 83 退池超时自动离场）：信号缺失进入宽限计时（DELIST_EXIT_GRACE_MS=60min，覆盖池内抖动：idle 退池宽限 15min/候选 TTL 30min/数据断供 15min）；宽限内重新入池（信号恢复）自动解除；持续超时 → closePosition(DELIST_TIMEOUT) 释放舱位与保证金
+- 计时权设计：唯一属于主循环 tick 的 manageExits（真实信号快照，delistCheck=true）；MAJOR 事件循环每秒调 manageExits(new Map(), false) 不参与计时——否则空表把在池仓也误判退池、与主循环互相清零/重复起表。DATA_UNAVAILABLE 信号仍在信号表内 → 不计时（原「数据缺失永不触发离场」语义保持）
+- 改动：config.ts 新增 DELIST_EXIT_GRACE_MS + TrendExitReason.DELIST_TIMEOUT；auto-trader.ts 新增 delistSince 计时表/maybeDelistTimeoutExit/manageExits 第二参 delistCheck/退出后计时表回收；report.ts EXIT_SHORT+图例；trend-trade-view.tsx 原因标签「退池超时」
+- 回归测试 tests/trend-trade/delist-timeout.test.ts 5 项：T-L1 宽限内不离场/T-L2 超时自动平仓 exitReason=DELIST_TIMEOUT/T-L3 重入池解除计时+再退池重新起算/T-L4 DATA_UNAVAILABLE 不计时/T-L5 事件循环不计时。测试夹具坑：跨 tick 转换需固定 cycleId + 每轮 push 新 barClock 信号（否则待入场被判「趋势失效」取消）——与 auto-trader.test.ts 同款
+- 验证：tsc 改动文件 0 错误（24 个遗留错误均在无关文件）、eslint 干净、bun test 126/126 全绿
+- 重启 dev 服务（加载 Task 82+83 全部代码）：进程管理新认知复测——工具 shell 的后台进程（setsid/nohup/disown 均无效）在调用结束瞬间被沙箱回收（sleep 标记 45s 内死亡、心跳只写 1 行）；`(bun run dev >/tmp/orphan-dev.log 2>&1 &)` 孤儿模式存活（必须重定向输出，否则 harness 等 EOF 到超时且半途 kill 会打断 boot 留下僵死 server：端口在、HTTP 全挂、无日志——需 pkill 清场后一次干净启动）；同调用内轮询 HTTP 200 确认就绪
+- 上线验证：config.strategyId == runningStrategyId == strong-trend-v1、service.lastError=null、自愈日志 0 条（Task 82 修复双确认）；退池计时开始 ×4（ETH/TIA/CASHCAT/ICNT）——60min 后仍在池外的自动平仓，重入池的自动解除
+
+Stage Summary:
+- 交付：退池仓位从「强平/人工二选一」升级为「宽限 60min → 自动离场（DELIST_TIMEOUT）」，舱位/保证金/止损裸奔三问题同时根治；历史交易/报表/报告显示「退池超时」
+- 语义边界：在池数据缺失永不因退池离场（不误平仓精神保留）；重启后计时重算（保守）；强平/人工/反向确认路径不受影响
+- 环境留痕：本会话再次证实 Bash 后台进程活不过调用边界；唯一可用启动方式 = `(bun run dev > /tmp/orphan-dev.log 2>&1 &)` 孤儿模式（输出必须重定向；启动+验证须在同一次调用内完成，避免 harness 超时 kill 打断 boot）
+- 遗留：无（4 笔挂起仓的宽限计时已在跑，到期自动处理）

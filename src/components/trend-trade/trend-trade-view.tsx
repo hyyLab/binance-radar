@@ -88,6 +88,8 @@ const EXIT_REASON_LABEL: Record<string, string> = {
   SPIKE_TAKE: '冲高落袋',
   TRAIL_TAKE: '移动止盈',
   WEAKNESS_EARLY: '走弱离场',
+  // Task 83：退池超时自动离场（信号缺失持续超宽限期，释放舱位/保证金）
+  DELIST_TIMEOUT: '退池超时',
 };
 
 const PHASE_V2_LABEL: Record<string, string> = {
