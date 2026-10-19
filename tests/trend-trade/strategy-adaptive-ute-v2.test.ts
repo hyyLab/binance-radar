@@ -22,6 +22,7 @@ function signal(p: {
   volRegime?: 'NORMAL' | 'HIGH' | 'EXTREME';
   volPercentile?: number;
   htf5?: 'up' | 'down' | 'flat';
+  htf5Ret?: number;
   htf15?: 'up' | 'down' | 'flat';
   confirmCount?: number;
   strength?: number;
@@ -65,7 +66,7 @@ function signal(p: {
       falseBreakout: p.falseBreakout ?? false,
       barsUsed: 480,
     },
-    htf5m: { dir: p.htf5 ?? direction, efficiencyRatio: 0.6, returnPct: direction === 'down' ? -1 : 1, valid: true, bars: 96 },
+    htf5m: { dir: p.htf5 ?? direction, efficiencyRatio: 0.6, returnPct: p.htf5Ret ?? (direction === 'down' ? -1 : 1), valid: true, bars: 96 },
     htf15m: { dir: p.htf15 ?? direction, efficiencyRatio: 0.5, returnPct: direction === 'down' ? -1 : 1, valid: true, bars: 32 },
     htfAgree: true,
     lastBarTime: bar,
@@ -169,5 +170,24 @@ describe('adaptive-ute-v2 自适应 UTE 决策层', () => {
     expect(verdict.exit).toBe(true);
     expect(verdict.reason).toBe('STOP_LOSS');
     expect(verdict.detail).toContain('0.85%');
+  });
+
+  test('A7 成熟高分确认处于 5m 大幅同向延伸、且出现反转影线时允许反向试探', () => {
+    const strategy = new AdaptiveUteV2Strategy();
+    const verdict = strategy.evaluateEntry(signal({
+      direction: 'down',
+      score: 82,
+      strength: 0.9,
+      confirmCount: 5,
+      htf5Ret: -3.1,
+      volumeRatio: 1,
+      er: 0.55,
+      rangeExpansion: 1.1,
+      wick: 0.5,
+    }), ctx());
+    expect(verdict.want).toBe(true);
+    expect(verdict.side).toBe('LONG');
+    expect(verdict.modeTag).toBe('UTE_REVERSAL_FADE_LONG');
+    expect(verdict.reason).toContain('5m同向延伸');
   });
 });
