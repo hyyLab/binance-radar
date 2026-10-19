@@ -7,7 +7,7 @@
 //   硬止损（价格 %）/ 移动止盈（mfe 峰值回撤）为纯价格驱动，照常生效；
 //   走弱先走等需信号的条件自然跳过；ENDED/反向确认等基础设施离场只在有信号时评估；
 //   强平巡检独立兜底。本组测试用 strong-trend-v1（当前实盘算法，止损 1.5% 价格 /
-//   移动止盈 8/5 保证金）钉死：
+//   移动止盈 30/20 保证金）钉死：
 //   T-S1 退池小亏不割：-6% 保证金（旧 Task 84 会 DELIST_EARLY_EXIT）→ 必须继续持有
 //        （cashcat/icnt 回归场景：小亏割在黎明前 = 卖飞）
 //   T-S2 退池后硬止损继续生效：价格逆行 ≥1.5% → STOP_LOSS（方向选择失败防拖到强平）
@@ -341,7 +341,7 @@ describe('Task 85 退池持仓由策略内条件管理（signal=null 继续评�
     expect(meta?.exitReason).toBe('STOP_LOSS');
   });
 
-  test('T-S3 退池后移动止盈继续生效：mfe 武装（≥8%）后回撤 ≥5% → TRAIL_TAKE 锁利', async () => {
+  test('T-S3 退池后移动止盈继续生效：mfe 武装（≥30%）后回撤 ≥20% → TRAIL_TAKE 锁利', async () => {
     await seedRunningConfig();
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
@@ -349,15 +349,16 @@ describe('Task 85 退池持仓由策略内条件管理（signal=null 继续评�
     const trader = await openOnePosition(signals, engine);
     expect((await openPositions()).length).toBe(1);
 
-    // 在池：价格 +0.5% = +10% 保证金 → updateOpenStats 落库 mfe=10 ≥ 8（武装）；
-    // 同 tick evaluateExit：peak=10、live=10、giveback=0 → 不触发
-    engine.marks.set('BTCUSDT', 100.5);
+    // 在池：价格 +2% = +40% 保证金 → updateOpenStats 落库 mfe=40 ≥ 30（武装，Task 85b
+    // 回退后 strong-trend-v1 继承 universal-trend 默认 30/20）；同 tick evaluateExit：
+    // peak=40、live=40、giveback=0 → 不触发
+    engine.marks.set('BTCUSDT', 102);
     await trader.tick();
     expect((await openPositions()).length).toBe(1);
 
-    // 退池：价格回落至 +0.1% = +2% 保证金 → giveback = 10-2 = 8% ≥ 5 → 移动止盈锁利。
+    // 退池：价格回落至 +0.4% = +8% 保证金 → giveback = 40-8 = 32% ≥ 20 → 移动止盈锁利。
     // （cashcat/icnt 反事实：退池后不割，反弹 +10.83%/+4.67% 会武装移动止盈并锁定利润）
-    engine.marks.set('BTCUSDT', 100.1);
+    engine.marks.set('BTCUSDT', 100.4);
     signals.length = 0; // 退池
     await trader.tick();
 

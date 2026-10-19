@@ -928,3 +928,21 @@ Stage Summary:
 - 语义闭环：在池（真实信号）= 完整三层评估 + 基础设施离场；退池 = 价格驱动层（止损/移动止盈）+ mfe/mae 统计照常，信号依赖层（走弱先走/ENDED/反向）静候重入池；事件循环每秒按 signal=null 补充评估
 - 设计哲学修正（用户洞察）：特殊规则是对策略失效的补丁，补丁本身会引入新的非策略风险（卖飞）；正确方向是扩大策略覆盖域（让策略条件在信号缺失时继续运行）而非叠加规则
 - 遗留：无；cashcat/icnt 已平仓不回补（模拟盘不追单），新语义对后续同类场景生效
+
+---
+Task ID: 85-b
+Agent: main
+Task: 用户追加指令「其他的修改也回退之前的版本」——Task 84 剩余改动（strong-trend-v1 移动止盈 8/5）一并回退到 Task 83 版本（30/20 继承）
+
+Work Log:
+- 范围确认：Task 84 两部分中退池提前离场已在 Task 85 回退；本次回退改动 B——registry strong-trend-v1 工厂参数 TRAIL_ARM_PCT 8 / TRAIL_GIVEBACK_PCT 5 删除，回到继承 universal-trend 默认 30/20（武装 1.5% 价格 @20x、回撤落袋线随行）
+- 实施方式：registry.ts 与 strategy-strong-trend.test.ts 自 Task 84 后未被 Task 85 触碰 → git checkout b1be23c（Task 83 提交）整文件恢复，描述/注释/测试断言一次到位（S4 回到「移动止盈 30/20 完整继承」、S6 参数断言删除）
+- UI 收尾：trend-trade-view.tsx 删 EXIT_REASON_LABEL 内 Task 83/84 残留注释行；「信号缺失」持仓卡文案按 Task 85 实际行为重写（「硬止损/移动止盈等策略内条件继续生效，重入池后恢复完整评估」）——不机械回退到 Task 83「仅强平与人工管理」（与现行为不符）
+- 测试适配：delist-strategy-exit.test.ts T-S3 场景从 8/5 语义改 30/20（在池 mark 102 = +40% 保证金武装 mfe → 退池 mark 100.4 = live 8%，giveback 32% ≥ 20 → TRAIL_TAKE）；文件头注释同步
+- 验证：bun test 127/127 全绿（T-S3 首跑失败即按 30/20 适配后通过）、tsc 改动面 0 错误、孤儿模式重启 dev、runningStrategyId=strong-trend-v1、lastError=null、strategies 端点描述已回 Task 81 定版（无 8/5 字样）
+
+Stage Summary:
+- 交付：Task 84 全部改动清零——退池特殊离场（Task 85 已退）+ 移动止盈 8/5（本次）全部回到 Task 83 状态；strong-trend-v1 最终形态 = ENTRY_MIN_SCORE 70 + 离场三层原样继承（硬止损 1.5% 价格 / 移动止盈 30/20 / 持有到 ENDED）
+- 语义总结（当前线上）：退池不触发任何特殊离场，持仓由策略内条件（30/20 移动止盈 + 1.5% 硬止损）继续管理，重入池恢复完整评估，强平巡检独立兜底
+- 环境留痕：dev 启动必须用 ./node_modules/.bin/next dev（裸 next 在孤儿 bash 子 shell 里 PATH not found）
+- 遗留：无
