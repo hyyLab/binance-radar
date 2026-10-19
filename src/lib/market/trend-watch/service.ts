@@ -741,6 +741,8 @@ export class TrendWatchService {
           )
         : 0,
       confirmCount: ute?.consecutiveObservations ?? 0,
+      // UTE 内核原始五因子直通决策信封，保留单一方向/评分来源。
+      uteEvidence: ute?.assessment.features ?? null,
       features:
         vol ?? {
           atr: 0, atrPct: 0, realizedVolPct: 0, volPercentile: -1, volRegime: 'NORMAL',

@@ -9,13 +9,15 @@
 // │ short-swing-v1      │ 短周期套利  │ 默认算法：确认+评分/ER 门槛+5m 背景分级+冲高落袋
 // │ universal-trend-v1  │ 通用趋势引擎│ 最开始的 UTE 长周期跟随：确认+方向选择证据才入场、确认在就拿满周期、走弱不离场
 // │ major-p1-breakout-v1│ 重大异动突破│ MAJOR P1 事件驱动；平台突破优先，加速型缩小风险预算
-// │ strong-trend-v1     │ 强趋势顺随  │ Task 81：universal-trend 同内核，入场评分下限 0→70（131 笔反向样本正向镜像回测定版）
+// │ strong-trend-v1     │ 强趋势顺随  │ Task 81：universal-trend 同内核，入场评分下限 0→70（历史实验对照组）
+// │ adaptive-ute-v2     │ 自适应 UTE │ 联合原始五因子、波动结构与高周期，按证据分流顺势/反转
 // ────────────────────────────────────────────────────────────────
 // 默认算法保持 short-swing-v1（Task 62 用户定版：UTE 先上架可选，控制台暂用
 // 其代码默认参数；切换在 UI 算法下拉进行，切换前自动平仓清场由 control API 负责）。
 
 import { ShortSwingStrategy, type ShortSwingParams } from './short-swing';
 import { UniversalTrendStrategy, type UniversalTrendParams } from './universal-trend';
+import { AdaptiveUteV2Strategy, type AdaptiveUteV2Params } from './adaptive-ute-v2';
 import { MajorP1BreakoutStrategy, type MajorP1BreakoutParams } from './major-p1-breakout';
 import type { StrategyDescriptor, TrendStrategy } from './types';
 
@@ -23,6 +25,8 @@ import type { StrategyDescriptor, TrendStrategy } from './types';
 const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => TrendStrategy> = {
   'short-swing-v1': (p) => new ShortSwingStrategy(p as ShortSwingParams | undefined),
   'universal-trend-v1': (p) => new UniversalTrendStrategy(p as UniversalTrendParams | undefined),
+  // Task 84：保留 UTE 原始证据，在顺势延续与多证据反转间做决策；不改 UTE 内核。
+  'adaptive-ute-v2': (p) => new AdaptiveUteV2Strategy(p as AdaptiveUteV2Params | undefined),
   'major-p1-breakout-v1': (p) => new MajorP1BreakoutStrategy(p as MajorP1BreakoutParams | undefined),
   // Task 81 数据定版：与 universal-trend-v1 唯一差异 = ENTRY_MIN_SCORE 0→70（只做五因子近乎全亮的强确认）。
   // 回测依据（131 笔反向样本的正向镜像）：score≥70 子集 20 笔 +57.57U / PF 3.37（全量 131 笔 +27.53 / PF 1.17），

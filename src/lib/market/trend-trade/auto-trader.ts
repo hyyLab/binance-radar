@@ -838,8 +838,10 @@ export class AutoPaperTrader {
         !eventDriven &&
         signal &&
         (signal.phase === 'CONFIRMED_UP' || signal.phase === 'CONFIRMED_DOWN') &&
-        (meta.side === 'LONG' ? signal.direction !== 'up' : signal.direction !== 'down') &&
-        signal.dataFresh
+        signal.dataFresh &&
+        (this.strategy.shouldCloseOnConfirmedReverse
+          ? this.strategy.shouldCloseOnConfirmedReverse(meta, signal)
+          : (meta.side === 'LONG' ? signal.direction !== 'up' : signal.direction !== 'down'))
       ) {
         await this.closePosition(meta, 'REVERSE_CONFIRMED', signal);
       }
@@ -1202,6 +1204,7 @@ export class AutoPaperTrader {
           strength: signal.strength,
           anomaly: signal.anomaly,
           conflict: signal.conflict,
+          uteEvidence: signal.uteEvidence ?? null,
         }),
         signalAtOpen: JSON.stringify(signal),
         slippageEst,

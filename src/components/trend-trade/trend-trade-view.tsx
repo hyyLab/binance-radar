@@ -437,6 +437,7 @@ export function TrendTradeView() {
   // Task 71：单仓比例显示真值化——min(设定比例, 95%÷舱位数)；重大异动突破另乘形态风险倍率 0.5~1.0
   const effRatioPct = ((data?.config.effMarginRatio ?? 0.2) * 100).toFixed(3).replace(/\.?0+$/, '');
   const isMajorP1 = strategyId === 'major-p1-breakout-v1';
+  const isAdaptiveUte = strategyId === 'adaptive-ute-v2';
   // Task 75：反向跟随开关状态（overview params 的 infra 布尔参数）
   const reverseModeOn = (data?.config.params ?? []).some((p) => p.key === 'reverseMode' && p.value === true);
 
@@ -580,7 +581,7 @@ export function TrendTradeView() {
     <>
       账户 {data?.config.accountName ?? 'trend-auto-v1'} · 初始 {data?.config.initialCapital ?? '—'} USDT
       {totalDeposited > 0 && <span className="text-gold"> · 累计充值 +{totalDeposited.toFixed(0)}</span>} · 算法
-      {currentStrategy?.name ?? strategyId} · 每仓 =
+      {currentStrategy?.name ?? strategyId}{isAdaptiveUte && '（UTE 双模式：顺势延续 / 多证据反转）'} · 每仓 =
       开仓时权益 × {effRatioPct}%{isMajorP1 && '（按入场形态再乘 0.5~1.0 风险倍率）'} · {data?.config.leverage ?? 20}x · 无固定止盈止损（按算法规则离场）
     </>
   );
