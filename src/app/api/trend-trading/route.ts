@@ -12,8 +12,8 @@ import type { UnifiedTrendSignal } from '@/lib/market/trend-watch/signal';
 
 export const dynamic = 'force-dynamic';
 
-// Task 78：db 单例 v4 + 引擎 v27 联动重建（平台快照替换 inode → 1032 readonly 热修复），
-// 本注释作为 chunk 重编译触发点，确保运行中服务加载新模块图。
+// Task 84：引擎 v28 接入 adaptive-ute-v2（原始 UTE 因子透传 + 顺势/反转双模式），
+// 本注释作为 chunk 重编译触发点，确保 API 热重载后读取新策略注册表与引擎实例。
 
 /**
  * 趋势自动模拟交易 · 总览（Task 54 §5.1/§5.2）
