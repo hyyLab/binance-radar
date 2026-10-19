@@ -35,6 +35,8 @@ export const ADAPTIVE_UTE_V2 = {
   REVERSAL_MIN_CONFIRM_COUNT: 4,
   REVERSAL_MIN_STRONG_SCORE: 75,
   REVERSAL_LATE_EXHAUSTION_MIN_SCORE: 70,
+  /** 5m HTF 在 UTE 同方向的累计位移上限，达到后需与至少一项衰竭迹象共现。 */
+  REVERSAL_HTF5M_STRETCH_PCT: 2.5,
   REVERSAL_MIN_STRONG_STRENGTH: 0.75,
   /** 至少需要两项反转线索，其中至少一项必须是结构 / 影线 / HTF 主证据 */
   REVERSAL_MIN_CUES: 2,
@@ -182,8 +184,24 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
       signal.score >= this.params.REVERSAL_LATE_EXHAUSTION_MIN_SCORE &&
       rangeClimax &&
       (dryVolume || erCollapse);
+
+    // Task 83 以来新增的「5m 过度延伸」证据：htf5m.returnPct 是基于 5m K 线窗口的累计位移，
+    // 若已沿 UTE 方向走出较大幅度，成熟的高分确认更可能发生在延伸后段；但不能只因走得远就反做，
+    // 必须至少伴随一项独立衰竭迹象（影线/假突破/量能衰减/ER 走低/波动扩张/15m 冲突）。
+    const htf5mStretched =
+      signal.htf5m.valid &&
+      (dir === 'down'
+        ? signal.htf5m.returnPct <= -this.params.REVERSAL_HTF5M_STRETCH_PCT
+        : signal.htf5m.returnPct >= this.params.REVERSAL_HTF5M_STRETCH_PCT);
+    const htfStretchExhaustion =
+      mature &&
+      signal.score >= this.params.REVERSAL_LATE_EXHAUSTION_MIN_SCORE &&
+      htf5mStretched &&
+      (rejectionWick || failedBreakout || dryVolume || erCollapse || rangeClimax || h15Opposed);
+
     const primaryCueCount = [
-      rejectionWick, counterBreakout, failedBreakout, htfOpposed, lateMoveExhaustion,
+      rejectionWick, counterBreakout, failedBreakout, htfOpposed,
+      lateMoveExhaustion, htfStretchExhaustion,
     ].filter(Boolean).length;
     const cueCount = [
       rejectionWick,
@@ -193,6 +211,7 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
       dryVolume,
       erCollapse,
       rangeClimax,
+      htf5mStretched,
     ].filter(Boolean).length;
 
     const cueNames = [
@@ -204,7 +223,9 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
       dryVolume ? '量能衰减' : null,
       erCollapse ? 'ER走低' : null,
       rangeClimax ? '波动扩张' : null,
+      htf5mStretched ? `5m同向延伸 ${signal.htf5m.returnPct.toFixed(2)}%` : null,
       lateMoveExhaustion ? '成熟高分末端扩张衰减' : null,
+      htfStretchExhaustion ? '成熟高分+5m过度延伸+衰竭' : null,
     ].filter((x): x is string => x !== null);
 
     const canFade =
