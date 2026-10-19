@@ -88,7 +88,8 @@ const EXIT_REASON_LABEL: Record<string, string> = {
   SPIKE_TAKE: '冲高落袋',
   TRAIL_TAKE: '移动止盈',
   WEAKNESS_EARLY: '走弱离场',
-  // Task 83：退池超时自动离场（信号缺失持续超宽限期，释放舱位/保证金）
+  // Task 83/84：退池自动离场（提前离场：有利润/小亏不陪等宽限；超时：深亏仓宽限兑底）
+  DELIST_EARLY_EXIT: '退池提前离场',
   DELIST_TIMEOUT: '退池超时',
 };
 
@@ -215,7 +216,7 @@ function PositionCard({
           <span className="truncate text-muted-foreground/80" title={p.trend.reason}>{p.trend.reason}</span>
         </div>
       ) : (
-        <div className="mt-1.5 text-[10px] text-muted-foreground">趋势信号缺失（重启恢复/已退池，仅强平与人工管理）</div>
+        <div className="mt-1.5 text-[10px] text-muted-foreground">趋势信号缺失（已退池：有利润或小亏自动提前离场，深亏等宽限 30 分钟后自动离场）</div>
       )}
       {p.waitingEndConfirm && (
         <div className="mt-1 flex items-center gap-1 text-[10px] text-gold">

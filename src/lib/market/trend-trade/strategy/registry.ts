@@ -24,22 +24,35 @@ const STRATEGY_FACTORIES: Record<string, (params?: Record<string, unknown>) => T
   'short-swing-v1': (p) => new ShortSwingStrategy(p as ShortSwingParams | undefined),
   'universal-trend-v1': (p) => new UniversalTrendStrategy(p as UniversalTrendParams | undefined),
   'major-p1-breakout-v1': (p) => new MajorP1BreakoutStrategy(p as MajorP1BreakoutParams | undefined),
-  // Task 81 数据定版：与 universal-trend-v1 唯一差异 = ENTRY_MIN_SCORE 0→70（只做五因子近乎全亮的强确认）。
+  // Task 81 数据定版：与 universal-trend-v1 的差异 = 入场评分下限 0→70（只做五因子近乎全亮的强确认）。
   // 回测依据（131 笔反向样本的正向镜像）：score≥70 子集 20 笔 +57.57U / PF 3.37（全量 131 笔 +27.53 / PF 1.17），
-  // 时间三分 -1.3/+12.4/+46.5（免疫前段亏损潮）；score≥70 内止损档位无敏感性 → 离场三层原样继承。
-  // ⚠️ 样本为 4 小时单 regime，阈值存在过拟合风险（用户知情接受），跨 regime 后复校。
+  // 时间三分 -1.3/+12.4/+46.5（免疫前段亏损潮）。
+  // Task 84 用户定版：移动止盈 30/20 → 8/5。线上三笔 ZEREBRO 标本（score 87~95 强确认入场）
+  // 全部「峰值浮盈 +8.0~8.1% 保证金（0.4% 价格 @20x）→ 收尾 -30% 硬止损/-28% TREND_ENDED」
+  // ——30% 武装线在这个高波动 regime（ATR% 0.7~1.3/min）永远遥不可及，利润窗口裸奔。
+  // 8/5 = 峰值浮盈 8%（0.4% 价格）即武装保护、回撤 5%（0.25% 价格）落袋，净锁利下限 3%
+  // 保证金；哲学从「兑现大段才保护」改为「有利润就保护、不陪等」（用户定版）。
+  // ⚠️ Task 81 样本为 4 小时单 regime，阈值存在过拟合风险（用户知情接受），跨 regime 后复校。
   'strong-trend-v1': (p) =>
     new UniversalTrendStrategy(
-      { ENTRY_MIN_SCORE: 70, ...(p as UniversalTrendParams | undefined) },
+      {
+        ENTRY_MIN_SCORE: 70,
+        // Task 84 用户定版：利润保护提前武装（zerebro 三标本：峰值 +8.0~8.1% 全部回
+        // 吐至 -30% 硬止损）。8/5 = 0.4% 价格武装 / 0.25% 价格回吐落袋，净锁利 ≥3% 保证金
+        TRAIL_ARM_PCT: 8,
+        TRAIL_GIVEBACK_PCT: 5,
+        ...(p as UniversalTrendParams | undefined),
+      },
       {
         id: 'strong-trend-v1',
         name: '强趋势顺随引擎',
         description:
-          '强趋势顺随（Task 81 数据定版）：通用趋势引擎同一内核，唯一差异 = 入场评分下限 0→70' +
-          '——只做五因子证据近乎全亮的强确认。回测依据（131 笔反向样本正向镜像）：score≥70 子集 20 笔 ' +
-          '+57.57U、PF 3.37（全量 +27.53、PF 1.17），时间三分 -1.3/+12.4/+46.5（免疫前段亏损潮）；' +
-          '离场继承三层（硬止损 1.5% 价格、移动止盈 30/20、持有到 ENDED）。样本为 4 小时单 regime，' +
-          '阈值存在过拟合风险，跨 regime 后需复校',
+          '强趋势顺随（Task 81 数据定版 / Task 84 离场定版）：通用趋势引擎同一内核，入场评分下限 0→70' +
+          '——只做五因子证据近乎全亮的强确认（回测：score≥70 子集 20 笔 +57.57U、PF 3.37）。' +
+          '离场：硬止损 1.5% 价格；移动止盈 8/5（Task 84 用户定版——峰值浮盈 8% 保证金即武装、' +
+          '回撤 5% 落袋，净锁利下限 3%；zerebro 三笔标本峰值 +8.0~8.1% 全部回吐至 -30% 硬止损后定版，' +
+          '哲学 = 有利润就保护、不陪等）；持有到 ENDED。样本为 4 小时单 regime，阈值存在过拟合风险，' +
+          '跨 regime 后需复校',
       },
     ),
 };

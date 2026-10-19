@@ -890,3 +890,22 @@ Stage Summary:
 - 语义边界：在池数据缺失永不因退池离场（不误平仓精神保留）；重启后计时重算（保守）；强平/人工/反向确认路径不受影响
 - 环境留痕：本会话再次证实 Bash 后台进程活不过调用边界；唯一可用启动方式 = `(bun run dev > /tmp/orphan-dev.log 2>&1 &)` 孤儿模式（输出必须重定向；启动+验证须在同一次调用内完成，避免 harness 超时 kill 打断 boot）
 - 遗留：无（4 笔挂起仓的宽限计时已在跑，到期自动处理）
+
+---
+Task ID: 84
+Agent: main
+Task: 用户反馈「60 分钟也太长了——有利润或者亏的不多就可以直接出，等着等着就会变成硬止损；最近的两个 zerebro 都有机会盈利出但最后亏损出，再优化参数」——退池提前离场（DELIST_EARLY_EXIT）+ strong-trend-v1 移动止盈 30/20→8/5
+
+Work Log:
+- 取证：①「60 分钟」= Task 83 退池宽限 DELIST_EXIT_GRACE_MS=60min——用户指退池仓不该傻等；② zerebro 三笔标本（TrendTradeMeta）：score 87~95 强确认入场，mfe 全部 +8.0~8.1% 保证金（0.4% 价格 @20x）后回吐，收尾 STOP_LOSS -5.22/-5.89U 与 TREND_ENDED -5.61U——移动止盈武装线 30%（1.5% 价格）在该波动 regime（ATR% 0.7~1.3/min）永远遥不可及，利润窗口全程裸奔
+- 改动 A（退池提前离场）：config.ts 新增 DELIST_EARLY_EXIT_MAX_LOSS_PCT=10（保证金 %，「亏得不多」的工程量化=硬止损距离的 1/3）+ DELIST_EXIT_GRACE_MS 60→30min（宽限只剩深亏仓，用户定版「60 太长」缩半）；auto-trader maybeDelistTimeoutExit 重构为两层：①每 tick 评浮动盈亏（按执行侧 pos.side 的经济真值），浮盈 ≥0 或亏损 ≤10% → 立即 DELIST_EARLY_EXIT（不陪等宽限）；②深亏仓才走宽限计时（等重入池）超时 DELIST_TIMEOUT 兜底；行情不可用无法评估 → 保守走宽限
+- 改动 B（利润保护提前武装）：registry strong-trend-v1 工厂参数 TRAIL_ARM_PCT 30→8 / TRAIL_GIVEBACK_PCT 20→5（峰值浮盈 8%=0.4% 价格即武装、回撤 5%=0.25% 价格落袋，净锁利下限 3% 保证金）——反事实推演：三笔 zerebro 全部在峰值后回撤 ≥5% 触发 TRAIL_TAKE，合计约 +1.4U vs 实际 -16.7U；universal-trend-v1 默认 30/20 不受波及（S5 断言钉死）
+- 联动：view 原因标签「退池提前离场」+ 持仓「信号缺失」提示文案更新（旧文案「仅强平与人工管理」已过时）；report EXIT_SHORT/图例补 DELIST_EARLY_EXIT、DELIST_TIMEOUT 宽限文案 60→30
+- 测试：delist-timeout.test.ts 适配+新增（T-L1/L2/L3 夹具改 -25% 深亏价避开提前离场分支；新增 T-L6 盈利即出/T-L7 小亏 -6% 即出/T-L8 深亏 -25% 留宽限的分层边界）；strategy-strong-trend.test.ts S4 改 8/5 语义（zerebro 镜像：峰值 8.1 回撤到 3.0 落袋）+ S6 参数断言（工厂默认 8/5 + 控制台覆盖可用）
+- 验证：tsc/eslint 干净、bun test 130/130（+4）、孤儿模式重启 dev、config.strategyId==runningStrategyId==strong-trend-v1、lastError=null、strategies 端点新描述含 8/5
+- 上线即验证（重启后 3 tick 内 3 笔挂起仓自动分流）：ETHUSDT +11.44% → DELIST_EARLY_EXIT 利润落袋；CASHCATUSDT -7.01% → DELIST_EARLY_EXIT 小亏直接出；ICNTUSDT -27.4% 深亏 → 30min 宽限计时（等重入池，超时自动平）——用户「有利润或者亏的不多就直接出」全链路生效
+
+Stage Summary:
+- 交付：退池处理从「傻等 60min」升级为「盈利/小亏立即出 + 深亏 30min 宽限兜底」两层语义；strong-trend-v1 利润保护武装线 30%→8%、回吐线 20%→5%，zerebro 式「可盈未盈」标本从机制上被截断
+- 设计取舍：退池提前离场用执行侧盈亏（经济真值）而非信号侧（该仓已无策略评估）；宽限 30min 与候选 TTL 持平——重入池窗口让位于释放速度（用户明确「没必要继续等」）；移动止盈 8/5 与 Task 81 回测的 30/20 利润引擎存在 regime 张力，属用户明确指令 + 线上标本双重依据，跨 regime 复校时一并复评
+- 遗留：无（ICNT 深亏仓 30min 宽限计时进行中，到期自动处理）

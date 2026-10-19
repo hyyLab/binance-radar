@@ -3,8 +3,9 @@
 // S1 registry 注册:createStrategy('strong-trend-v1') 返回独立身份 + 默认 ENTRY_MIN_SCORE=70
 // S2 评分门槛 70 生效:score 69 拒(含门槛文案)/ score 70 放行(方向选择证据由 breakout 提供)
 // S3 控制台参数覆盖仍可用(工厂 spread 顺序:默认 70 → 覆盖参数可改)
-// S4 与 universal-trend-v1 行为同源:硬止损 1.5% 价格 / 移动止盈 30/20 完整继承
+// S4 离场层：硬止损 1.5% 价格（同源）/ 移动止盈 8/5（Task 84 用户定版，zerebro 标本镜像）
 // S5 向后兼容:new UniversalTrendStrategy() 默认身份不变(id universal-trend-v1 / 评分门槛 0)
+// S6 Task 84 参数断言:registry 工厂默认 TRAIL 8/5 生效，控制台仍可覆盖
 
 import { describe, expect, test } from 'bun:test';
 import {
@@ -116,7 +117,7 @@ describe('strong-trend-v1 强趋势顺随引擎(Task 81)', () => {
     expect((s as UniversalTrendStrategy).params.ENTRY_MIN_SCORE).toBe(60);
   });
 
-  test('S4 离场三层与 universal-trend-v1 同源:硬止损 1.5% / 移动止盈 30/20', () => {
+  test('S4 离场层:硬止损 1.5% 同源 / 移动止盈 8/5(zerebro 标本镜像)', () => {
     const s = createStrategy('strong-trend-v1');
     // 硬止损:模型 LONG,价格逆行 1.6% ≥ 1.5% → STOP_LOSS
     const sl = s.evaluateExit({
@@ -128,21 +129,22 @@ describe('strong-trend-v1 强趋势顺随引擎(Task 81)', () => {
     });
     expect(sl.exit).toBe(true);
     expect(sl.reason).toBe('STOP_LOSS');
-    // 移动止盈:峰值浮盈 40%(激活线 30)后回撤至 15%(回撤 25 ≥ 20)→ TRAIL_TAKE
+    // 移动止盈 8/5(Task 84,zerebro 三标本镜像:峰值 +8.1% 回吐到 +3.0% 即落袋,
+    // 旧参数 30/20 下这单会一路奔向 -30% 硬止损)
     const tt = s.evaluateExit({
-      meta: meta({ mfe: 40 }),
+      meta: meta({ mfe: 8.1 }),
       pos: { side: 'LONG', entryPrice: 100, qty: 2, margin: 10, openedAt: Date.now() - 60_000 },
-      mark: 100 * (1 + (0.15 * 10) / (2 * 100)),
+      mark: 100 * (1 + (0.03 * 10) / (2 * 100)), // 实时浮盈 +3%:回撤 5.1 ≥ 5
       signal: null,
       now: Date.now(),
     });
     expect(tt.exit).toBe(true);
     expect(tt.reason).toBe('TRAIL_TAKE');
-    // 未达线:浮盈 15% 无峰值回撤 → 不离场
+    // 未武装:浮盈 +7.9% < 8% 武装线 → 无保护、不离场(等回撤线/止损/ENDED)
     const hold = s.evaluateExit({
       meta: meta(),
       pos: { side: 'LONG', entryPrice: 100, qty: 2, margin: 10, openedAt: Date.now() - 60_000 },
-      mark: 100 * (1 + (0.15 * 10) / (2 * 100)),
+      mark: 100 * (1 + (0.079 * 10) / (2 * 100)),
       signal: null,
       now: Date.now(),
     });
@@ -155,8 +157,23 @@ describe('strong-trend-v1 强趋势顺随引擎(Task 81)', () => {
     expect(s.name).toBe('通用趋势引擎');
     expect(s.params.ENTRY_MIN_SCORE).toBe(UNIVERSAL_TREND.ENTRY_MIN_SCORE);
     expect(s.params.ENTRY_MIN_SCORE).toBe(0);
+    // Task 84:strong-trend 的 8/5 只存在于注册表工厂,universal-trend-v1 默认 30/20 不受波及
+    expect(s.params.TRAIL_ARM_PCT).toBe(UNIVERSAL_TREND.TRAIL_ARM_PCT);
+    expect(s.params.TRAIL_ARM_PCT).toBe(30);
+    expect(s.params.TRAIL_GIVEBACK_PCT).toBe(20);
     // 原策略低分确认 + 方向选择证据照样放行(U2 回归)
     const v = s.evaluateEntry(sig({ phase: 'CONFIRMED_UP', score: 30, breakout: 'up' }), ctx());
     expect(v.want).toBe(true);
+  });
+
+  test('S6 Task 84 参数断言:registry 工厂默认 TRAIL 8/5,控制台覆盖仍可用', () => {
+    const s = createStrategy('strong-trend-v1') as UniversalTrendStrategy;
+    expect(s.params.ENTRY_MIN_SCORE).toBe(70);
+    expect(s.params.TRAIL_ARM_PCT).toBe(8);
+    expect(s.params.TRAIL_GIVEBACK_PCT).toBe(5);
+    // 控制台热装配仍可覆盖(工厂 spread 顺序:默认 → 覆盖参数最后)
+    const ov = createStrategy('strong-trend-v1', { TRAIL_ARM_PCT: 15 }) as UniversalTrendStrategy;
+    expect(ov.params.TRAIL_ARM_PCT).toBe(15);
+    expect(ov.params.TRAIL_GIVEBACK_PCT).toBe(5); // 未覆盖项保持工厂默认
   });
 });

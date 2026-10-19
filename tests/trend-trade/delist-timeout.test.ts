@@ -1,13 +1,17 @@
-// ---------- Task 83 回归测试：退池超时自动离场（信号缺失 ≠ 无限期挂起） ----------
+// ---------- Task 83/84 回归测试：退池自动离场（信号缺失 ≠ 无限期挂起） ----------
 // 背景（实测）：TIA/CASHCAT/ZEREBRO 等持仓标的退池后失去信号，manageExits 原语义
 // 「信号缺失不误平仓」→ 仓位无限期挂起，只受强平/人工管理：① 占舱位与保证金挤压
 // 新仓开仓；② 20x 杠杆下策略离场评估（含硬止损）不再运行，风险敞口失控。
-// 本组测试钉死 Task 83 语义：
-//   T-L1 退池宽限内不离场：信号消失 → 计时开始，仓位保留（等待重入池）
-//   T-L2 退池超时自动平仓：无信号持续 ≥ 宽限 → exitReason=DELIST_TIMEOUT，舱位释放
+// 本组测试钉死 Task 83 + Task 84 语义：
+//   T-L1 深亏仓退池宽限内不离场：信号消失 → 计时开始，仓位保留（等待重入池；Task 84：
+//        只有深亏仓才走宽限——夹具用 -25% 保证金深亏价，避开提前离场分支）
+//   T-L2 深亏仓退池超时自动平仓：无信号持续 ≥ 宽限 → exitReason=DELIST_TIMEOUT，舱位释放
 //   T-L3 重新入池解除计时：信号恢复 → 计时清空；再次退池重新起算（不继承旧计时）
 //   T-L4 在池数据缺失不计时：DATA_UNAVAILABLE 信号仍在信号表内 → 不进入退池流程
 //   T-L5 事件循环不参与计时：manageExits(空表, false) 不启动/推进退池计时
+//   T-L6 退池提前离场·盈利（Task 84）：有利润就直接出，不陪等宽限 → DELIST_EARLY_EXIT
+//   T-L7 退池提前离场·小亏（Task 84）：亏得不多（≤ 10% 保证金）也直接出 → DELIST_EARLY_EXIT
+//   T-L8 深亏仓不提前离场（Task 84 分层边界）：-25% 保证金 > 10% 上限 → 留在宽限计时
 
 import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { execSync } from 'node:child_process';
@@ -260,6 +264,11 @@ async function seedRunningConfig(): Promise<void> {
 
 const GRACE = TREND_TRADE.DELIST_EXIT_GRACE_MS;
 
+/** 深亏标记价：仓位 margin=20/qty=4@entry 100（marginRatio 0.2×20x），
+ *  98.75 = -1.25% 价格 = -25% 保证金——超出 DELIST_EARLY_EXIT_MAX_LOSS_PCT(10) 的深亏区。
+ *  Task 84 后「退池不离场」只属于深亏仓，宽限类测试必须用这个价避开提前离场分支。 */
+const DEEP_LOSS_MARK = 98.75;
+
 /** 退池计时表（内部状态；时间旅行直接拨表，避免测试真实等待 60 分钟） */
 function delistMap(trader: AutoPaperTrader): Map<string, number> {
   return (trader as unknown as { delistSince: Map<string, number> }).delistSince;
@@ -290,8 +299,8 @@ afterAll(async () => {
   await client.$disconnect();
 });
 
-describe('Task 83 退池超时自动离场', () => {
-  test('T-L1 退池宽限内不离场：信号消失 → 计时开始，仓位保留', async () => {
+describe('Task 83/84 退池自动离场（提前离场 + 超时兑底）', () => {
+  test('T-L1 深亏仓退池宽限内不离场：信号消失 → 计时开始，仓位保留', async () => {
     await seedRunningConfig();
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
@@ -299,6 +308,7 @@ describe('Task 83 退池超时自动离场', () => {
     const trader = await openOnePosition(signals, engine);
     expect((await openPositions()).length).toBe(1);
 
+    engine.marks.set('BTCUSDT', DEEP_LOSS_MARK); // -25% 保证金：深亏区，不走提前离场
     signals.length = 0; // 退池：信号表清空
     await trader.tick();
     expect((await openPositions()).length).toBe(1); // 宽限内仓位保留
@@ -308,7 +318,7 @@ describe('Task 83 退池超时自动离场', () => {
     expect((await openPositions()).length).toBe(1); // 仍不离场
   });
 
-  test('T-L2 退池超时自动平仓：exitReason=DELIST_TIMEOUT，舱位释放', async () => {
+  test('T-L2 深亏仓退池超时自动平仓：exitReason=DELIST_TIMEOUT，舱位释放', async () => {
     await seedRunningConfig();
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
@@ -316,11 +326,12 @@ describe('Task 83 退池超时自动离场', () => {
     const trader = await openOnePosition(signals, engine);
     expect((await openPositions()).length).toBe(1);
 
+    engine.marks.set('BTCUSDT', DEEP_LOSS_MARK); // 深亏区：不走提前离场，走宽限计时
     signals.length = 0; // 退池
     await trader.tick(); // 计时开始
     expect(delistMap(trader).has('BTCUSDT')).toBe(true);
 
-    // 时间旅行：无信号已持续超过宽限期（真实场景 = 60 分钟无信号）
+    // 时间旅行：无信号已持续超过宽限期（真实场景 = 30 分钟无信号）
     delistMap(trader).set('BTCUSDT', Date.now() - GRACE - 1_000);
     await trader.tick();
 
@@ -334,7 +345,7 @@ describe('Task 83 退池超时自动离场', () => {
     expect(delistMap(trader).has('BTCUSDT')).toBe(false); // 平仓后计时表清除
   });
 
-  test('T-L3 重新入池解除计时；再次退池重新起算', async () => {
+  test('T-L3 深亏仓重新入池解除计时；再次退池重新起算', async () => {
     await seedRunningConfig();
     const engine = new FakePaperEngine();
     engine.marks.set('BTCUSDT', 100);
@@ -342,6 +353,7 @@ describe('Task 83 退池超时自动离场', () => {
     const trader = await openOnePosition(signals, engine);
     expect((await openPositions()).length).toBe(1);
 
+    engine.marks.set('BTCUSDT', DEEP_LOSS_MARK); // 深亏区：不触发提前离场
     signals.length = 0; // 第一次退池
     await trader.tick();
     expect(delistMap(trader).has('BTCUSDT')).toBe(true); // 计时启动
@@ -382,11 +394,65 @@ describe('Task 83 退池超时自动离场', () => {
     const trader = await openOnePosition(signals, engine);
 
     // MAJOR 事件循环每秒调 manageExits(new Map(), false)：无信号但不得碰计时表
+    // （也不得触发提前离场——计时权与离场权唯一属于主循环信号快照）
     await (trader as unknown as { manageExits(m: Map<string, unknown>, check: boolean): Promise<void> }).manageExits(
       new Map(),
       false,
     );
     expect(delistMap(trader).size).toBe(0); // 计时权唯一属于主循环信号快照
     expect((await openPositions()).length).toBe(1);
+  });
+
+  test('T-L6 退池提前离场·盈利：有利润就直接出，不陪等宽限（Task 84）', async () => {
+    await seedRunningConfig();
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', score: 85, cycleId: CYCLE })];
+    const trader = await openOnePosition(signals, engine);
+    expect((await openPositions()).length).toBe(1);
+
+    engine.marks.set('BTCUSDT', 100.5); // +0.5% 价格 = +10% 保证金：浮盈
+    signals.length = 0; // 退池
+    await trader.tick(); // 第一 tick 就应提前离场（不等宽限计时）
+
+    expect((await openPositions()).length).toBe(0); // 舱位立即释放
+    const pos = await client.paperPosition.findFirst({ where: { symbol: 'BTCUSDT' } });
+    const meta = await trendTradeRepo.getMeta(pos!.id);
+    expect(meta?.status).toBe('CLOSED');
+    expect(meta?.exitReason).toBe('DELIST_EARLY_EXIT');
+    expect(delistMap(trader).has('BTCUSDT')).toBe(false); // 计时表不残留
+  });
+
+  test('T-L7 退池提前离场·小亏：亏得不多（≤10% 保证金）也直接出（Task 84）', async () => {
+    await seedRunningConfig();
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', score: 85, cycleId: CYCLE })];
+    const trader = await openOnePosition(signals, engine);
+    expect((await openPositions()).length).toBe(1);
+
+    engine.marks.set('BTCUSDT', 99.7); // -0.3% 价格 = -6% 保证金：小亏区（-6 ≥ -10）
+    signals.length = 0; // 退池
+    await trader.tick();
+
+    expect((await openPositions()).length).toBe(0); // 不等宽限直接出
+    const pos = await client.paperPosition.findFirst({ where: { symbol: 'BTCUSDT' } });
+    const meta = await trendTradeRepo.getMeta(pos!.id);
+    expect(meta?.exitReason).toBe('DELIST_EARLY_EXIT');
+  });
+
+  test('T-L8 深亏仓不提前离场：-25% 保证金超出 -10% 上限，留在宽限计时（Task 84 分层边界）', async () => {
+    await seedRunningConfig();
+    const engine = new FakePaperEngine();
+    engine.marks.set('BTCUSDT', 100);
+    const signals = [sig({ symbol: 'BTCUSDT', phase: 'CONFIRMED_UP', score: 85, cycleId: CYCLE })];
+    const trader = await openOnePosition(signals, engine);
+    expect((await openPositions()).length).toBe(1);
+
+    engine.marks.set('BTCUSDT', DEEP_LOSS_MARK); // -25% 保证金 < -10% 下限
+    signals.length = 0; // 退池
+    await trader.tick();
+    expect((await openPositions()).length).toBe(1); // 不提前离场
+    expect(delistMap(trader).has('BTCUSDT')).toBe(true); // 进入宽限计时（等重入池/超时兑底）
   });
 });

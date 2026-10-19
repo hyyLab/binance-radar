@@ -780,6 +780,9 @@ export class AutoPaperTrader {
    * 信号缺失（退池）原语义「不误平仓，仅强平/人工管理」→ Task 83 升级：宽限期
    * （DELIST_EXIT_GRACE_MS）内保留等待重入池，超时自动平仓释放舱位/保证金
    * （退池仓的策略离场评估含硬止损本就不再运行，无限期挂起 = 20x 杠杆裸奔）。
+   * Task 84 再升级：退池即评浮动盈亏——有利润或亏得不多（≤DELIST_EARLY_EXIT_MAX_LOSS_PCT）
+   * 立即离场（DELIST_EARLY_EXIT），不陪等宽限（用户：「等着等着就会变成硬止损」）；
+   * 只有深亏仓才走宽限计时等待重入池，超时 DELIST_TIMEOUT 兑底。
    * 计时仅由主循环信号快照驱动（delistCheck=true）；MAJOR 事件循环传空信号表，不计时。 */
   private async manageExits(
     bySymbol: Map<string, UnifiedTrendSignal>,
@@ -790,7 +793,7 @@ export class AutoPaperTrader {
     for (const meta of openMetas) {
       const signal = bySymbol.get(meta.symbol) ?? null;
       if (!signal) {
-        // Task 83：退池超时自动离场（宽限内重入池自动解除；触发即平仓释放资源）
+        // Task 83/84：退池自动离场（提前离场 + 超时兑底；宽限内重入池自动解除）
         if (delistCheck && (await this.maybeDelistTimeoutExit(meta))) continue;
         if (!eventDriven) continue;
       } else {
@@ -874,17 +877,44 @@ export class AutoPaperTrader {
     }
   }
 
-  /** Task 83：退池超时判定（仅在 manageExits 持真实信号快照时调用）。
-   *  返回 true = 已触发平仓（调用方 continue 跳过后续管理）；false = 宽限内继续观察。
-   *  平仓失败（行情不可用等 PaperError）由 closePosition 内部捕获下轮重试，计时已到
-   *  每轮重试直至成功；无信号持仓本就没有策略离场评估，这里不影响任何其他离场路径。 */
+  /** Task 83/84：退池自动离场判定（仅在 manageExits 持真实信号快照时调用）。
+   *  返回 true = 已触发平仓（调用方 continue 跳过后续管理）；false = 继续观察。
+   *  Task 84 语义分层（用户定版「有利润或者亏的不多就可以直接出，没必要继续等」）：
+   *  ① 提前离场：退池后每 tick 评估浮动盈亏（保证金口径，按执行侧 pos.side 计算
+   *     ——退仓仓没有策略评估，这里用经济真值而非信号侧），浮盈 ≥ 0 或亏损 ≤
+   *     DELIST_EARLY_EXIT_MAX_LOSS_PCT → 立即 DELIST_EARLY_EXIT 离场，等只会等来
+   *     更差的价格（无信号可依，回本无锚）；行情不可用时无法评估 → 保守走宽限。
+   *  ② 深亏仓：继续走宽限计时（等重入池），超时 → DELIST_TIMEOUT 兑底释放舱位。
+   *  平仓失败（行情不可用等 PaperError）由 closePosition 内部捕获下轮重试，每轮
+   *  重试直至成功；无信号持仓本就没有策略离场评估，这里不影响任何其他离场路径。 */
   private async maybeDelistTimeoutExit(meta: TrendTradeMetaRow): Promise<boolean> {
+    // —— Task 84 ①：提前离场（有利润 / 小亏直接出，不陪等宽限）
+    const mark = this.deps.markPrice(meta.symbol);
+    if (mark > 0) {
+      const pos = await db.paperPosition.findUnique({ where: { id: meta.positionId } });
+      if (pos && pos.status === 'OPEN' && pos.margin > 0) {
+        const sign = pos.side === 'LONG' ? 1 : -1;
+        const pnlPct = ((mark - pos.entryPrice) * pos.qty * sign / pos.margin) * 100;
+        if (pnlPct >= -TREND_TRADE.DELIST_EARLY_EXIT_MAX_LOSS_PCT) {
+          logDecision(
+            `退池提前离场 symbol=${meta.symbol} 浮动盈亏 ${pnlPct.toFixed(2)}%（保证金口径）` +
+              `≥ -${TREND_TRADE.DELIST_EARLY_EXIT_MAX_LOSS_PCT}% 下限（有利润或亏得不多，` +
+              `不陪等宽限直接出） → 平仓释放舱位 positionId=${meta.positionId}`,
+          );
+          await this.closePosition(meta, 'DELIST_EARLY_EXIT', null);
+          this.delistSince.delete(meta.symbol);
+          return true;
+        }
+      }
+    }
+
+    // —— Task 83 ②：深亏仓宽限计时（等重入池；超时兑底离场）
     const now = Date.now();
     const since = this.delistSince.get(meta.symbol);
     if (since == null) {
       this.delistSince.set(meta.symbol, now);
       logDecision(
-        `退池计时开始 symbol=${meta.symbol}（无信号=已退池/未评估；宽限 ` +
+        `退池计时开始 symbol=${meta.symbol}（深亏仓等重入池：无信号=已退池/未评估；宽限 ` +
           `${Math.round(TREND_TRADE.DELIST_EXIT_GRACE_MS / 60_000)} 分钟后自动平仓，` +
           `重新入池自动解除） positionId=${meta.positionId}`,
       );
