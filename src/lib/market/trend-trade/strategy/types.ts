@@ -118,6 +118,9 @@ export interface TrendStrategy {
   /** 入场评估（该 symbol 无持仓、信号 dataFresh 时调用；相位/方向门槛由策略全权定义） */
   evaluateEntry(signal: UnifiedTrendSignal, ctx: StrategyMarketCtx): StrategyEntryVerdict;
 
+  /** Optional override for confirmed-reverse exit; default keeps the infrastructure's side-based rule. */
+  shouldCloseOnConfirmedReverse?(meta: TrendTradeMetaRow, signal: UnifiedTrendSignal): boolean;
+
   /** 离场评估（该 symbol 有 OPEN 持仓时调用；基础设施离场规则在此之前已处理） */
   evaluateExit(input: {
     meta: TrendTradeMetaRow;
