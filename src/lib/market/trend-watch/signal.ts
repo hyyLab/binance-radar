@@ -21,6 +21,18 @@ export type TrendPhaseV2 =
 
 export type TrendDir = 'up' | 'down' | 'flat';
 
+/** UTE 原始五因子证据（直接来自 vendor assessTrend，不在策略层重算）。 */
+export interface UteDecisionEvidence {
+  returnPct: number;
+  directionalConsistency: number;
+  volumeRatio: number;
+  breakout: 'up' | 'down' | 'none';
+  rangeExpansion: number;
+  anomalyFlag: boolean;
+  barsUsed: number;
+  latestBarTime: number;
+}
+
 /** 趋势周期标识：{symbol}:{L|S}:{确认时刻ms}；持仓关联与交易幂等键的组成部分 */
 export type TrendCycleId = string;
 
@@ -67,6 +79,8 @@ export interface UnifiedTrendSignal {
   strength: number;
   /** UTE 连续确认计数（不同已收盘 K 线） */
   confirmCount: number;
+  /** 原始 UTE 五因子快照，供新策略联动决策与审计使用。 */
+  uteEvidence?: UteDecisionEvidence | null;
 
   /** 波动率与结构特征（本模块计算） */
   features: VolatilityFeatures;
