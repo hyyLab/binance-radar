@@ -186,8 +186,13 @@ export class AdaptiveUteV2Strategy implements TrendStrategy {
       rejectionWick, counterBreakout, failedBreakout, htfOpposed, lateMoveExhaustion,
     ].filter(Boolean).length;
     const cueCount = [
-      rejectionWick, counterBreakout, failedBreakout, h5Opposed, h15Opposed,
-      dryVolume, erCollapse, rangeClimax,
+      rejectionWick,
+      counterBreakout,
+      failedBreakout,
+      htfOpposed, // 5m/15m 冲突属于同一类证据，不因两个周期同时冲突重复计数
+      dryVolume,
+      erCollapse,
+      rangeClimax,
     ].filter(Boolean).length;
 
     const cueNames = [
