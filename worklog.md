@@ -909,3 +909,22 @@ Stage Summary:
 - 交付：退池处理从「傻等 60min」升级为「盈利/小亏立即出 + 深亏 30min 宽限兜底」两层语义；strong-trend-v1 利润保护武装线 30%→8%、回吐线 20%→5%，zerebro 式「可盈未盈」标本从机制上被截断
 - 设计取舍：退池提前离场用执行侧盈亏（经济真值）而非信号侧（该仓已无策略评估）；宽限 30min 与候选 TTL 持平——重入池窗口让位于释放速度（用户明确「没必要继续等」）；移动止盈 8/5 与 Task 81 回测的 30/20 利润引擎存在 regime 张力，属用户明确指令 + 线上标本双重依据，跨 regime 复校时一并复评
 - 遗留：无（ICNT 深亏仓 30min 宽限计时进行中，到期自动处理）
+
+---
+Task ID: 85
+Agent: main
+Task: 用户复盘定版「退池提前离场可能并不是一个好的策略——cashcat 和 icnt 在我们平仓之后都有着不小的涨幅，回退之前的版本；退池之后的操作单独用策略内的条件来判断」
+
+Work Log:
+- 取证实锤（用户判断正确）：cashcat/icnt 两笔均死於 DELIST_EARLY_EXIT——CASHCAT -7.01% 割掉后 +4.67%（现价仍 +4.67%）；ICNT 更典型：Task 84 上线时 -27.4% 深亏进宽限计时 → 反弹至 -9.9% 时被「小亏即出（≤10%）」割掉 → 45 分钟后 +10.83%（20x 下 ≈ +216% 保证金）。两笔都是「割在黎明前」，机制性卖飞
+- 根因认知升级：Task 83/84 用「退池特殊离场规则」填补「退池后策略评估不运行」的空白，但特殊规则本身无策略依据（盈亏阈值拍脑袋）——正确解法不是发明新规则，而是让策略内出场条件在退池后继续运行。TrendStrategy.evaluateExit 接口本就支持 signal=null（事件驱动策略既有语义），universal-trend 三层出场中硬止损/移动止盈为纯价格驱动不依赖信号，第三层走弱先走有 signal && 守卫自然跳过——零接口改动即可让策略条件接管退池仓
+- 回退实施：auto-trader.ts 删除 delistSince 计时表/maybeDelistTimeoutExit（提前离场+超时兑底两层全删）/manageExits 第二参 delistCheck，信号缺失分支从「特殊离场+continue」改为直接落入策略评估（evaluateExit 传 signal=null）；事件循环 manageExits(new Map()) 同语义（空表=按 signal=null 评估，价格驱动离场每秒多一次兜底，不再依赖主循环 10s 节拍）；config.ts 删 DELIST_EARLY_EXIT_MAX_LOSS_PCT/DELIST_EXIT_GRACE_MS/TrendExitReason 两枚举；report.ts/trend-trade-view.tsx 映射清理
+- 保留：strong-trend-v1 移动止盈 8/5（Task 84 改动 B）——它是策略内条件，正是用户要依靠的出场判断，与退池机制无关
+- 测试重写：delist-timeout.test.ts 删除 → delist-strategy-exit.test.ts 6 项（strong-trend-v1 固定装配）：T-S1 退池小亏 -6% 保证金不割（cashcat/icnt 回归钉死，多轮 tick 反复确认）/T-S2 退池硬止损继续生效（-1.6% 价格 → STOP_LOSS）/T-S3 退池移动止盈继续生效（在池 mfe 武装 10% → 退池回撤 8% → TRAIL_TAKE 锁利，cashcat/icnt 反事实）/T-S4 退池重入池后 ENDED 基础设施离场恢复/T-S5 在池 DATA_UNAVAILABLE 不误平（语义保持）/T-S6 事件循环空表也评估策略出场（新语义钉死）
+- 验证：tsc 改动面 0 错误、bun test 128/128 全绿、孤儿模式重启 dev（./node_modules/.bin/next dev 路径启动，裸 next 会 PATH not found）、runningStrategyId=strong-trend-v1、lastError=null、当前无在途持仓（干净状态切入新语义）
+
+Stage Summary:
+- 交付：退池（信号缺失）处理回归「策略内条件单一裁决」——不因退池触发任何特殊离场，持仓由硬止损/移动止盈/重入池后 ENDED 继续管理，强平巡检独立兜底；Task 83/84 两个离场原因与全部特殊路径移除
+- 语义闭环：在池（真实信号）= 完整三层评估 + 基础设施离场；退池 = 价格驱动层（止损/移动止盈）+ mfe/mae 统计照常，信号依赖层（走弱先走/ENDED/反向）静候重入池；事件循环每秒按 signal=null 补充评估
+- 设计哲学修正（用户洞察）：特殊规则是对策略失效的补丁，补丁本身会引入新的非策略风险（卖飞）；正确方向是扩大策略覆盖域（让策略条件在信号缺失时继续运行）而非叠加规则
+- 遗留：无；cashcat/icnt 已平仓不回补（模拟盘不追单），新语义对后续同类场景生效

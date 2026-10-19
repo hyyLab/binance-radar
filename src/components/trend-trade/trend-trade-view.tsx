@@ -89,8 +89,6 @@ const EXIT_REASON_LABEL: Record<string, string> = {
   TRAIL_TAKE: '移动止盈',
   WEAKNESS_EARLY: '走弱离场',
   // Task 83/84：退池自动离场（提前离场：有利润/小亏不陪等宽限；超时：深亏仓宽限兑底）
-  DELIST_EARLY_EXIT: '退池提前离场',
-  DELIST_TIMEOUT: '退池超时',
 };
 
 const PHASE_V2_LABEL: Record<string, string> = {
