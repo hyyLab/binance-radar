@@ -417,6 +417,23 @@ export class PaperEngine {
   }
 
   async close(positionId: string): Promise<{ pnl: number; symbol: string; side: string; price: number }> {
+    const r = await this.closePartial(positionId, null);
+    return { pnl: r.pnl, symbol: r.symbol, side: r.side, price: r.price };
+  }
+
+  /**
+   * 部分平仓（PA 整合新增：TP1 分批止盈/剩余仓退出共用，全仓平仓 = qty 传 null）。
+   * 资金/费用口径（与全仓 close 严格一致，按比例分摊）：
+   * - closeQty/pos.qty 为分摊比例 share；保证金释放 = margin×share；
+   * - openFee 按 share 结转到本笔交易盈亏，剩余 openFee 留在仓位（最终平仓再扣）；
+   * - 每笔 PaperTrade 行 pnl = 毛盈亏份额 − 平仓费份额 − openFee 份额 →
+   *   全部行求和 = 整仓净盈亏（与一次全仓平仓等价，账目可审计）；
+   * - 仓位保持 OPEN（qty/margin 同步缩减）；qty 清零场景自动转为全仓平仓终态。
+   */
+  async closePartial(
+    positionId: string,
+    qty: number | null,
+  ): Promise<{ pnl: number; symbol: string; side: string; price: number; closedFully: boolean; closeQty: number }> {
     this.kickFeeds();
     const acc = await this.getAccount();
     await this.liquidationCheck(acc.id);
@@ -428,26 +445,62 @@ export class PaperEngine {
     const mark = this.markPrice(pos.symbol);
     if (mark <= 0) throw new PaperError('行情暂不可用，请稍后再试');
 
+    const closeQty = qty == null ? pos.qty : Math.min(Math.max(qty, 0), pos.qty);
+    const fullClose = closeQty >= pos.qty - 1e-12;
+    if (closeQty <= 1e-12) throw new PaperError('平仓数量必须为正');
+
+    const share = fullClose ? 1 : closeQty / pos.qty;
     const sign = this.dirSign(pos.side);
-    const grossPnl = (mark - pos.entryPrice) * pos.qty * sign;
-    const closeFee = mark * pos.qty * this.feeRate;
-    // 净盈亏扣除双边手续费：开仓费（开仓时已从余额扣除）+ 平仓费（此处结算时扣除）
-    const netPnl = grossPnl - closeFee - pos.openFee;
+    const grossPnl = (mark - pos.entryPrice) * closeQty * sign;
+    const closeFee = mark * closeQty * this.feeRate;
+    const openFeeShare = pos.openFee * share;
+    const netPnl = grossPnl - closeFee - openFeeShare;
+    const marginRelease = pos.margin * share;
+
+    if (fullClose) {
+      await db.$transaction([
+        db.paperPosition.update({
+          where: { id: pos.id },
+          data: {
+            status: 'CLOSED',
+            exitPrice: mark,
+            pnl: netPnl,
+            closeFee,
+            closedAt: new Date(),
+          },
+        }),
+        db.paperAccount.update({
+          where: { id: acc.id },
+          data: { balance: { increment: marginRelease + grossPnl - closeFee } },
+        }),
+        db.paperTrade.create({
+          data: {
+            accountId: acc.id,
+            positionId: pos.id,
+            symbol: pos.symbol,
+            action: pos.side === 'LONG' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
+            price: mark,
+            qty: closeQty,
+            fee: closeFee,
+            pnl: netPnl,
+          },
+        }),
+      ]);
+      return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark, closedFully: true, closeQty };
+    }
 
     await db.$transaction([
       db.paperPosition.update({
         where: { id: pos.id },
         data: {
-          status: 'CLOSED',
-          exitPrice: mark,
-          pnl: netPnl,
-          closeFee,
-          closedAt: new Date(),
+          qty: pos.qty - closeQty,
+          margin: pos.margin - marginRelease,
+          openFee: pos.openFee - openFeeShare,
         },
       }),
       db.paperAccount.update({
         where: { id: acc.id },
-        data: { balance: { increment: pos.margin + grossPnl - closeFee } },
+        data: { balance: { increment: marginRelease + grossPnl - closeFee } },
       }),
       db.paperTrade.create({
         data: {
@@ -456,14 +509,13 @@ export class PaperEngine {
           symbol: pos.symbol,
           action: pos.side === 'LONG' ? 'CLOSE_LONG' : 'CLOSE_SHORT',
           price: mark,
-          qty: pos.qty,
+          qty: closeQty,
           fee: closeFee,
           pnl: netPnl,
         },
       }),
     ]);
-
-    return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark };
+    return { pnl: netPnl, symbol: pos.symbol, side: pos.side, price: mark, closedFully: false, closeQty };
   }
 
   /** 充值：增加可用余额与本金基数（不计入盈亏） */
@@ -553,8 +605,19 @@ const gAuto = globalThis as typeof globalThis & {
   // key 重建才能让运行中的自动账户切到 0.02%（改行为必 bump 纪律）。
   __binanceRadarPaperAuto_v1?: PaperEngine;
   __binanceRadarPaperAuto_v2?: PaperEngine;
+  // v3（PA 整合）：按 accountName 缓存实例——旧实现单一 key 忽略 accountName，
+  // paperEngineFor('pa-auto-v1') 会错误返回 trend-auto-v1 的实例（资金/持仓串账户）。
+  // per-account 缓存后：trend-auto-v1 解析结果不变（同名仍命中 v2 实例语义），
+  // 新增 pa-auto-v1 拿到真正隔离的引擎。类方法无内存状态，重建安全。
+  __binanceRadarPaperAuto_v3?: Map<string, PaperEngine>;
 };
 export function paperEngineFor(accountName: string, feeRate?: number): PaperEngine {
   if (accountName === 'default') return paperEngine;
-  return (gAuto.__binanceRadarPaperAuto_v2 ??= new PaperEngine(accountName, feeRate ?? TAKER_FEE));
+  const store = (gAuto.__binanceRadarPaperAuto_v3 ??= new Map<string, PaperEngine>());
+  let eng = store.get(accountName);
+  if (!eng) {
+    eng = new PaperEngine(accountName, feeRate ?? TAKER_FEE);
+    store.set(accountName, eng);
+  }
+  return eng;
 }

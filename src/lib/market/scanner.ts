@@ -126,6 +126,27 @@ export class MarketScanner {
     return this.levels;
   }
 
+  /**
+   * PA 整合（pa-action-v1）只读访问接口：当前扫描宇宙成员快照（涨幅榜/跌幅榜/近4h异动
+   * 三类来源标签 + 入宇宙时间）。只读、无副作用、不触发扫描——供全池扫描适配层读取，
+   * 不改变扫描器任何行为（任务书 §12「只读行情缓存访问接口」允许的兼容性扩展）。
+   */
+  getUniverseSymbols(): { symbol: string; tags: string[]; joinedAt: number }[] {
+    const out: { symbol: string; tags: string[]; joinedAt: number }[] = [];
+    for (const [symbol, m] of this.universe) {
+      out.push({ symbol, tags: [...m.tags], joinedAt: m.joinedAt });
+    }
+    return out;
+  }
+
+  /** PA 整合配套：停表（单例 bump key 重建时由装配代码调用，防止旧实例定时器双跑） */
+  stop(): void {
+    if (this.signalTimer) clearInterval(this.signalTimer);
+    if (this.levelTimer) clearInterval(this.levelTimer);
+    this.signalTimer = null;
+    this.levelTimer = null;
+  }
+
   /** 排行榜快照：24h 涨幅榜 / 跌幅榜（剔除代币化股票 / 商品代币与低成交额币种） */
   private boards() {
     const rows = collector
@@ -290,4 +311,18 @@ const g = globalThis as typeof globalThis & {
   __binanceRadarScanner?: MarketScanner;
 };
 
-export const scanner: MarketScanner = (g.__binanceRadarScanner ??= new MarketScanner());
+// v2（PA 整合）：bump key 重建——旧实例缺 PA 只读接口 getUniverseSymbols/stop()；
+// 重建时先停旧实例定时器（防止双跑）。宇宙/信号缓存约 10 分钟内自愈重建。
+export const scanner: MarketScanner = (() => {
+  const prev = g.__binanceRadarScanner;
+  if (prev && typeof (prev as unknown as { stop?: () => void }).stop === 'function') {
+    try {
+      prev.stop();
+    } catch {
+      /* 旧实例停表失败忽略 */
+    }
+  }
+  const inst = new MarketScanner();
+  g.__binanceRadarScanner = inst;
+  return inst;
+})();
