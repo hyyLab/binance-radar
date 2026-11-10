@@ -231,3 +231,137 @@ model TrendStrategyState {
 
   @@id([strategyId, symbol])
 }
+
+// ---------- PA 整合（pa-action-v1）----------
+// 独立模拟账户 pa-auto-v1 的全部状态表。建表由 src/lib/pa-integration/repo.ts 的
+// ensurePaSchema() 以幂等 SQL（CREATE TABLE IF NOT EXISTS + PRAGMA 补列）完成——
+// 不使用 prisma db push / migrate reset（任务书红线：增量迁移、不清库、不重置）。
+// 此处模型定义仅供 Prisma client 类型生成（bunx prisma generate，不触碰数据库）。
+
+// 运行配置（单行，id 固定 'pa-action-v1'；页面可调、API 后端校验）
+model PaActionConfig {
+  id                   String   @id // 'pa-action-v1'
+  enabled              Int      @default(0) // 策略总开关（0=停新开仓；持仓管理照常）
+  aiEnabled            Int      @default(1)
+  mainTimeframe        String   @default("5m")
+  htfTimeframe         String   @default("15m")
+  riskPerTradePct      Float    @default(0.5)
+  maxPositions         Int      @default(3)
+  maxTotalRiskPct      Float    @default(2)
+  leverage             Int      @default(10)
+  leverageCap          Int      @default(20)
+  tp1CloseRatio        Float    @default(0.5)
+  breakevenAfterTp1    Int      @default(0)
+  orderExpiryMs        Int      @default(1800000)
+  entryMaxDeviationPct Float    @default(0.3)
+  stopCooldownMs       Int      @default(1800000)
+  analysisCooldownMs   Int      @default(900000)
+  aiConcurrency        Int      @default(2)
+  minRiskReward        Float    @default(1.0)
+  feeRate              Float    @default(0.0002)
+  slippageBps          Int      @default(2)
+  updatedAt            DateTime @updatedAt
+}
+
+// 全池扫描候选（symbol 唯一；多池来源合并为 sourcePoolsJson）
+model PaCandidate {
+  symbol               String   @id
+  status               String   @default("DISCOVERED") // PACandidateStatus
+  sourcePoolsJson      String   @default("[]")
+  uteDirection         String? // up | down | flat
+  utePhase             String?
+  uteScore             Float?
+  trendCycleId         String?
+  coordinationState    String? // ALIGNED | PULLBACK_DIVERGENCE | STRUCTURAL_CONFLICT | UNCERTAIN
+  coordinationDecision String? // ALLOW | WAIT | REJECT
+  lastAnalysisId       String?
+  lastAnalysisAt       Int?
+  lastReason           String? // 最近一次筛选/协同/拒绝原因（页面展示）
+  pendingOrderId       String?
+  filterCount          Int      @default(0) // 本轮扫描被过滤次数
+  createdAt            DateTime @default(now())
+  updatedAt            DateTime @updatedAt
+
+  @@index([status])
+}
+
+// AI 分析记录（id = {symbol}:{barTime5m}:{promptVersion} 幂等；全字段留档可追溯）
+model PaAnalysis {
+  id                   String   @id
+  symbol               String
+  direction            String // UTE 方向快照 LONG/SHORT
+  barTime5m            Int
+  barTime15m           Int
+  promptVersion        String
+  uteSnapshotJson      String   @default("{}")
+  diagnosisJson        String   @default("{}")
+  htfJson              String   @default("{}")
+  coordinationState    String   @default("UNCERTAIN")
+  coordinationDecision String   @default("WAIT")
+  coordinationJson     String   @default("{}")
+  rawPlanJson          String?
+  planJson             String? // validator 通过后的计划
+  validatorJson        String?
+  status               String // OK | AI_FAILED | STALE | INVALID_PLAN
+  error                String?
+  aiLatencyMs          Int      @default(0)
+  createdAt            DateTime @default(now())
+
+  @@index([symbol, createdAt(sort: Desc)])
+  @@index([status])
+}
+
+// 待入场单（id = {symbol}:{direction}:{barTime5m} 决策幂等键；数据库唯一约束兜底）
+model PaPendingOrder {
+  id              String   @id
+  symbol          String
+  direction       String // LONG | SHORT
+  kind            String // MARKET | LIMIT | STOP_MARKET
+  triggerPrice    Float
+  maxDeviationPct Float
+  stopLoss        Float
+  takeProfit1     Float
+  takeProfit2     Float
+  qty             Float
+  leverage        Int
+  margin          Float
+  status          String   @default("ACTIVE") // ACTIVE | TRIGGERED | CANCELLED | EXPIRED
+  cancelReason    String?
+  positionId      String?
+  planId          String // = PaAnalysis.id（计划可追溯）
+  analysisId      String
+  barTime5m       Int
+  createdAt       DateTime @default(now())
+  triggeredAt     DateTime?
+  updatedAt       DateTime @updatedAt
+
+  @@index([status])
+  @@index([symbol])
+}
+
+// PA 持仓元数据（positionId = PaperPosition.id；TP1/TP2/保本/退出原因状态机）
+model PaPositionMeta {
+  positionId    String   @id
+  symbol        String
+  side          String // LONG | SHORT
+  status        String   @default("OPEN") // OPEN | TP1_PARTIAL | CLOSED | CANCELLED
+  planId        String
+  analysisId    String
+  trendCycleId  String
+  stopLoss      Float
+  takeProfit1   Float
+  takeProfit2   Float
+  initialQty    Float
+  remainingQty  Float
+  tp1Done       Int      @default(0)
+  tp2Done       Int      @default(0)
+  breakevenMoved Int     @default(0)
+  realizedPnl   Float    @default(0)
+  exitReason    String?
+  openedAt      DateTime @default(now())
+  closedAt      DateTime?
+  updatedAt     DateTime @updatedAt
+
+  @@index([status])
+  @@index([symbol])
+}
